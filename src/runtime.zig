@@ -617,8 +617,16 @@ pub const State = struct {
     }
 
     pub fn execute(self: *State, proto: *const proto_mod.Proto) !void {
-        const root = try self.newRootClosure(proto);
-        var thread = try Thread.initRoot(self.allocator, root);
+        try self.executeClosure(try self.newRootClosure(proto));
+    }
+
+    pub fn executeSourceChunk(self: *State, source: []const u8) !void {
+        const loaded = try self.loadSourceAsClosure(source);
+        try self.executeClosure(loaded.closure);
+    }
+
+    fn executeClosure(self: *State, closure: *Closure) !void {
+        var thread = try Thread.initRoot(self.allocator, closure);
         defer thread.deinit(self.allocator);
         const previous_thread = self.current_thread;
         self.current_thread = &thread;

@@ -48,9 +48,18 @@ pub fn build(b: *std.Build) void {
     diff_cmd.addArtifactArg(clua_exe);
     diff_step.dependOn(&diff_cmd.step);
 
+    const official_step = b.step("test-official", "Run official Lua 5.5 suite dashboard");
+    const official_cmd = b.addRunArtifact(exe);
+    official_cmd.step.dependOn(b.getInstallStep());
+    official_cmd.addArg("test-official");
+    official_cmd.addArg("--clua");
+    official_cmd.addArtifactArg(clua_exe);
+    official_step.dependOn(&official_cmd.step);
+
     const ci_step = b.step("ci", "Run CI checks");
     ci_step.dependOn(test_step);
     ci_step.dependOn(diff_step);
+    ci_step.dependOn(official_step);
 }
 
 fn addVendoredClua(

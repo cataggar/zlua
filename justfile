@@ -64,6 +64,22 @@ diff-file file *args:
 diff-ci:
     {{zig}} build test-diff
 
+# Run the official Lua 5.5 suite dashboard exactly as CI does.
+official-ci:
+    {{zig}} build test-official
+
+# Run the official Lua 5.5 suite dashboard.
+official *args:
+    {{zig}} build run -- test-official --clua {{clua}} {{args}}
+
+# Run the official basic suite dashboard.
+official-basic *args:
+    just official --mode=basic {{args}}
+
+# Run the official complete suite dashboard.
+official-complete *args:
+    just official --mode=complete {{args}}
+
 # Remove build outputs and Zig cache directories.
 clean:
     rm -rf zig-out .zig-cache

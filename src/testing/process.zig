@@ -28,6 +28,7 @@ pub const RunOptions = struct {
     cwd: ?[]const u8 = null,
     timeout_ms: u64 = 5000,
     max_output_bytes: usize = 1024 * 1024,
+    expand_arg0: bool = false,
 };
 
 pub fn runProcess(
@@ -46,6 +47,7 @@ pub fn runProcess(
         .cwd = if (options.cwd) |cwd| .{ .path = cwd } else .inherit,
         .stdout_limit = .limited(options.max_output_bytes),
         .stderr_limit = .limited(options.max_output_bytes),
+        .expand_arg0 = if (options.expand_arg0) .expand else .no_expand,
         .timeout = timeout,
     }) catch |err| switch (err) {
         error.Timeout => return .{
