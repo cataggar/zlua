@@ -7,6 +7,7 @@ const proto_mod = @import("proto.zig");
 pub const CompileError = error{
     CompileError,
     RegisterOverflow,
+    TooManyReturns,
 };
 
 pub fn compile(allocator: std.mem.Allocator, tree: *const ast.Ast) !proto_mod.Proto {
@@ -86,9 +87,11 @@ const FunctionCompiler = struct {
 
     fn compileChunk(self: *FunctionCompiler, block: ast.Block) !void {
         defer self.deinit();
+        self.proto.is_vararg = true;
         try self.enterScope();
         const env = try self.declareLocal("_ENV");
-        _ = try self.emit(.{ .get_global = .{ .register = env, .name = try self.nameConstant("_G") } });
+        const env_upvalue = try self.proto.addUpvalue(.{ .name = "_ENV", .in_stack = false, .index = 0 });
+        _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = env_upvalue } });
         try self.compileBlock(block);
         if (!blockEndsWithReturn(block)) {
             _ = try self.emit(.{ .ret = .{ .first = 0, .count = 0 } });
@@ -405,6 +408,7 @@ const FunctionCompiler = struct {
             return;
         }
         const count = try self.compileExprListMultret(stmt.values, first);
+        if (count != bytecode.multret_count and count > 254) return error.TooManyReturns;
         _ = try self.emit(.{ .ret = .{ .first = first, .count = count } });
         self.release(first);
     }
@@ -687,7 +691,10 @@ const FunctionCompiler = struct {
 
     fn prepareAssignmentTarget(self: *FunctionCompiler, target: *const ast.Expr) anyerror!PreparedTarget {
         return switch (target.*) {
-            .identifier => .{ .expr = target },
+            .identifier => |identifier| blk: {
+                if (self.lookupLocal(identifier.name) == null) _ = try self.lookupUpvalue(identifier.name);
+                break :blk .{ .expr = target };
+            },
             .field => |field| blk: {
                 const table = try self.allocReg();
                 try self.compileExpr(field.receiver, table);

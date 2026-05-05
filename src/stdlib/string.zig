@@ -32,9 +32,35 @@ pub fn char(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn dump(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    _ = thread;
-    _ = op;
-    return state.fail("unable to dump given function");
+    const target = runtime.argValue(state, thread, op, 0);
+    if (target != .closure) return state.fail("unable to dump given function");
+
+    var debug_payload = std.ArrayList(u8).empty;
+    defer debug_payload.deinit(state.allocator);
+    try appendProtoDebugStrings(state.allocator, &debug_payload, target.closure.proto);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(state.allocator);
+    try runtime.appendBinaryChunkHeader(state.allocator, &out);
+    try out.appendSlice(state.allocator, runtime.binary_chunk_payload_magic);
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], @intFromPtr(target.closure.proto), .little);
+    try out.appendSlice(state.allocator, bytes[0..8]);
+    std.mem.writeInt(u32, bytes[0..4], @intCast(debug_payload.items.len), .little);
+    try out.appendSlice(state.allocator, bytes[0..4]);
+    try out.appendSlice(state.allocator, debug_payload.items);
+
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
+}
+
+fn appendProtoDebugStrings(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const compile.proto.Proto) !void {
+    for (proto.constants.items) |constant| {
+        if (constant == .string) {
+            try out.appendSlice(allocator, constant.string);
+            try out.appendSlice(allocator, constant.string);
+        }
+    }
+    for (proto.children.items) |child| try appendProtoDebugStrings(allocator, out, child);
 }
 
 pub fn find(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -105,7 +131,7 @@ pub fn gmatchNext(state: *State, state_value: Value) ![2]Value {
 pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
     const pattern = try state.expectString(runtime.argValue(state, thread, op, 1));
-    const replacement = try state.expectString(runtime.argValue(state, thread, op, 2));
+    const replacement = runtime.argValue(state, thread, op, 2);
     const max_count = if (op.arg_count >= 4) runtime.toInteger(runtime.argValue(state, thread, op, 3)) orelse std.math.maxInt(i64) else std.math.maxInt(i64);
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
@@ -114,12 +140,30 @@ pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     while (pos <= source.len and count < max_count) {
         const found = simplePatternFind(source, pattern, pos) orelse break;
         try out.appendSlice(state.allocator, source[pos..found.start]);
-        try out.appendSlice(state.allocator, replacement);
+        try out.appendSlice(state.allocator, try gsubReplacement(state, replacement, source[found.start..found.end]));
         pos = if (found.end > found.start) found.end else found.end + 1;
         count += 1;
     }
     try out.appendSlice(state.allocator, source[@min(pos, source.len)..]);
     try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(out.items) }, .{ .integer = count } });
+}
+
+fn gsubReplacement(state: *State, replacement: Value, matched: []const u8) ![]const u8 {
+    return switch (replacement) {
+        .string => |bytes| bytes,
+        .table => |table| switch (table.get(.{ .string = matched })) {
+            .nil => matched,
+            .boolean => |value| if (value) "true" else matched,
+            .string => |bytes| bytes,
+            else => |value| blk: {
+                var out = std.ArrayList(u8).empty;
+                defer out.deinit(state.allocator);
+                try runtime.appendValue(state.allocator, &out, value);
+                break :blk try state.intern(out.items);
+            },
+        },
+        else => return state.fail("string or table expected"),
+    };
 }
 
 pub fn len(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -158,6 +202,14 @@ pub fn pack(state: *State, thread: *Thread, op: bytecode.Call) !void {
             continue;
         }
         const size = packCodeSize(code, pack_format, &index) orelse return state.fail("invalid format option");
+        if (code == 'c') {
+            const value = try state.expectString(runtime.argValue(state, thread, op, arg));
+            arg += 1;
+            if (value.len > size) return state.fail("string longer than given size");
+            try out.appendSlice(state.allocator, value);
+            try out.appendNTimes(state.allocator, 0, size - value.len);
+            continue;
+        }
         const value = runtime.argValue(state, thread, op, arg);
         arg += 1;
         try appendPackedValue(state.allocator, &out, value, code, size, endian);
@@ -230,7 +282,11 @@ pub fn unpack(state: *State, thread: *Thread, op: bytecode.Call) !void {
         }
         const size = packCodeSize(code, pack_format, &index) orelse return state.fail("invalid format option");
         if (pos + size > data.len) return state.fail("data string too short");
-        try values.append(state.allocator, unpackValue(data[pos .. pos + size], code, endian));
+        if (code == 'c') {
+            try values.append(state.allocator, .{ .string = try state.intern(data[pos .. pos + size]) });
+        } else {
+            try values.append(state.allocator, unpackValue(data[pos .. pos + size], code, endian));
+        }
         pos += size;
     }
     try values.append(state.allocator, .{ .integer = @intCast(pos + 1) });
@@ -459,6 +515,7 @@ fn packCodeSize(code: u8, pack_format: []const u8, index: *usize) ?usize {
         'l', 'L', 'j', 'J', 'T', 'n', 'd' => 8,
         'f' => 4,
         'i', 'I' => parsePackSize(pack_format, index),
+        'c' => parseFixedStringSize(pack_format, index),
         else => null,
     };
 }
@@ -472,6 +529,17 @@ fn parsePackSize(pack_format: []const u8, index: *usize) ?usize {
     if (size == 0) size = @sizeOf(isize);
     if (size != 1 and size != 2 and size != 4 and size != 8) return null;
     return size;
+}
+
+fn parseFixedStringSize(pack_format: []const u8, index: *usize) ?usize {
+    var size: usize = 0;
+    var saw_digit = false;
+    while (index.* + 1 < pack_format.len and std.ascii.isDigit(pack_format[index.* + 1])) {
+        index.* += 1;
+        saw_digit = true;
+        size = size * 10 + pack_format[index.*] - '0';
+    }
+    return if (saw_digit) size else null;
 }
 
 fn appendPackedValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value, code: u8, size: usize, endian: Endian) !void {

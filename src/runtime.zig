@@ -16,6 +16,8 @@ pub const RuntimeError = error{
 const max_stack_values: usize = 8192;
 const max_call_frames: usize = 256;
 const max_metamethod_depth: usize = 15;
+pub const binary_chunk_signature = "\x1bLua";
+pub const binary_chunk_payload_magic = "zlua\x00dump";
 
 pub const Value = union(enum) {
     nil,
@@ -62,6 +64,43 @@ pub const ProtectedCallResult = union(enum) {
     success: []Value,
     failure: Value,
 };
+
+pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+    try out.appendSlice(allocator, binary_chunk_signature);
+    try out.append(allocator, 0x55);
+    try out.append(allocator, 0);
+    try out.appendSlice(allocator, "\x19\x93\r\n\x1a\n");
+    try out.append(allocator, @sizeOf(isize));
+    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(isize));
+    try out.append(allocator, 4);
+    try appendHeaderInt(allocator, out, 0x12345678, 4);
+    try out.append(allocator, @sizeOf(i64));
+    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(i64));
+    try out.append(allocator, @sizeOf(f64));
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], @bitCast(@as(f64, -370.5)), nativeEndian());
+    try out.appendSlice(allocator, bytes[0..8]);
+}
+
+fn appendHeaderInt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64, size: usize) !void {
+    var bytes: [8]u8 = undefined;
+    const unsigned: u64 = @bitCast(value);
+    switch (size) {
+        1 => bytes[0] = @truncate(unsigned),
+        2 => std.mem.writeInt(u16, bytes[0..2], @truncate(unsigned), nativeEndian()),
+        4 => std.mem.writeInt(u32, bytes[0..4], @truncate(unsigned), nativeEndian()),
+        8 => std.mem.writeInt(u64, bytes[0..8], unsigned, nativeEndian()),
+        else => unreachable,
+    }
+    try out.appendSlice(allocator, bytes[0..size]);
+}
+
+fn nativeEndian() std.builtin.Endian {
+    return switch (@import("builtin").target.cpu.arch.endian()) {
+        .little => .little,
+        .big => .big,
+    };
+}
 
 const CoroutineResumeResult = union(enum) {
     success: []Value,
@@ -876,18 +915,49 @@ pub const State = struct {
     }
 
     pub fn loadSourceAsClosureNamed(self: *State, source: []const u8, source_name: ?[]const u8) !Value {
+        return self.loadSourceAsClosureNamedEnv(source, source_name, self.defaultEnvironment());
+    }
+
+    pub fn loadSourceAsClosureNamedEnv(self: *State, source: []const u8, source_name: ?[]const u8, environment: Value) !Value {
         var tree = frontend.parse(self.allocator, source) catch return self.fail("cannot load source");
         defer tree.deinit();
 
         compile.resolver.resolve(self.allocator, &tree) catch return self.fail("cannot resolve source");
         const proto = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(proto);
-        proto.* = compile.compile(self.allocator, &tree) catch return self.fail("cannot compile source");
+        proto.* = compile.compile(self.allocator, &tree) catch |err| switch (err) {
+            error.TooManyReturns => return self.fail("too many returns"),
+            else => return self.fail("cannot compile source"),
+        };
         if (source_name) |name| proto.source_name = try proto.arena.allocator().dupe(u8, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);
         errdefer _ = self.proto_allocations.pop();
-        return .{ .closure = try self.newRootClosure(proto) };
+        return .{ .closure = try self.newRootClosureWithEnv(proto, environment) };
+    }
+
+    pub fn loadBinaryDump(self: *State, source: []const u8, environment: Value) !Value {
+        var header = std.ArrayList(u8).empty;
+        defer header.deinit(self.allocator);
+        try appendBinaryChunkHeader(self.allocator, &header);
+
+        if (source.len < header.items.len) return self.fail("truncated binary chunk");
+        if (!std.mem.eql(u8, source[0..header.items.len], header.items)) return self.fail("bad binary chunk");
+
+        var pos = header.items.len;
+        const payload_len = binary_chunk_payload_magic.len + @sizeOf(u64) + @sizeOf(u32);
+        if (source.len < pos + payload_len) return self.fail("truncated binary chunk");
+        if (!std.mem.eql(u8, source[pos .. pos + binary_chunk_payload_magic.len], binary_chunk_payload_magic)) return self.fail("bad binary chunk");
+        pos += binary_chunk_payload_magic.len;
+
+        const proto_addr = std.mem.readInt(u64, source[pos..][0..@sizeOf(u64)], .little);
+        pos += @sizeOf(u64);
+        const debug_len = std.mem.readInt(u32, source[pos..][0..@sizeOf(u32)], .little);
+        pos += @sizeOf(u32);
+        if (source.len < pos + debug_len) return self.fail("truncated binary chunk");
+
+        const proto: *const proto_mod.Proto = @ptrFromInt(@as(usize, @intCast(proto_addr)));
+        return self.newDumpedClosure(proto, environment);
     }
 
     pub fn loadFileAsClosure(self: *State, path: []const u8) !Value {
@@ -1064,11 +1134,66 @@ pub const State = struct {
     }
 
     fn newRootClosure(self: *State, proto: *const proto_mod.Proto) !*Closure {
+        return self.newRootClosureWithEnv(proto, self.defaultEnvironment());
+    }
+
+    fn newRootClosureWithEnv(self: *State, proto: *const proto_mod.Proto, environment: Value) !*Closure {
+        var upvalues: []*Upvalue = if (proto.upvalues.items.len == 0)
+            &.{}
+        else
+            try self.allocator.alloc(*Upvalue, proto.upvalues.items.len);
+        errdefer if (upvalues.len != 0) self.allocator.free(upvalues);
+
+        for (proto.upvalues.items, 0..) |desc, index| {
+            const upvalue = try self.allocator.create(Upvalue);
+            errdefer self.allocator.destroy(upvalue);
+            upvalue.* = .{
+                .owner = undefined,
+                .stack_index = 0,
+                .closed = if (std.mem.eql(u8, desc.name, "_ENV")) environment else .nil,
+                .is_open = false,
+            };
+            try self.upvalue_allocations.append(self.allocator, upvalue);
+            upvalues[index] = upvalue;
+        }
+
         const closure = try self.allocator.create(Closure);
         errdefer self.allocator.destroy(closure);
-        closure.* = .{ .proto = proto, .upvalues = &.{} };
+        closure.* = .{ .proto = proto, .upvalues = upvalues };
         try self.closure_allocations.append(self.allocator, closure);
         return closure;
+    }
+
+    fn defaultEnvironment(self: *State) Value {
+        return if (self.global_table) |table| .{ .table = table } else self.getGlobalValue("_G");
+    }
+
+    fn newDumpedClosure(self: *State, proto: *const proto_mod.Proto, environment: Value) !Value {
+        var upvalues: []*Upvalue = if (proto.upvalues.items.len == 0)
+            &.{}
+        else
+            try self.allocator.alloc(*Upvalue, proto.upvalues.items.len);
+        errdefer if (upvalues.len != 0) self.allocator.free(upvalues);
+
+        const owner = self.current_thread orelse return self.fail("cannot load binary chunk outside a thread");
+        for (proto.upvalues.items, 0..) |desc, index| {
+            const upvalue = try self.allocator.create(Upvalue);
+            errdefer self.allocator.destroy(upvalue);
+            upvalue.* = .{
+                .owner = owner,
+                .stack_index = 0,
+                .closed = if (std.mem.eql(u8, desc.name, "_ENV")) environment else .nil,
+                .is_open = false,
+            };
+            try self.upvalue_allocations.append(self.allocator, upvalue);
+            upvalues[index] = upvalue;
+        }
+
+        const closure = try self.allocator.create(Closure);
+        closure.* = .{ .proto = proto, .upvalues = upvalues };
+        errdefer self.destroyClosure(closure);
+        try self.closure_allocations.append(self.allocator, closure);
+        return .{ .closure = closure };
     }
 
     fn newClosure(self: *State, thread: *Thread, proto: *const proto_mod.Proto) !Value {
@@ -3642,15 +3767,16 @@ test "collectgarbage runs table finalizers before sweeping" {
     try std.testing.expect(std.mem.eql(u8, result.stdout, "gc-final\tdead\ndone\n"));
 }
 
-test "string.dump is explicitly unsupported" {
+test "string.dump reloads Lua closures" {
     var result = try executeSource(std.testing.allocator,
-        \\local ok, message = pcall(string.dump, function() end)
-        \\print(ok, message ~= nil)
+        \\local f = assert(load(string.dump(function() return 42 end)))
+        \\local ok, message = pcall(string.dump, print)
+        \\print(f(), ok, message ~= nil)
     );
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.eql(u8, result.stdout, "false\ttrue\n"));
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "42\tfalse\ttrue\n"));
 }
 
 test "official closure upvalue edge cases" {

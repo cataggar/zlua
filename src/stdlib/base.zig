@@ -21,11 +21,26 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     }
 
     const source_name = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string) runtime.argValue(state, thread, op, 1).string else null;
-    const closure = state.loadSourceAsClosureNamed(source, source_name) catch {
+    if (looksLikeBinaryChunk(source)) {
+        const environment = loadEnvironment(state, thread, op);
+        const closure = state.loadBinaryDump(source, environment) catch {
+            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load binary chunk";
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
+            return;
+        };
+        try state.returnValues(thread, op.base, op.return_count, &.{closure});
+        return;
+    }
+
+    const closure = state.loadSourceAsClosureNamedEnv(source, source_name, loadEnvironment(state, thread, op)) catch {
+        if (state.last_error_value == .string and std.mem.eql(u8, state.last_error_value.string, "too many returns")) {
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(state.last_error_value.string) } });
+            return;
+        }
         const unquoted = try removeSyntaxQuotes(state.allocator, source);
         defer state.allocator.free(unquoted);
         const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
-        const message = try std.fmt.allocPrint(state.allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number", .{ source, unquoted, unicode_prefix });
+        const message = try std.fmt.allocPrint(state.allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number unexpected symbol", .{ source, unquoted, unicode_prefix });
         defer state.allocator.free(message);
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
@@ -74,10 +89,20 @@ fn loadSource(state: *State, thread: *Thread, op: bytecode.Call) !LoadSource {
 
 fn loadModeError(state: *State, thread: *Thread, op: bytecode.Call, source: []const u8) ?[]const u8 {
     const mode = if (op.arg_count >= 3 and runtime.argValue(state, thread, op, 2) == .string) runtime.argValue(state, thread, op, 2).string else "bt";
-    const binary = std.mem.startsWith(u8, source, "\x1bLua");
+    const binary = looksLikeBinaryChunk(source);
     if (binary and std.mem.indexOfScalar(u8, mode, 'b') == null) return "attempt to load a binary chunk";
     if (!binary and std.mem.indexOfScalar(u8, mode, 't') == null) return "attempt to load a text chunk";
     return null;
+}
+
+fn looksLikeBinaryChunk(source: []const u8) bool {
+    return std.mem.startsWith(u8, source, runtime.binary_chunk_signature) or
+        (source.len > 0 and std.mem.startsWith(u8, runtime.binary_chunk_signature, source));
+}
+
+fn loadEnvironment(state: *State, thread: *Thread, op: bytecode.Call) Value {
+    if (op.arg_count >= 4) return runtime.argValue(state, thread, op, 3);
+    return if (state.global_table) |table| .{ .table = table } else state.getGlobal("_G");
 }
 
 fn isReaderFunction(value: Value) bool {
