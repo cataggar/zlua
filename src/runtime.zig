@@ -44,6 +44,7 @@ pub const Value = union(enum) {
     native_error,
     native_pcall,
     native_xpcall,
+    native_collectgarbage,
     native_debug_traceback,
     native_coroutine_create,
     native_coroutine_resume,
@@ -66,6 +67,7 @@ const CoroutineResumeResult = union(enum) {
 const Closure = struct {
     proto: *const proto_mod.Proto,
     upvalues: []const *Upvalue,
+    marked: bool = false,
 };
 
 const Upvalue = struct {
@@ -74,6 +76,7 @@ const Upvalue = struct {
     closed: Value = .nil,
     is_open: bool = true,
     next: ?*Upvalue = null,
+    marked: bool = false,
 };
 
 const TableEntry = struct {
@@ -85,6 +88,8 @@ const Table = struct {
     array: std.ArrayList(Value) = .empty,
     entries: std.ArrayList(TableEntry) = .empty,
     metatable: ?*Table = null,
+    marked: bool = false,
+    finalized: bool = false,
 
     fn init(allocator: std.mem.Allocator, array_hint: u32, hash_hint: u32) !Table {
         var table = Table{};
@@ -202,6 +207,7 @@ pub const Thread = struct {
     yield_tail_count: u16 = 0,
     native_call_depth: usize = 0,
     entry: ?*Closure = null,
+    marked: bool = false,
     started: bool = false,
     is_main: bool = false,
     status: ThreadStatus = .suspended,
@@ -224,6 +230,7 @@ pub const Thread = struct {
     }
 
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
+        for (self.frames.items) |*frame| frame.deinit(allocator);
         self.yield_values.deinit(allocator);
         self.frames.deinit(allocator);
         self.stack.deinit(allocator);
@@ -254,24 +261,56 @@ const CallFrame = struct {
     return_start: usize,
     return_count: u16,
     varargs: []const Value,
+    owns_varargs: bool = false,
+
+    fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
+        if (self.owns_varargs) allocator.free(self.varargs);
+        self.varargs = &.{};
+        self.owns_varargs = false;
+    }
+};
+
+const StringAllocation = struct {
+    bytes: []const u8,
+    marked: bool = false,
+};
+
+const RuntimeAllocationStats = struct {
+    strings: usize,
+    tables: usize,
+    closures: usize,
+    upvalues: usize,
+    threads: usize,
+
+    fn total(self: RuntimeAllocationStats) usize {
+        return self.strings + self.tables + self.closures + self.upvalues + self.threads;
+    }
+};
+
+pub const ExecuteOptions = struct {
+    collect_after_instruction: bool = false,
 };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
     globals: std.StringHashMap(Value),
     strings: std.StringHashMap([]const u8),
-    coroutine_threads: std.ArrayList(*Thread) = .empty,
+    string_allocations: std.ArrayList(StringAllocation) = .empty,
+    table_allocations: std.ArrayList(*Table) = .empty,
+    closure_allocations: std.ArrayList(*Closure) = .empty,
+    upvalue_allocations: std.ArrayList(*Upvalue) = .empty,
+    thread_allocations: std.ArrayList(*Thread) = .empty,
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
     current_thread: ?*Thread = null,
+    is_collecting: bool = false,
+    collect_after_instruction: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var state = State{
             .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
             .globals = std.StringHashMap(Value).init(allocator),
             .strings = std.StringHashMap([]const u8).init(allocator),
         };
@@ -292,6 +331,7 @@ pub const State = struct {
         try state.globals.put(try state.intern("error"), .native_error);
         try state.globals.put(try state.intern("pcall"), .native_pcall);
         try state.globals.put(try state.intern("xpcall"), .native_xpcall);
+        try state.globals.put(try state.intern("collectgarbage"), .native_collectgarbage);
 
         const table_lib = try state.newTableWithHints(0, 1);
         try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
@@ -313,13 +353,20 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
-        for (self.coroutine_threads.items) |thread| thread.deinit(self.allocator);
-        self.coroutine_threads.deinit(self.allocator);
         self.stdout.deinit(self.allocator);
         self.stderr.deinit(self.allocator);
-        self.strings.deinit();
         self.globals.deinit();
-        self.arena.deinit();
+        self.strings.deinit();
+        for (self.thread_allocations.items) |thread| self.destroyThread(thread);
+        for (self.closure_allocations.items) |closure| self.destroyClosure(closure);
+        for (self.upvalue_allocations.items) |upvalue| self.allocator.destroy(upvalue);
+        for (self.table_allocations.items) |table| self.destroyTable(table);
+        for (self.string_allocations.items) |allocation| self.allocator.free(allocation.bytes);
+        self.thread_allocations.deinit(self.allocator);
+        self.upvalue_allocations.deinit(self.allocator);
+        self.closure_allocations.deinit(self.allocator);
+        self.table_allocations.deinit(self.allocator);
+        self.string_allocations.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -404,6 +451,8 @@ pub const State = struct {
                 .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, .nil),
                 .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
+
+            if (self.collect_after_instruction) try self.collectGarbageWithFinalizers(thread);
         }
     }
 
@@ -434,7 +483,10 @@ pub const State = struct {
 
     fn intern(self: *State, bytes: []const u8) ![]const u8 {
         if (self.strings.get(bytes)) |interned| return interned;
-        const interned = try self.arena.allocator().dupe(u8, bytes);
+        const interned = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(interned);
+        try self.string_allocations.append(self.allocator, .{ .bytes = interned });
+        errdefer _ = self.string_allocations.pop();
         try self.strings.put(interned, interned);
         return interned;
     }
@@ -529,20 +581,26 @@ pub const State = struct {
     }
 
     fn newTableWithHints(self: *State, array_hint: u32, hash_hint: u32) !Value {
-        const table = try self.arena.allocator().create(Table);
-        table.* = try Table.init(self.arena.allocator(), array_hint, hash_hint);
+        const table = try self.allocator.create(Table);
+        errdefer self.allocator.destroy(table);
+        table.* = try Table.init(self.allocator, array_hint, hash_hint);
+        errdefer table.deinit(self.allocator);
+        try self.table_allocations.append(self.allocator, table);
         return .{ .table = table };
     }
 
     fn newRootClosure(self: *State, proto: *const proto_mod.Proto) !*Closure {
-        const closure = try self.arena.allocator().create(Closure);
+        const closure = try self.allocator.create(Closure);
+        errdefer self.allocator.destroy(closure);
         closure.* = .{ .proto = proto, .upvalues = &.{} };
+        try self.closure_allocations.append(self.allocator, closure);
         return closure;
     }
 
     fn newClosure(self: *State, thread: *Thread, proto: *const proto_mod.Proto) !Value {
         const parent = thread.frames.items[thread.frames.items.len - 1];
-        const upvalues = try self.arena.allocator().alloc(*Upvalue, proto.upvalues.items.len);
+        const upvalues = try self.allocator.alloc(*Upvalue, proto.upvalues.items.len);
+        errdefer self.allocator.free(upvalues);
         for (proto.upvalues.items, 0..) |desc, index| {
             upvalues[index] = if (desc.in_stack)
                 try self.captureUpvalue(thread, parent.base + desc.index)
@@ -550,8 +608,10 @@ pub const State = struct {
                 parent.closure.upvalues[desc.index];
         }
 
-        const closure = try self.arena.allocator().create(Closure);
+        const closure = try self.allocator.create(Closure);
         closure.* = .{ .proto = proto, .upvalues = upvalues };
+        errdefer self.destroyClosure(closure);
+        try self.closure_allocations.append(self.allocator, closure);
         return .{ .closure = closure };
     }
 
@@ -561,8 +621,10 @@ pub const State = struct {
             if (upvalue.is_open and upvalue.stack_index == stack_index) return upvalue;
         }
 
-        const upvalue = try self.arena.allocator().create(Upvalue);
+        const upvalue = try self.allocator.create(Upvalue);
+        errdefer self.allocator.destroy(upvalue);
         upvalue.* = .{ .owner = thread, .stack_index = stack_index, .next = thread.open_upvalues };
+        try self.upvalue_allocations.append(self.allocator, upvalue);
         thread.open_upvalues = upvalue;
         return upvalue;
     }
@@ -695,6 +757,7 @@ pub const State = struct {
             };
             const frame = thread.frames.items[thread.frames.items.len - 1];
             self.closeUpvalues(thread, frame.base);
+            thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
             thread.frames.items.len -= 1;
         }
         if (close_failed) return self.throwValue(pending_error);
@@ -704,6 +767,7 @@ pub const State = struct {
         while (thread.frames.items.len > frame_count) {
             const frame = thread.frames.items[thread.frames.items.len - 1];
             self.closeUpvalues(thread, frame.base);
+            thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
             thread.frames.items.len -= 1;
         }
     }
@@ -759,14 +823,14 @@ pub const State = struct {
         if (table_value == .table) {
             const table = table_value.table;
             if (table.get(key) != .nil) {
-                try table.set(self.arena.allocator(), key, value);
+                try table.set(self.allocator, key, value);
                 return;
             }
         }
 
         const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
             if (table_value == .table) {
-                try table_value.table.set(self.arena.allocator(), key, value);
+                try table_value.table.set(self.allocator, key, value);
                 return;
             }
             return self.fail("attempt to index a non-table value");
@@ -893,6 +957,7 @@ pub const State = struct {
             .native_error => try self.errorValue(thread, resolved),
             .native_pcall => try self.pcallValues(thread, resolved),
             .native_xpcall => try self.xpcallValues(thread, resolved),
+            .native_collectgarbage => try self.collectGarbageValue(thread, resolved),
             .native_debug_traceback => try self.tracebackValue(thread, resolved),
             .native_coroutine_create => try self.coroutineCreate(thread, resolved),
             .native_coroutine_resume => try self.coroutineResume(thread, resolved),
@@ -1103,17 +1168,9 @@ pub const State = struct {
 
         const caller = thread.frames.items[thread.frames.items.len - 1];
         const base = caller.base + op.base;
-        const frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
-
-        try thread.frames.append(self.allocator, .{
-            .closure = frame.closure,
-            .proto = frame.proto,
-            .base = frame.base,
-            .pc = frame.pc,
-            .return_start = frame.return_start,
-            .return_count = frame.return_count,
-            .varargs = frame.varargs,
-        });
+        var frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
+        errdefer frame.deinit(self.allocator);
+        try thread.frames.append(self.allocator, frame);
     }
 
     fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) anyerror!void {
@@ -1125,6 +1182,7 @@ pub const State = struct {
                 const frame = thread.frames.items[thread.frames.items.len - 1];
                 self.closeUpvalues(thread, frame.base);
                 const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
+                thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
                 thread.frames.items[thread.frames.items.len - 1] = new_frame;
             },
             else => {
@@ -1154,12 +1212,14 @@ pub const State = struct {
         if (thread.frames.items.len == 1) {
             thread.last_result_base = source_start;
             thread.last_result_count = source_count;
+            thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
             thread.frames.items.len = 0;
             return;
         }
 
         const return_start = frame.return_start;
         const return_count = try self.resolveReturnCount(frame.return_count, source_count);
+        thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
         thread.frames.items.len -= 1;
 
         try thread.ensureStack(self.allocator, return_start + return_count);
@@ -1187,6 +1247,7 @@ pub const State = struct {
         const param_count = @as(usize, closure.proto.param_count);
         const copied = @min(arg_count, param_count);
         const varargs = try self.captureVarargs(thread, source_base + 1 + param_count, if (closure.proto.is_vararg and arg_count > param_count) arg_count - param_count else 0);
+        errdefer if (varargs.len != 0) self.allocator.free(varargs);
         try thread.ensureStack(self.allocator, frame_base + register_count);
 
         for (0..copied) |index| thread.stack.items[frame_base + index] = thread.stack.items[source_base + 1 + index];
@@ -1204,12 +1265,13 @@ pub const State = struct {
             .return_start = return_start,
             .return_count = return_count,
             .varargs = varargs,
+            .owns_varargs = varargs.len != 0,
         };
     }
 
     fn captureVarargs(self: *State, thread: *Thread, source_start: usize, count: usize) ![]const Value {
         if (count == 0) return &.{};
-        const values = try self.arena.allocator().alloc(Value, count);
+        const values = try self.allocator.alloc(Value, count);
         for (0..count) |index| values[index] = thread.stack.items[source_start + index];
         return values;
     }
@@ -1217,9 +1279,9 @@ pub const State = struct {
     fn namedVarargTable(self: *State, varargs: []const Value) !Value {
         const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
         const table = table_value.table;
-        try table.set(self.arena.allocator(), .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
+        try table.set(self.allocator, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
         for (varargs, 0..) |value, index| {
-            try table.set(self.arena.allocator(), .{ .integer = @intCast(index + 1) }, value);
+            try table.set(self.allocator, .{ .integer = @intCast(index + 1) }, value);
         }
         return table_value;
     }
@@ -1438,10 +1500,11 @@ pub const State = struct {
     }
 
     fn newCoroutineThread(self: *State, closure: *Closure) !*Thread {
-        const thread = try self.arena.allocator().create(Thread);
+        const thread = try self.allocator.create(Thread);
+        errdefer self.allocator.destroy(thread);
         thread.* = Thread.initCoroutine(closure);
         errdefer thread.deinit(self.allocator);
-        try self.coroutine_threads.append(self.allocator, thread);
+        try self.thread_allocations.append(self.allocator, thread);
         return thread;
     }
 
@@ -1495,7 +1558,8 @@ pub const State = struct {
         try target.ensureStack(self.allocator, 1 + args.len);
         target.stack.items[0] = .{ .closure = closure };
         for (args, 0..) |arg, index| target.stack.items[1 + index] = arg;
-        const frame = try self.prepareClosureFrame(target, closure, 0, 0, args.len, 0, bytecode.multret_count);
+        var frame = try self.prepareClosureFrame(target, closure, 0, 0, args.len, 0, bytecode.multret_count);
+        errdefer frame.deinit(self.allocator);
         try target.frames.append(self.allocator, frame);
         target.started = true;
     }
@@ -1570,7 +1634,7 @@ pub const State = struct {
 
     fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
         const table = try self.expectTable(table_value);
-        try table.set(self.arena.allocator(), try self.writableTableKey(key_value), value);
+        try table.set(self.allocator, try self.writableTableKey(key_value), value);
     }
 
     fn nextValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
@@ -1626,6 +1690,282 @@ pub const State = struct {
         return std.math.cast(u32, integer) orelse self.fail("size too large");
     }
 
+    fn collectGarbageValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const option = argValue(self, thread, op, 0);
+        if (option == .nil or (option == .string and std.mem.eql(u8, option.string, "collect"))) {
+            try self.collectGarbageWithFinalizers(thread);
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "step")) {
+            try self.collectGarbageWithFinalizers(thread);
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "count")) {
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .number = @as(f64, @floatFromInt(self.allocationStats().total())) / 1024.0 }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "isrunning")) {
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            return;
+        }
+        if (option == .string and (std.mem.eql(u8, option.string, "stop") or std.mem.eql(u8, option.string, "restart"))) {
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
+            return;
+        }
+        return self.fail("bad argument #1 to 'collectgarbage'");
+    }
+
+    pub fn collectGarbage(self: *State) !void {
+        try self.collectGarbageWithFinalizers(self.current_thread);
+    }
+
+    fn collectGarbageWithFinalizers(self: *State, thread: ?*Thread) !void {
+        if (self.is_collecting) return;
+        self.is_collecting = true;
+        defer self.is_collecting = false;
+
+        self.resetMarks();
+        self.markRoots();
+        try self.runPendingFinalizers(thread);
+        self.sweepThreads();
+        self.sweepClosures();
+        self.sweepUpvalues();
+        self.sweepTables();
+    }
+
+    fn resetMarks(self: *State) void {
+        for (self.string_allocations.items) |*allocation| allocation.marked = false;
+        for (self.table_allocations.items) |table| table.marked = false;
+        for (self.closure_allocations.items) |closure| closure.marked = false;
+        for (self.upvalue_allocations.items) |upvalue| upvalue.marked = false;
+        for (self.thread_allocations.items) |thread| thread.marked = false;
+        if (self.current_thread) |thread| {
+            if (!self.isTrackedThread(thread)) thread.marked = false;
+        }
+    }
+
+    fn markRoots(self: *State) void {
+        var globals = self.globals.iterator();
+        while (globals.next()) |entry| {
+            self.markString(entry.key_ptr.*);
+            self.markValue(entry.value_ptr.*);
+        }
+        if (self.last_error) |message| self.markString(message);
+        self.markValue(self.last_error_value);
+        if (self.current_thread) |thread| self.markThread(thread);
+    }
+
+    fn markValue(self: *State, value: Value) void {
+        switch (value) {
+            .string => |string| self.markString(string),
+            .table => |table| if (self.isTrackedTable(table)) self.markTable(table),
+            .closure => |closure| if (self.isTrackedClosure(closure)) self.markClosure(closure),
+            .thread, .coroutine_wrapper => |thread| if (self.isTrackedThread(thread) or thread == self.current_thread) self.markThread(thread),
+            else => {},
+        }
+    }
+
+    fn markString(self: *State, bytes: []const u8) void {
+        if (self.findStringAllocation(bytes)) |index| self.string_allocations.items[index].marked = true;
+    }
+
+    fn markTable(self: *State, table: *Table) void {
+        if (table.marked) return;
+        table.marked = true;
+        if (table.metatable) |metatable| self.markTable(metatable);
+        for (table.array.items) |value| self.markValue(value);
+        for (table.entries.items) |entry| {
+            self.markValue(entry.key);
+            self.markValue(entry.value);
+        }
+    }
+
+    fn markClosure(self: *State, closure: *Closure) void {
+        if (closure.marked) return;
+        closure.marked = true;
+        for (closure.upvalues) |upvalue| self.markUpvalue(upvalue);
+    }
+
+    fn markUpvalue(self: *State, upvalue: *Upvalue) void {
+        if (upvalue.marked) return;
+        upvalue.marked = true;
+        if (upvalue.is_open) {
+            if (upvalue.stack_index < upvalue.owner.stack.items.len) self.markValue(upvalue.owner.stack.items[upvalue.stack_index]);
+            self.markThread(upvalue.owner);
+        } else {
+            self.markValue(upvalue.closed);
+        }
+    }
+
+    fn markThread(self: *State, thread: *Thread) void {
+        if (thread.marked) return;
+        thread.marked = true;
+        if (thread.entry) |entry| self.markClosure(entry);
+        self.markThreadStack(thread);
+        for (thread.yield_values.items) |value| self.markValue(value);
+        for (thread.frames.items) |frame| {
+            self.markClosure(frame.closure);
+            for (frame.varargs) |value| self.markValue(value);
+        }
+        var current = thread.open_upvalues;
+        while (current) |upvalue| : (current = upvalue.next) self.markUpvalue(upvalue);
+    }
+
+    fn markThreadStack(self: *State, thread: *Thread) void {
+        for (thread.frames.items) |frame| {
+            const register_count = @max(frame.proto.max_registers, 1);
+            self.markStackRange(thread, frame.base, register_count);
+        }
+        self.markStackRange(thread, thread.last_result_base, thread.last_result_count);
+        self.markStackRange(thread, thread.yield_result_base, thread.yield_result_count);
+    }
+
+    fn markStackRange(self: *State, thread: *Thread, base: usize, count: usize) void {
+        if (base >= thread.stack.items.len) return;
+        const end = @min(thread.stack.items.len, base + count);
+        for (thread.stack.items[base..end]) |value| self.markValue(value);
+    }
+
+    fn runPendingFinalizers(self: *State, thread: ?*Thread) !void {
+        const active_thread = thread orelse return;
+        var ran_finalizer = false;
+        for (self.table_allocations.items) |table| {
+            if (table.marked or table.finalized) continue;
+            const metatable = table.metatable orelse continue;
+            const finalizer = metatable.get(.{ .string = "__gc" });
+            if (finalizer == .nil) continue;
+            table.marked = true;
+            table.finalized = true;
+            _ = try self.callOneResult(active_thread, finalizer, &.{.{ .table = table }});
+            try self.runThreadUntil(active_thread, active_thread.frames.items.len);
+            ran_finalizer = true;
+        }
+        if (!ran_finalizer) return;
+        self.resetMarks();
+        self.markRoots();
+    }
+
+    fn sweepStrings(self: *State) void {
+        var index: usize = 0;
+        while (index < self.string_allocations.items.len) {
+            const allocation = self.string_allocations.items[index];
+            if (allocation.marked) {
+                index += 1;
+                continue;
+            }
+            _ = self.strings.remove(allocation.bytes);
+            self.allocator.free(allocation.bytes);
+            _ = self.string_allocations.swapRemove(index);
+        }
+    }
+
+    fn sweepTables(self: *State) void {
+        var index: usize = 0;
+        while (index < self.table_allocations.items.len) {
+            const table = self.table_allocations.items[index];
+            if (table.marked) {
+                index += 1;
+                continue;
+            }
+            self.destroyTable(table);
+            _ = self.table_allocations.swapRemove(index);
+        }
+    }
+
+    fn sweepClosures(self: *State) void {
+        var index: usize = 0;
+        while (index < self.closure_allocations.items.len) {
+            const closure = self.closure_allocations.items[index];
+            if (closure.marked) {
+                index += 1;
+                continue;
+            }
+            self.destroyClosure(closure);
+            _ = self.closure_allocations.swapRemove(index);
+        }
+    }
+
+    fn sweepUpvalues(self: *State) void {
+        var index: usize = 0;
+        while (index < self.upvalue_allocations.items.len) {
+            const upvalue = self.upvalue_allocations.items[index];
+            if (upvalue.marked) {
+                index += 1;
+                continue;
+            }
+            self.allocator.destroy(upvalue);
+            _ = self.upvalue_allocations.swapRemove(index);
+        }
+    }
+
+    fn sweepThreads(self: *State) void {
+        var index: usize = 0;
+        while (index < self.thread_allocations.items.len) {
+            const thread = self.thread_allocations.items[index];
+            if (thread.marked) {
+                index += 1;
+                continue;
+            }
+            self.destroyThread(thread);
+            _ = self.thread_allocations.swapRemove(index);
+        }
+    }
+
+    fn findStringAllocation(self: *State, bytes: []const u8) ?usize {
+        for (self.string_allocations.items, 0..) |allocation, index| {
+            if (std.mem.eql(u8, allocation.bytes, bytes)) return index;
+        }
+        return null;
+    }
+
+    fn isTrackedThread(self: *State, thread: *Thread) bool {
+        for (self.thread_allocations.items) |allocation| {
+            if (allocation == thread) return true;
+        }
+        return false;
+    }
+
+    fn isTrackedTable(self: *State, table: *Table) bool {
+        for (self.table_allocations.items) |allocation| {
+            if (allocation == table) return true;
+        }
+        return false;
+    }
+
+    fn isTrackedClosure(self: *State, closure: *Closure) bool {
+        for (self.closure_allocations.items) |allocation| {
+            if (allocation == closure) return true;
+        }
+        return false;
+    }
+
+    fn destroyTable(self: *State, table: *Table) void {
+        table.deinit(self.allocator);
+        self.allocator.destroy(table);
+    }
+
+    fn destroyClosure(self: *State, closure: *Closure) void {
+        if (closure.upvalues.len != 0) self.allocator.free(closure.upvalues);
+        self.allocator.destroy(closure);
+    }
+
+    fn destroyThread(self: *State, thread: *Thread) void {
+        thread.deinit(self.allocator);
+        self.allocator.destroy(thread);
+    }
+
+    fn allocationStats(self: State) RuntimeAllocationStats {
+        return .{
+            .strings = self.string_allocations.items.len,
+            .tables = self.table_allocations.items.len,
+            .closures = self.closure_allocations.items.len,
+            .upvalues = self.upvalue_allocations.items.len,
+            .threads = self.thread_allocations.items.len,
+        };
+    }
+
     fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
         if (self.last_error_value == .nil) return allocator.dupe(u8, @errorName(err));
         var out = std.ArrayList(u8).empty;
@@ -1653,6 +1993,10 @@ pub const State = struct {
 };
 
 pub fn executeSource(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
+    return executeSourceWithOptions(allocator, source, .{});
+}
+
+pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ExecuteOptions) !process.ProcessResult {
     var tree = frontend.parse(allocator, source) catch |err| {
         const message = try std.fmt.allocPrint(allocator, "zlua parser rejected source: {s}\n", .{@errorName(err)});
         defer allocator.free(message);
@@ -1675,6 +2019,7 @@ pub fn executeSource(allocator: std.mem.Allocator, source: []const u8) !process.
 
     var state = try State.init(allocator);
     defer state.deinit();
+    state.collect_after_instruction = options.collect_after_instruction;
     state.execute(&proto) catch |err| {
         const detail = if (state.last_error) |message|
             message
@@ -1850,6 +2195,7 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_error => rhs == .native_error,
         .native_pcall => rhs == .native_pcall,
         .native_xpcall => rhs == .native_xpcall,
+        .native_collectgarbage => rhs == .native_collectgarbage,
         .native_debug_traceback => rhs == .native_debug_traceback,
         .native_coroutine_create => rhs == .native_coroutine_create,
         .native_coroutine_resume => rhs == .native_coroutine_resume,
@@ -1880,6 +2226,7 @@ fn isNativeCallable(value: Value) bool {
         .native_error,
         .native_pcall,
         .native_xpcall,
+        .native_collectgarbage,
         .native_debug_traceback,
         .native_coroutine_create,
         .native_coroutine_resume,
@@ -2137,6 +2484,7 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .native_error => try out.appendSlice(allocator, "function: error"),
         .native_pcall => try out.appendSlice(allocator, "function: pcall"),
         .native_xpcall => try out.appendSlice(allocator, "function: xpcall"),
+        .native_collectgarbage => try out.appendSlice(allocator, "function: collectgarbage"),
         .native_debug_traceback => try out.appendSlice(allocator, "function: debug.traceback"),
         .native_coroutine_create => try out.appendSlice(allocator, "function: coroutine.create"),
         .native_coroutine_resume => try out.appendSlice(allocator, "function: coroutine.resume"),
@@ -2235,4 +2583,80 @@ test "reports calls to non-functions" {
 
     try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a non-function value") != null);
+}
+
+test "collects unreachable runtime allocations" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const before = state.allocationStats();
+    _ = try state.intern("transient-gc-string");
+    _ = try state.newTableWithHints(4, 4);
+
+    try state.collectGarbage();
+
+    const after = state.allocationStats();
+    try std.testing.expect(after.strings >= before.strings);
+    try std.testing.expectEqual(before.tables, after.tables);
+    try std.testing.expectEqual(before.closures, after.closures);
+    try std.testing.expectEqual(before.upvalues, after.upvalues);
+    try std.testing.expectEqual(before.threads, after.threads);
+}
+
+test "keeps global table graph alive during collection" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const root = try state.newTableWithHints(0, 1);
+    const child = try state.newTableWithHints(0, 1);
+    const key = try state.intern("child");
+    try state.setTable(child, .{ .string = try state.intern("answer") }, .{ .integer = 42 });
+    try state.setTable(root, .{ .string = key }, child);
+    try state.globals.put(try state.intern("gc_root"), root);
+
+    try state.collectGarbage();
+
+    const kept_root = state.globals.get("gc_root") orelse Value.nil;
+    try std.testing.expect(kept_root == .table);
+    const kept_child = kept_root.table.get(.{ .string = key });
+    try std.testing.expect(kept_child == .table);
+    try std.testing.expect(valuesEqual(kept_child.table.get(.{ .string = "answer" }), .{ .integer = 42 }));
+}
+
+test "GC stress preserves live locals during execution" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\local keep = { answer = 42 }
+        \\local i = 1
+        \\while i <= 50 do
+        \\  local transient = { i, { i + 1 } }
+        \\  collectgarbage("collect")
+        \\  i = i + 1
+        \\end
+        \\collectgarbage("collect")
+        \\print(keep.answer)
+    , .{ .collect_after_instruction = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "42\n"));
+}
+
+test "collectgarbage runs table finalizers before sweeping" {
+    var result = try executeSource(std.testing.allocator,
+        \\do
+        \\  local dead = setmetatable({ name = "dead" }, {
+        \\    __gc = function(self)
+        \\      print("gc-final", self.name)
+        \\    end,
+        \\  })
+        \\  dead = nil
+        \\end
+        \\collectgarbage("collect")
+        \\collectgarbage("collect")
+        \\print("done")
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "gc-final\tdead\ndone\n"));
 }

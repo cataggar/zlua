@@ -53,7 +53,7 @@ fn printUsage(io: std.Io) !void {
         \\Usage: zlua [--version] <command|script>
         \\
         \\Commands:
-        \\  test-diff [path] [--stage=name] [--feature=name] [--show-clua] [--show-zlua]
+        \\  test-diff [path] [--stage=name] [--feature=name] [--gc-stress] [--show-clua] [--show-zlua]
         \\
     , .{});
 }

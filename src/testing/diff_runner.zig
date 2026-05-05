@@ -15,6 +15,7 @@ const Options = struct {
     feature: ?[]const u8 = null,
     show_clua: bool = false,
     show_zlua: bool = false,
+    gc_stress: bool = false,
     timeout_ms: u64 = 5000,
 };
 
@@ -88,6 +89,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.show_clua = true;
         } else if (std.mem.eql(u8, arg, "--show-zlua")) {
             options.show_zlua = true;
+        } else if (std.mem.eql(u8, arg, "--gc-stress")) {
+            options.gc_stress = true;
         } else if (std.mem.eql(u8, arg, "--clua")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -173,7 +176,7 @@ fn runOne(
 
     var clua_result = try runCluaForStage(allocator, io, exe, path, meta.stage, options.timeout_ms);
     defer clua_result.deinit(allocator);
-    var zlua_result = try runZluaForStage(allocator, source, meta.stage);
+    var zlua_result = try runZluaForStage(allocator, source, meta.stage, options);
     defer zlua_result.deinit(allocator);
 
     if (clua_result.timed_out or zlua_result.timed_out) counts.timed_out += 1;
@@ -217,13 +220,14 @@ fn runZluaForStage(
     allocator: std.mem.Allocator,
     source: []const u8,
     stage: metadata.Stage,
+    options: Options,
 ) !process.ProcessResult {
     return switch (stage) {
         .lex => runZluaLexStage(allocator, source),
         .parse => runZluaParseStage(allocator, source),
         .resolve => runZluaResolveStage(allocator, source),
         .compile => runZluaCompileStage(allocator, source),
-        .runtime, .stdlib, .official => runtime.executeSource(allocator, source),
+        .runtime, .stdlib, .official => runtime.executeSourceWithOptions(allocator, source, .{ .collect_after_instruction = options.gc_stress }),
     };
 }
 
