@@ -137,38 +137,40 @@ const Parser = struct {
             return .{ .local_function_decl = .{ .name = name, .body = body } };
         }
 
+        const default_attribute = try self.parseOptionalAttribute();
         var bindings = std.ArrayList(ast.Binding).empty;
-        try bindings.append(self.allocator, try self.parseBinding());
-        while (self.match(.comma)) |_| try bindings.append(self.allocator, try self.parseBinding());
+        try bindings.append(self.allocator, try self.parseBinding(default_attribute));
+        while (self.match(.comma)) |_| try bindings.append(self.allocator, try self.parseBinding(default_attribute));
         const values = if (self.match(.equal)) |_| try self.parseExpressionList() else &.{};
         return .{ .local_decl = .{ .bindings = try bindings.toOwnedSlice(self.allocator), .values = values } };
     }
 
-    fn parseBinding(self: *Parser) anyerror!ast.Binding {
+    fn parseBinding(self: *Parser, default_attribute: ?ast.Identifier) anyerror!ast.Binding {
         const name = try self.expectIdentifier();
-        const attribute = if (self.match(.less)) |_| blk: {
-            const attr = try self.expectIdentifier();
-            _ = try self.expect(.greater);
-            break :blk attr;
-        } else null;
+        const attribute = if (try self.parseOptionalAttribute()) |attr| attr else default_attribute;
         return .{ .name = name, .attribute = attribute };
     }
 
-    fn parseGlobalDeclaration(self: *Parser) anyerror!ast.Stmt {
-        const attribute = if (self.match(.less)) |_| blk: {
+    fn parseOptionalAttribute(self: *Parser) anyerror!?ast.Identifier {
+        return if (self.match(.less)) |_| blk: {
             const attr = try self.expectIdentifier();
             _ = try self.expect(.greater);
             break :blk attr;
         } else null;
+    }
+
+    fn parseGlobalDeclaration(self: *Parser) anyerror!ast.Stmt {
+        const attribute = try self.parseOptionalAttribute();
 
         if (self.match(.star)) |_| {
-            return .{ .global_decl = .{ .attribute = attribute, .all = true, .names = &.{} } };
+            return .{ .global_decl = .{ .attribute = attribute, .all = true, .names = &.{}, .values = &.{} } };
         }
 
-        var names = std.ArrayList(ast.Identifier).empty;
-        try names.append(self.allocator, try self.expectIdentifier());
-        while (self.match(.comma)) |_| try names.append(self.allocator, try self.expectIdentifier());
-        return .{ .global_decl = .{ .attribute = attribute, .all = false, .names = try names.toOwnedSlice(self.allocator) } };
+        var names = std.ArrayList(ast.Binding).empty;
+        try names.append(self.allocator, try self.parseBinding(attribute));
+        while (self.match(.comma)) |_| try names.append(self.allocator, try self.parseBinding(attribute));
+        const values = if (self.match(.equal)) |_| try self.parseExpressionList() else &.{};
+        return .{ .global_decl = .{ .attribute = attribute, .all = false, .names = try names.toOwnedSlice(self.allocator), .values = values } };
     }
 
     fn parseReturn(self: *Parser) anyerror!ast.Stmt {
@@ -478,7 +480,7 @@ fn expectParse(source: []const u8) !ast.Ast {
 test "parses milestone statement families" {
     var tree = try expectParse(
         \\global<const> *
-        \\global x, y
+        \\global x, y<const> = 1, 2
         \\local a<const>, b<close> = 1, 2
         \\function t.u:v(a, b, ... rest)
         \\  if a then b = b + 1 elseif b then b = 2 else b = 3 end

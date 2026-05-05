@@ -1,5 +1,6 @@
 const std = @import("std");
 const clua = @import("clua.zig");
+const compile = @import("../compile.zig");
 const expected_failures = @import("expected_failures.zig");
 const frontend = @import("../frontend.zig");
 const metadata = @import("metadata.zig");
@@ -219,7 +220,7 @@ fn runZluaForStage(
     return switch (stage) {
         .lex => runZluaLexStage(allocator, source),
         .parse => runZluaParseStage(allocator, source),
-        .resolve, .compile => runZluaParseStage(allocator, source),
+        .resolve, .compile => runZluaResolveStage(allocator, source),
         .runtime, .stdlib, .official => process.ownedResult(
             allocator,
             "",
@@ -246,6 +247,22 @@ fn runZluaParseStage(allocator: std.mem.Allocator, source: []const u8) !process.
         return process.ownedResult(allocator, "", message, 1);
     };
     tree.deinit();
+    return process.ownedResult(allocator, "", "", 0);
+}
+
+fn runZluaResolveStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
+    var tree = frontend.parse(allocator, source) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+    defer tree.deinit();
+
+    compile.resolver.resolve(allocator, &tree) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
     return process.ownedResult(allocator, "", "", 0);
 }
 

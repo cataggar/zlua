@@ -56,7 +56,8 @@ pub const LocalDecl = struct {
 pub const GlobalDecl = struct {
     attribute: ?Identifier,
     all: bool,
-    names: []const Identifier,
+    names: []const Binding,
+    values: []const *Expr,
 };
 
 pub const FunctionName = struct {
