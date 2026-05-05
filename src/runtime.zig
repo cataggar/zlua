@@ -273,7 +273,10 @@ pub const State = struct {
         const root = try self.newRootClosure(proto);
         var thread = try Thread.init(self.allocator, root);
         defer thread.deinit(self.allocator);
-        try self.runThreadUntil(&thread, 0);
+        self.runThreadUntil(&thread, 0) catch |err| {
+            self.closeFramesTo(&thread, 0, self.currentErrorValue()) catch |close_err| return close_err;
+            return err;
+        };
     }
 
     fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
@@ -320,24 +323,26 @@ pub const State = struct {
                 .set_table => |op| try self.setTableFromThread(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
                 .get_field => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, 0)),
                 .set_field => |op| try self.setTableFromThread(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
-                .jmp => |offset| jump(frame, offset),
-                .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) jump(frame, op.offset),
+                .jmp => |offset| try self.jumpThread(thread, offset),
+                .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) try self.jumpThread(thread, op.offset),
                 .test_set => |op| {
                     const value = self.get(thread, op.source);
                     self.set(thread, op.dest, value);
-                    if (truthy(value) == op.jump_if_truthy) jump(frame, op.offset);
+                    if (truthy(value) == op.jump_if_truthy) try self.jumpThread(thread, op.offset);
                 },
                 .call => |op| try self.callValue(thread, op),
                 .tail_call => |op| try self.tailCallValue(thread, op),
                 .ret => |op| try self.returnFromFrame(thread, op.first, op.count),
                 .vararg => |op| try self.loadVarargs(thread, op),
-                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) jump(frame, op.offset),
+                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) try self.jumpThread(thread, op.offset),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
-                .tfor_loop => |op| jump(frame, op.offset),
+                .tfor_loop => |op| try self.jumpThread(thread, op.offset),
                 .closure => |op| self.set(thread, op.dest, try self.newClosure(thread, proto.children.items[op.proto])),
                 .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
                 .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
                 .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
+                .check_close => |register| try self.checkToBeClosedValue(self.get(thread, register)),
+                .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, .nil),
                 .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
@@ -540,6 +545,107 @@ pub const State = struct {
                 previous = upvalue;
             }
             current = next;
+        }
+    }
+
+    fn checkToBeClosedValue(self: *State, value: Value) !void {
+        if (value == .nil) return;
+        if (value == .boolean and !value.boolean) return;
+        if ((try self.getMetamethod(value, "__close")) == null) return self.fail("variable got a non-closable value");
+    }
+
+    fn closeToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register, error_value: Value) anyerror!void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const absolute_register = frame.base + register;
+        const value = thread.stack.items[absolute_register];
+        if (value == .nil) return;
+        if (value == .boolean and !value.boolean) return;
+        const metamethod = (try self.getMetamethod(value, "__close")) orelse {
+            thread.stack.items[absolute_register] = .nil;
+            return self.fail("variable got a non-closable value");
+        };
+        _ = self.callOneResult(thread, metamethod, &.{ value, error_value }) catch |err| {
+            thread.stack.items[absolute_register] = .nil;
+            return err;
+        };
+    }
+
+    fn jumpThread(self: *State, thread: *Thread, offset: bytecode.JumpOffset) !void {
+        const frame_index = thread.frames.items.len - 1;
+        const source_pc = thread.frames.items[frame_index].pc;
+        const target_pc = jumpTarget(source_pc, offset);
+        try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, .nil);
+        thread.frames.items[frame_index].pc = target_pc;
+    }
+
+    fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: Value) !void {
+        const frame = thread.frames.items[frame_index];
+        var pending_error = error_value;
+        var close_failed = false;
+
+        var index = frame.proto.locals.items.len;
+        while (index > 0) {
+            index -= 1;
+            const local = frame.proto.locals.items[index];
+            if (!local.to_close) continue;
+            if (!localActiveAt(local, source_pc) or localActiveAt(local, target_pc)) continue;
+
+            self.closeToBeClosedRegister(thread, local.register, pending_error) catch |err| {
+                self.discardFramesTo(thread, frame_index + 1);
+                pending_error = self.currentErrorValue();
+                close_failed = close_failed or isRuntimeError(err);
+                if (!isRuntimeError(err)) return err;
+            };
+        }
+
+        if (close_failed) return self.throwValue(pending_error);
+    }
+
+    fn closeActiveToBeClosedInTopFrame(self: *State, thread: *Thread, error_value: Value) !void {
+        const frame_index = thread.frames.items.len - 1;
+        const frame = thread.frames.items[frame_index];
+        const pc = frame.pc;
+        var pending_error = error_value;
+        var close_failed = false;
+
+        var index = frame.proto.locals.items.len;
+        while (index > 0) {
+            index -= 1;
+            const local = frame.proto.locals.items[index];
+            if (!local.to_close or !localActiveAt(local, pc)) continue;
+
+            self.closeToBeClosedRegister(thread, local.register, pending_error) catch |err| {
+                self.discardFramesTo(thread, frame_index + 1);
+                pending_error = self.currentErrorValue();
+                close_failed = close_failed or isRuntimeError(err);
+                if (!isRuntimeError(err)) return err;
+            };
+        }
+
+        if (close_failed) return self.throwValue(pending_error);
+    }
+
+    fn closeFramesTo(self: *State, thread: *Thread, frame_count: usize, error_value: Value) !void {
+        var pending_error = error_value;
+        var close_failed = false;
+        while (thread.frames.items.len > frame_count) {
+            self.closeActiveToBeClosedInTopFrame(thread, pending_error) catch |err| {
+                pending_error = self.currentErrorValue();
+                close_failed = close_failed or isRuntimeError(err);
+                if (!isRuntimeError(err)) return err;
+            };
+            const frame = thread.frames.items[thread.frames.items.len - 1];
+            self.closeUpvalues(thread, frame.base);
+            thread.frames.items.len -= 1;
+        }
+        if (close_failed) return self.throwValue(pending_error);
+    }
+
+    fn discardFramesTo(self: *State, thread: *Thread, frame_count: usize) void {
+        while (thread.frames.items.len > frame_count) {
+            const frame = thread.frames.items[thread.frames.items.len - 1];
+            self.closeUpvalues(thread, frame.base);
+            thread.frames.items.len -= 1;
         }
     }
 
@@ -774,23 +880,23 @@ pub const State = struct {
         self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
                 const error_value = self.currentErrorValue();
-                self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
-                return .{ .failure = error_value };
+                const failure = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, error_value);
+                return .{ .failure = failure };
             },
             else => return err,
         };
         self.runThreadUntil(thread, frame_count) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
                 const error_value = self.currentErrorValue();
-                self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
-                return .{ .failure = error_value };
+                const failure = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, error_value);
+                return .{ .failure = failure };
             },
             else => return err,
         };
 
         const values = try self.allocator.alloc(Value, thread.last_result_count);
         for (values, 0..) |*value, index| value.* = thread.stack.items[thread.last_result_base + index];
-        self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
+        _ = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, .nil);
         return .{ .success = values };
     }
 
@@ -803,17 +909,19 @@ pub const State = struct {
         last_result_count: usize,
         last_error: ?[]const u8,
         last_error_value: Value,
-    ) void {
-        while (thread.frames.items.len > frame_count) {
-            const frame = thread.frames.items[thread.frames.items.len - 1];
-            self.closeUpvalues(thread, frame.base);
-            thread.frames.items.len -= 1;
-        }
+        error_value: Value,
+    ) !Value {
+        var failure = error_value;
+        self.closeFramesTo(thread, frame_count, error_value) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => failure = self.currentErrorValue(),
+            else => return err,
+        };
         thread.stack.items.len = stack_len;
         thread.last_result_base = last_result_base;
         thread.last_result_count = last_result_count;
         self.last_error = last_error;
         self.last_error_value = last_error_value;
+        return failure;
     }
 
     fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
@@ -934,16 +1042,18 @@ pub const State = struct {
     }
 
     fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) anyerror!void {
-        const frame = thread.frames.items[thread.frames.items.len - 1];
         const callee = self.get(thread, op.base);
         const resolved = try self.resolveCall(thread, op);
         switch (callee) {
             .closure => |closure| {
+                try self.closeActiveToBeClosedInTopFrame(thread, .nil);
+                const frame = thread.frames.items[thread.frames.items.len - 1];
                 self.closeUpvalues(thread, frame.base);
                 const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
                 thread.frames.items[thread.frames.items.len - 1] = new_frame;
             },
             else => {
+                const frame = thread.frames.items[thread.frames.items.len - 1];
                 const frame_count = thread.frames.items.len;
                 try self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count });
                 try self.runThreadUntil(thread, frame_count);
@@ -956,6 +1066,7 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const source_start = frame.base + first;
         const source_count = try self.resolveResultCount(thread, source_start, count);
+        try self.closeActiveToBeClosedInTopFrame(thread, .nil);
         self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
             thread.frames.items.len = 0;
@@ -1546,12 +1657,19 @@ fn floorMod(left: i64, right: i64) i64 {
     return @mod(left, right);
 }
 
-fn jump(frame: *CallFrame, offset: bytecode.JumpOffset) void {
-    if (offset >= 0) {
-        frame.pc += @intCast(offset);
-    } else {
-        frame.pc -= @intCast(-offset);
-    }
+fn jumpTarget(pc: usize, offset: bytecode.JumpOffset) usize {
+    return if (offset >= 0) pc + @as(usize, @intCast(offset)) else pc - @as(usize, @intCast(-offset));
+}
+
+fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
+    return local.start_pc <= pc and (local.end_pc == 0 or pc <= local.end_pc);
+}
+
+fn isRuntimeError(err: anyerror) bool {
+    return switch (err) {
+        error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => true,
+        else => false,
+    };
 }
 
 fn lineForFrame(frame: CallFrame) ?usize {

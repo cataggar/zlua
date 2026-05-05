@@ -79,6 +79,8 @@ pub const Instruction = union(enum) {
 
     closure: Closure,
     close: Register,
+    check_close: Register,
+    close_tbc: Register,
 
     for_prep: ForLoop,
     for_loop: ForLoop,

@@ -23,12 +23,14 @@ const Local = struct {
     register: bytecode.Register,
     debug_index: usize,
     captured: bool = false,
+    to_close: bool = false,
 };
 
 const PendingLocal = struct {
     name: []const u8,
     register: bytecode.Register,
     debug_index: usize,
+    to_close: bool = false,
 };
 
 const Scope = struct {
@@ -175,8 +177,9 @@ const FunctionCompiler = struct {
                 .name = binding.name.name,
                 .register = register,
                 .start_pc = self.proto.pc(),
+                .to_close = isCloseAttribute(binding.attribute),
             });
-            try pending.append(self.allocator, .{ .name = binding.name.name, .register = register, .debug_index = debug_index });
+            try pending.append(self.allocator, .{ .name = binding.name.name, .register = register, .debug_index = debug_index, .to_close = isCloseAttribute(binding.attribute) });
         }
 
         if (pending.items.len > 0) try self.compileExprListAdjusted(decl.values, pending.items[0].register, @intCast(pending.items.len));
@@ -186,7 +189,12 @@ const FunctionCompiler = struct {
             .name = local.name,
             .register = local.register,
             .debug_index = local.debug_index,
+            .to_close = local.to_close,
         });
+
+        for (pending.items) |local| {
+            if (local.to_close) _ = try self.emit(.{ .check_close = local.register });
+        }
     }
 
     fn compileGlobalDecl(self: *FunctionCompiler, decl: ast.GlobalDecl) anyerror!void {
@@ -719,6 +727,12 @@ const FunctionCompiler = struct {
             has_captured = has_captured or local.captured;
             self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
         }
+        var index = self.locals.items.len;
+        while (index > scope.local_start) {
+            index -= 1;
+            const local = self.locals.items[index];
+            if (local.to_close) _ = try self.emit(.{ .close_tbc = local.register });
+        }
         if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
         self.locals.items.len = scope.local_start;
         self.next_register = scope.next_register;
@@ -834,6 +848,10 @@ fn isMultiResultExpr(expr: *const ast.Expr) bool {
         .call, .method_call, .vararg => true,
         else => false,
     };
+}
+
+fn isCloseAttribute(attribute: ?ast.Identifier) bool {
+    return if (attribute) |attr| std.mem.eql(u8, attr.name, "close") else false;
 }
 
 fn callReleaseMark(dest: bytecode.Register, count: u16) bytecode.Register {

@@ -10,6 +10,7 @@ pub const LocalDebug = struct {
     register: bytecode.Register,
     start_pc: usize,
     end_pc: usize = 0,
+    to_close: bool = false,
 };
 
 pub const UpvalueDesc = struct {
@@ -93,6 +94,7 @@ pub const Proto = struct {
             .register = local.register,
             .start_pc = local.start_pc,
             .end_pc = local.end_pc,
+            .to_close = local.to_close,
         });
         return self.locals.items.len - 1;
     }

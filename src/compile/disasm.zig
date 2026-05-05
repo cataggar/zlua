@@ -21,7 +21,7 @@ fn writeProto(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *con
     }
 
     for (proto.locals.items, 0..) |local, index| {
-        try appendFmt(allocator, out, "{s}L{d} r{d} {s} [{d},{d})\n", .{ indent(depth + 1), index, local.register, local.name, local.start_pc, local.end_pc });
+        try appendFmt(allocator, out, "{s}L{d} r{d} {s}{s} [{d},{d})\n", .{ indent(depth + 1), index, local.register, local.name, if (local.to_close) "<close>" else "", local.start_pc, local.end_pc });
     }
 
     for (proto.upvalues.items, 0..) |upvalue, index| {
@@ -95,6 +95,8 @@ fn writeInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instr
         .vararg => |op| try appendFmt(allocator, out, "VARARG r{d} count={d}", .{ op.dest, op.count }),
         .closure => |op| try appendFmt(allocator, out, "CLOSURE r{d} P{d}", .{ op.dest, op.proto }),
         .close => |register| try appendFmt(allocator, out, "CLOSE r{d}", .{register}),
+        .check_close => |register| try appendFmt(allocator, out, "CHECK_CLOSE r{d}", .{register}),
+        .close_tbc => |register| try appendFmt(allocator, out, "CLOSE_TBC r{d}", .{register}),
         .for_prep => |op| try appendFmt(allocator, out, "FOR_PREP r{d} {d}", .{ op.base, op.offset }),
         .for_loop => |op| try appendFmt(allocator, out, "FOR_LOOP r{d} {d}", .{ op.base, op.offset }),
         .tfor_prep => |op| try appendFmt(allocator, out, "TFOR_PREP r{d} vars={d} {d}", .{ op.base, op.variable_count, op.offset }),
