@@ -345,20 +345,33 @@ const FunctionCompiler = struct {
     fn compileGenericFor(self: *FunctionCompiler, stmt: ast.GenericFor) anyerror!void {
         try self.enterScope();
         const base = self.registerMark();
-        for (stmt.iterators) |iterator| {
-            const reg = try self.allocReg();
-            try self.compileExpr(iterator, reg);
+
+        if (stmt.iterators.len == 1 and isCallExpr(stmt.iterators[0])) {
+            const call_base = try self.allocReg();
+            std.debug.assert(call_base == base);
+            _ = try self.compileCallInto(stmt.iterators[0], 3, call_base);
+            try self.reserveRegistersUntil(base + 3);
+        } else {
+            for (stmt.iterators) |iterator| {
+                const reg = try self.allocReg();
+                try self.compileExpr(iterator, reg);
+            }
+            while (self.next_register < base + 3) {
+                const reg = try self.allocReg();
+                _ = try self.emit(.{ .load_nil = reg });
+            }
         }
+        self.release(base + 3);
+
         for (stmt.names) |name| _ = try self.declareLocal(name.name);
 
+        const loop_start = self.proto.pc();
         const prep = try self.emit(.{ .tfor_prep = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
-        const body_start = self.proto.pc();
         try self.enterLoop();
         try self.compileBlock(stmt.body);
-        try self.leaveLoop(self.proto.pc() + 2);
-        _ = try self.emit(.{ .tfor_call = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
+        try self.leaveLoop(self.proto.pc() + 1);
         const loop = try self.emit(.{ .tfor_loop = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
-        try self.proto.patchJump(loop, body_start);
+        try self.proto.patchJump(loop, loop_start);
         try self.proto.patchJump(prep, self.proto.pc());
         try self.leaveScope();
     }
@@ -518,6 +531,7 @@ const FunctionCompiler = struct {
                 for (call.args) |arg| {
                     const reg = try self.allocReg();
                     try self.compileExpr(arg, reg);
+                    self.release(reg + 1);
                 }
                 _ = try self.emit(.{ .call = .{ .base = dest, .arg_count = @intCast(call.args.len), .return_count = returns } });
                 return dest;
@@ -529,6 +543,7 @@ const FunctionCompiler = struct {
                 for (call.args) |arg| {
                     const reg = try self.allocReg();
                     try self.compileExpr(arg, reg);
+                    self.release(reg + 1);
                 }
                 _ = try self.emit(.{ .call = .{ .base = dest, .arg_count = @intCast(call.args.len + 1), .return_count = returns } });
                 return dest;
@@ -662,6 +677,10 @@ const FunctionCompiler = struct {
         self.next_register = mark_register;
     }
 
+    fn reserveRegistersUntil(self: *FunctionCompiler, end_register: bytecode.Register) !void {
+        while (self.next_register < end_register) _ = try self.allocReg();
+    }
+
     fn emit(self: *FunctionCompiler, instruction: bytecode.Instruction) !usize {
         return self.proto.emit(instruction, self.current_line);
     }
@@ -700,6 +719,13 @@ fn binaryInstruction(op: ast.BinaryOp, dest: bytecode.Register, left: bytecode.R
 fn blockEndsWithReturn(block: ast.Block) bool {
     if (block.len == 0) return false;
     return block[block.len - 1] == .return_stmt;
+}
+
+fn isCallExpr(expr: *const ast.Expr) bool {
+    return switch (expr.*) {
+        .call, .method_call => true,
+        else => false,
+    };
 }
 
 fn stmtLine(statement: ast.Stmt) usize {

@@ -21,6 +21,13 @@ pub const Value = union(enum) {
     table: *Table,
     native_print,
     native_tostring,
+    native_rawget,
+    native_rawset,
+    native_next,
+    native_pairs,
+    native_ipairs,
+    native_ipairs_iter,
+    native_table_create,
 };
 
 const TableEntry = struct {
@@ -29,9 +36,28 @@ const TableEntry = struct {
 };
 
 const Table = struct {
+    array: std.ArrayList(Value) = .empty,
     entries: std.ArrayList(TableEntry) = .empty,
+    metatable: ?*Table = null,
+
+    fn init(allocator: std.mem.Allocator, array_hint: u32, hash_hint: u32) !Table {
+        var table = Table{};
+        errdefer table.deinit(allocator);
+        try table.array.ensureTotalCapacity(allocator, array_hint);
+        try table.entries.ensureTotalCapacity(allocator, hash_hint);
+        return table;
+    }
+
+    fn deinit(self: *Table, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+        self.array.deinit(allocator);
+        self.* = undefined;
+    }
 
     fn get(self: Table, key: Value) Value {
+        if (arrayIndex(key)) |index| {
+            if (index <= self.array.items.len) return self.array.items[index - 1];
+        }
         for (self.entries.items) |entry| {
             if (valuesEqual(entry.key, key)) return entry.value;
         }
@@ -39,6 +65,20 @@ const Table = struct {
     }
 
     fn set(self: *Table, allocator: std.mem.Allocator, key: Value, value: Value) !void {
+        if (arrayIndex(key)) |index| {
+            if (index <= self.array.items.len) {
+                self.array.items[index - 1] = value;
+                return;
+            }
+            if (value != .nil and (index == self.array.items.len + 1 or index <= self.array.capacity)) {
+                const old_len = self.array.items.len;
+                try self.array.resize(allocator, index);
+                @memset(self.array.items[old_len..], .nil);
+                self.array.items[index - 1] = value;
+                self.removeHashKey(key);
+                return;
+            }
+        }
         for (self.entries.items, 0..) |entry, index| {
             if (valuesEqual(entry.key, key)) {
                 if (value == .nil) {
@@ -50,6 +90,55 @@ const Table = struct {
             }
         }
         if (value != .nil) try self.entries.append(allocator, .{ .key = key, .value = value });
+    }
+
+    fn len(self: Table) i64 {
+        var result = self.array.items.len;
+        while (result > 0 and self.array.items[result - 1] == .nil) result -= 1;
+        while (result < std.math.maxInt(i64)) {
+            const next_index = result + 1;
+            if (self.get(.{ .integer = @intCast(next_index) }) == .nil) break;
+            result = next_index;
+        }
+        return @intCast(result);
+    }
+
+    fn next(self: Table, key: Value) ![2]Value {
+        if (key == .nil) return self.firstEntryAfterArray(0);
+        if (arrayIndex(key)) |index| {
+            if (index <= self.array.items.len) return self.firstEntryAfterArray(index);
+        }
+        for (self.entries.items, 0..) |entry, index| {
+            if (valuesEqual(entry.key, key)) {
+                if (index + 1 < self.entries.items.len) {
+                    const next_entry = self.entries.items[index + 1];
+                    return .{ next_entry.key, next_entry.value };
+                }
+                return .{ .nil, .nil };
+            }
+        }
+        return error.RuntimeError;
+    }
+
+    fn firstEntryAfterArray(self: Table, index: usize) [2]Value {
+        var next_index = index;
+        while (next_index < self.array.items.len) {
+            next_index += 1;
+            const value = self.array.items[next_index - 1];
+            if (value != .nil) return .{ .{ .integer = @intCast(next_index) }, value };
+        }
+        if (self.entries.items.len == 0) return .{ .nil, .nil };
+        const entry = self.entries.items[0];
+        return .{ entry.key, entry.value };
+    }
+
+    fn removeHashKey(self: *Table, key: Value) void {
+        for (self.entries.items, 0..) |entry, index| {
+            if (valuesEqual(entry.key, key)) {
+                _ = self.entries.swapRemove(index);
+                return;
+            }
+        }
     }
 };
 
@@ -97,6 +186,15 @@ pub const State = struct {
         errdefer state.deinit();
         try state.globals.put(try state.intern("print"), .native_print);
         try state.globals.put(try state.intern("tostring"), .native_tostring);
+        try state.globals.put(try state.intern("rawget"), .native_rawget);
+        try state.globals.put(try state.intern("rawset"), .native_rawset);
+        try state.globals.put(try state.intern("next"), .native_next);
+        try state.globals.put(try state.intern("pairs"), .native_pairs);
+        try state.globals.put(try state.intern("ipairs"), .native_ipairs);
+
+        const table_lib = try state.newTableWithHints(0, 1);
+        try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
+        try state.globals.put(try state.intern("table"), table_lib);
         return state;
     }
 
@@ -142,7 +240,7 @@ pub const State = struct {
                 .le => |op| self.set(thread, op.dest, .{ .boolean = try lessEqual(self.get(thread, op.left), self.get(thread, op.right)) }),
                 .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
                 .len => |op| self.set(thread, op.dest, try self.lengthOf(self.get(thread, op.source))),
-                .new_table => |op| self.set(thread, op.dest, try self.newTable()),
+                .new_table => |op| self.set(thread, op.dest, try self.newTableWithHints(op.array_hint, op.hash_hint)),
                 .get_table => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), self.get(thread, op.key))),
                 .set_table => |op| try self.setTable(self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
                 .get_field => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) })),
@@ -156,7 +254,10 @@ pub const State = struct {
                 },
                 .call => |op| try self.callNative(thread, op),
                 .ret => return,
-                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .closure, .close, .for_prep, .for_loop, .tfor_prep, .tfor_call, .tfor_loop => return self.fail("unsupported runtime opcode"),
+                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) jump(frame, op.offset),
+                .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
+                .tfor_loop => |op| jump(frame, op.offset),
+                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .closure, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
@@ -280,9 +381,9 @@ pub const State = struct {
         return self.intern(content);
     }
 
-    fn newTable(self: *State) !Value {
+    fn newTableWithHints(self: *State, array_hint: u32, hash_hint: u32) !Value {
         const table = try self.arena.allocator().create(Table);
-        table.* = .{};
+        table.* = try Table.init(self.arena.allocator(), array_hint, hash_hint);
         return .{ .table = table };
     }
 
@@ -291,7 +392,8 @@ pub const State = struct {
             .table => |table| table,
             else => return self.fail("attempt to index a non-table value"),
         };
-        return table.get(try self.tableKey(key_value));
+        const key = try self.readableTableKey(key_value) orelse return .nil;
+        return table.get(key);
     }
 
     fn setTable(self: *State, table_value: Value, key_value: Value, value: Value) !void {
@@ -299,10 +401,19 @@ pub const State = struct {
             .table => |table| table,
             else => return self.fail("attempt to index a non-table value"),
         };
-        try table.set(self.arena.allocator(), try self.tableKey(key_value), value);
+        try table.set(self.arena.allocator(), try self.writableTableKey(key_value), value);
     }
 
-    fn tableKey(self: *State, value: Value) !Value {
+    fn readableTableKey(self: *State, value: Value) !?Value {
+        _ = self;
+        return switch (value) {
+            .nil => null,
+            .number => |number| if (std.math.isNan(number)) null else if (floatToInteger(number)) |integer| .{ .integer = integer } else value,
+            else => value,
+        };
+    }
+
+    fn writableTableKey(self: *State, value: Value) !Value {
         return switch (value) {
             .nil => self.fail("table index is nil"),
             .number => |number| if (std.math.isNan(number)) self.fail("table index is NaN") else if (floatToInteger(number)) |integer| .{ .integer = integer } else value,
@@ -313,6 +424,7 @@ pub const State = struct {
     fn lengthOf(self: *State, value: Value) !Value {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
+            .table => |table| .{ .integer = table.len() },
             else => self.fail("attempt to get length of a non-string value"),
         };
     }
@@ -344,8 +456,101 @@ pub const State = struct {
                 if (op.return_count > 0) self.set(thread, op.base, .{ .string = try self.intern(out.items) });
                 for (1..op.return_count) |index| self.set(thread, op.base + @as(bytecode.Register, @intCast(index)), .nil);
             },
+            .native_rawget => try self.returnValues(thread, op.base, op.return_count, &.{try self.rawGet(argValue(self, thread, op, 0), argValue(self, thread, op, 1))}),
+            .native_rawset => {
+                const table = argValue(self, thread, op, 0);
+                try self.rawSet(table, argValue(self, thread, op, 1), argValue(self, thread, op, 2));
+                try self.returnValues(thread, op.base, op.return_count, &.{table});
+            },
+            .native_next => {
+                const values = try self.nextValues(argValue(self, thread, op, 0), argValue(self, thread, op, 1));
+                try self.returnValues(thread, op.base, op.return_count, &values);
+            },
+            .native_pairs => {
+                const table = try self.expectTable(argValue(self, thread, op, 0));
+                _ = table;
+                try self.returnValues(thread, op.base, op.return_count, &.{ .native_next, argValue(self, thread, op, 0), .nil });
+            },
+            .native_ipairs => {
+                const table = try self.expectTable(argValue(self, thread, op, 0));
+                _ = table;
+                try self.returnValues(thread, op.base, op.return_count, &.{ .native_ipairs_iter, argValue(self, thread, op, 0), .{ .integer = 0 } });
+            },
+            .native_ipairs_iter => {
+                const values = try self.ipairsIterValues(argValue(self, thread, op, 0), argValue(self, thread, op, 1));
+                try self.returnValues(thread, op.base, op.return_count, &values);
+            },
+            .native_table_create => {
+                const array_hint = try self.tableCreateHint(argValue(self, thread, op, 0));
+                const hash_hint = if (op.arg_count >= 2) try self.tableCreateHint(argValue(self, thread, op, 1)) else 0;
+                try self.returnValues(thread, op.base, op.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
+            },
             else => return self.fail("attempt to call a non-function value"),
         }
+    }
+
+    fn returnValues(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value) !void {
+        _ = self;
+        for (0..return_count) |index| {
+            thread.stack[base + @as(bytecode.Register, @intCast(index))] = if (index < values.len) values[index] else .nil;
+        }
+    }
+
+    fn rawGet(self: *State, table_value: Value, key_value: Value) !Value {
+        const table = try self.expectTable(table_value);
+        const key = try self.readableTableKey(key_value) orelse return .nil;
+        return table.get(key);
+    }
+
+    fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
+        const table = try self.expectTable(table_value);
+        try table.set(self.arena.allocator(), try self.writableTableKey(key_value), value);
+    }
+
+    fn nextValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
+        const table = try self.expectTable(table_value);
+        const key = try self.readableTableKey(key_value) orelse Value.nil;
+        return table.next(key) catch return self.fail("invalid key to 'next'");
+    }
+
+    fn ipairsIterValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
+        const table = try self.expectTable(table_value);
+        const current = toInteger(key_value) orelse return self.fail("invalid index to 'ipairs'");
+        if (current == std.math.maxInt(i64)) return .{ .nil, .nil };
+        const next_index = current + 1;
+        const value = table.get(.{ .integer = next_index });
+        if (value == .nil) return .{ .nil, .nil };
+        return .{ .{ .integer = next_index }, value };
+    }
+
+    fn advanceGenericFor(self: *State, thread: *Thread, op: bytecode.GenericFor) !bool {
+        const iterator = self.get(thread, op.base);
+        const state = self.get(thread, op.base + 1);
+        const control = self.get(thread, op.base + 2);
+        const values = switch (iterator) {
+            .native_next => try self.nextValues(state, control),
+            .native_ipairs_iter => try self.ipairsIterValues(state, control),
+            else => return self.fail("attempt to call a non-function value"),
+        };
+        self.set(thread, op.base + 2, values[0]);
+        for (0..op.variable_count) |index| {
+            const value = if (index < values.len) values[index] else Value.nil;
+            self.set(thread, op.base + 3 + @as(bytecode.Register, @intCast(index)), value);
+        }
+        return values[0] != .nil;
+    }
+
+    fn expectTable(self: *State, value: Value) !*Table {
+        return switch (value) {
+            .table => |table| table,
+            else => self.fail("table expected"),
+        };
+    }
+
+    fn tableCreateHint(self: *State, value: Value) !u32 {
+        const integer = toInteger(value) orelse return self.fail("number expected");
+        if (integer < 0) return self.fail("negative size");
+        return std.math.cast(u32, integer) orelse self.fail("size too large");
     }
 
     fn fail(self: *State, message: []const u8) RuntimeError {
@@ -453,6 +658,13 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .table => |value| rhs == .table and value == rhs.table,
         .native_print => rhs == .native_print,
         .native_tostring => rhs == .native_tostring,
+        .native_rawget => rhs == .native_rawget,
+        .native_rawset => rhs == .native_rawset,
+        .native_next => rhs == .native_next,
+        .native_pairs => rhs == .native_pairs,
+        .native_ipairs => rhs == .native_ipairs,
+        .native_ipairs_iter => rhs == .native_ipairs_iter,
+        .native_table_create => rhs == .native_table_create,
     };
 }
 
@@ -611,6 +823,20 @@ fn trimAscii(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
 }
 
+fn arrayIndex(value: Value) ?usize {
+    const integer = switch (value) {
+        .integer => |integer| integer,
+        else => return null,
+    };
+    if (integer <= 0) return null;
+    return std.math.cast(usize, integer);
+}
+
+fn argValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {
+    if (index >= op.arg_count) return .nil;
+    return state.get(thread, op.base + 1 + index);
+}
+
 fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
     switch (value) {
         .nil => try out.appendSlice(allocator, "nil"),
@@ -621,6 +847,13 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .table => try out.appendSlice(allocator, "table"),
         .native_print => try out.appendSlice(allocator, "function: print"),
         .native_tostring => try out.appendSlice(allocator, "function: tostring"),
+        .native_rawget => try out.appendSlice(allocator, "function: rawget"),
+        .native_rawset => try out.appendSlice(allocator, "function: rawset"),
+        .native_next => try out.appendSlice(allocator, "function: next"),
+        .native_pairs => try out.appendSlice(allocator, "function: pairs"),
+        .native_ipairs => try out.appendSlice(allocator, "function: ipairs"),
+        .native_ipairs_iter => try out.appendSlice(allocator, "function: ipairs iterator"),
+        .native_table_create => try out.appendSlice(allocator, "function: table.create"),
     }
 }
 
