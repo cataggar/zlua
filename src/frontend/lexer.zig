@@ -215,10 +215,10 @@ pub const Lexer = struct {
         var value: u32 = 0;
         while (isHexDigit(self.peek())) {
             const digit = hexValue(self.advance().?);
-            if (value <= 0x10ffff) value = value * 16 + digit;
+            value = appendUnicodeEscapeDigit(value, digit);
             count += 1;
         }
-        if (count == 0 or self.peek() != '}' or value > 0x10ffff) return self.failVoid(.invalid_escape, start, self.position(), "invalid unicode escape");
+        if (count == 0 or self.peek() != '}' or value > max_lua_utf8_codepoint) return self.failVoid(.invalid_escape, start, self.position(), "invalid unicode escape");
         _ = self.advance();
     }
 
@@ -346,6 +346,7 @@ pub const Lexer = struct {
         const byte = self.source[self.index];
         self.index += 1;
         if (byte == '\n' or byte == '\r') {
+            if ((byte == '\r' and self.peek() == '\n') or (byte == '\n' and self.peek() == '\r')) self.index += 1;
             self.line += 1;
             self.column = 1;
         } else {
@@ -420,6 +421,15 @@ fn isIdentifierContinue(byte: u8) bool {
     return isIdentifierStart(byte) or isDigit(byte);
 }
 
+const max_lua_utf8_codepoint: u32 = 0x7fffffff;
+
+fn appendUnicodeEscapeDigit(value: u32, digit: u32) u32 {
+    if (value > max_lua_utf8_codepoint / 16) return max_lua_utf8_codepoint + 1;
+    const next = value * 16 + digit;
+    if (next > max_lua_utf8_codepoint) return max_lua_utf8_codepoint + 1;
+    return next;
+}
+
 fn expectTags(source: []const u8, expected: []const token_mod.Tag) !void {
     const tokens = try lex(std.testing.allocator, source);
     defer std.testing.allocator.free(tokens);
@@ -491,7 +501,7 @@ test "rejects malformed numerals" {
 }
 
 test "lexes short strings and escape sequences" {
-    try expectTags("'a' \"b\" '\\n' '\\x41' '\\255' '\\u{10ffff}' '\\z  \n  x'", &.{
+    try expectTags("'a' \"b\" '\\n' '\\x41' '\\255' '\\u{7fffffff}' '\\z  \n  x'", &.{
         .string_literal,
         .string_literal,
         .string_literal,

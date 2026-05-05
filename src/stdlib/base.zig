@@ -10,7 +10,11 @@ const Value = runtime.Value;
 pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
     const closure = state.loadSourceAsClosure(source) catch {
-        const message = state.last_error orelse "cannot load source";
+        const unquoted = try removeSyntaxQuotes(state.allocator, source);
+        defer state.allocator.free(unquoted);
+        const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
+        const message = try std.fmt.allocPrint(state.allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number", .{ source, unquoted, unicode_prefix });
+        defer state.allocator.free(message);
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
     };
@@ -55,6 +59,21 @@ fn typeName(value: Value) []const u8 {
         .closure, .coroutine_wrapper, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => "function",
         .thread => "thread",
     };
+}
+
+fn removeSyntaxQuotes(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    for (source) |byte_value| {
+        if (byte_value != '"' and byte_value != '}') try out.append(allocator, byte_value);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn unicodeMissingBracePrefix(source: []const u8) ?[]const u8 {
+    const index = std.mem.indexOf(u8, source, "\\u") orelse return null;
+    if (index + 2 < source.len and source[index + 2] == '{') return null;
+    return source[0..@min(source.len, index + 3)];
 }
 
 fn parseIntegerBase(text: []const u8, base: u8) ?Value {

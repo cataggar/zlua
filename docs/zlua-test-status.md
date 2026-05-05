@@ -10,8 +10,8 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=11`, `categorized_failed=21`, `skipped=1`, `unexpected_failed=0`. |
-| Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Current summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=12`, `categorized_failed=21`, `unexpected_failed=0`. Categorized zlua failures remain expected work items. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=12`, `categorized_failed=20`, `skipped=1`, `unexpected_failed=0`. |
+| Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Current summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
 
@@ -49,7 +49,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `gengc.lua` | Pass | Pass |  |
 | `goto.lua` | Pass | XFail | `runtime` |
 | `heavy.lua` | Pass | Pass |  |
-| `literals.lua` | Pass | XFail | `runtime` |
+| `literals.lua` | Pass | Pass |  |
 | `locals.lua` | Pass | XFail | `runtime` |
 | `main.lua` | Pass | Pass |  |
 | `math.lua` | Pass | XFail | `runtime` |
@@ -74,7 +74,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 33 |
 | CLua failures | 0 |
-| zlua passes | 12 |
-| Categorized zlua failures | 21 |
+| zlua passes | 13 |
+| Categorized zlua failures | 20 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

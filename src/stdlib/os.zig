@@ -40,6 +40,15 @@ pub fn getenv(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{value});
 }
 
+pub fn setlocale(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const locale = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil)
+        try state.expectString(runtime.argValue(state, thread, op, 0))
+    else
+        "C";
+    const value = if (std.mem.eql(u8, locale, "C")) Value{ .string = try state.intern("C") } else Value.nil;
+    try state.returnValues(thread, op.base, op.return_count, &.{value});
+}
+
 pub fn execute(state: *State, thread: *Thread, op: bytecode.Call) !void {
     if (!state.processEnabled()) return state.fail("process access disabled");
     const command = try state.expectString(runtime.argValue(state, thread, op, 0));

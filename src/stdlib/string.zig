@@ -70,6 +70,7 @@ pub fn format(state: *State, thread: *Thread, op: bytecode.Call) !void {
             'x' => try runtime.appendFmt(state.allocator, &out, "{x}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
             'X' => try runtime.appendFmt(state.allocator, &out, "{X}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
             'o' => try runtime.appendFmt(state.allocator, &out, "{o}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
+            'p' => try appendPointer(state.allocator, &out, value),
             'f', 'e', 'E', 'g', 'G' => try runtime.appendNumber(state.allocator, &out, try runtime.toNumber(value)),
             else => return state.fail("invalid format"),
         }
@@ -284,6 +285,11 @@ fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?MatchRange 
 
 fn simplePatternFind(source: []const u8, pattern: []const u8, start: usize) ?MatchRange {
     if (pattern.len == 0) return .{ .start = @min(start, source.len), .end = @min(start, source.len) };
+    if (pattern[0] == '^') {
+        const anchored_start = @min(start, source.len);
+        const end = matchSimplePatternAt(source, pattern[1..], anchored_start) orelse return null;
+        return .{ .start = anchored_start, .end = end };
+    }
     var candidate = start;
     while (candidate <= source.len) : (candidate += 1) {
         if (matchSimplePatternAt(source, pattern, candidate)) |end| return .{ .start = candidate, .end = end };
@@ -292,31 +298,51 @@ fn simplePatternFind(source: []const u8, pattern: []const u8, start: usize) ?Mat
 }
 
 fn matchSimplePatternAt(source: []const u8, pattern: []const u8, start: usize) ?usize {
-    var s = start;
-    var p: usize = 0;
-    while (p < pattern.len) {
-        const atom_start = p;
-        p = nextPatternAtom(pattern, p);
-        const quantifier = if (p < pattern.len and std.mem.indexOfScalar(u8, "*+-?", pattern[p]) != null) pattern[p] else 0;
-        if (quantifier != 0) p += 1;
-        switch (quantifier) {
-            0 => {
-                if (s >= source.len or !patternAtomMatches(pattern[atom_start..p], source[s])) return null;
-                s += 1;
-            },
-            '?' => {
-                if (s < source.len and patternAtomMatches(pattern[atom_start .. p - 1], source[s])) s += 1;
-            },
-            '+', '*' => {
-                var count: usize = 0;
-                while (s < source.len and patternAtomMatches(pattern[atom_start .. p - 1], source[s])) : (s += 1) count += 1;
-                if (quantifier == '+' and count == 0) return null;
-            },
-            '-' => {},
-            else => unreachable,
-        }
+    return matchPatternFrom(source, pattern, start, 0);
+}
+
+fn matchPatternFrom(source: []const u8, pattern: []const u8, source_index: usize, pattern_index: usize) ?usize {
+    if (pattern_index >= pattern.len) return source_index;
+    if (pattern[pattern_index] == '$' and pattern_index + 1 == pattern.len) return if (source_index == source.len) source_index else null;
+
+    const atom_start = pattern_index;
+    const atom_end = nextPatternAtom(pattern, atom_start);
+    const quantifier = if (atom_end < pattern.len and std.mem.indexOfScalar(u8, "*+-?", pattern[atom_end]) != null) pattern[atom_end] else 0;
+    const next_index = atom_end + @as(usize, if (quantifier != 0) 1 else 0);
+    const atom = pattern[atom_start..atom_end];
+
+    switch (quantifier) {
+        0 => {
+            if (source_index >= source.len or !patternAtomMatches(atom, source[source_index])) return null;
+            return matchPatternFrom(source, pattern, source_index + 1, next_index);
+        },
+        '?' => {
+            if (source_index < source.len and patternAtomMatches(atom, source[source_index])) {
+                if (matchPatternFrom(source, pattern, source_index + 1, next_index)) |end| return end;
+            }
+            return matchPatternFrom(source, pattern, source_index, next_index);
+        },
+        '*', '+' => {
+            var end = source_index;
+            while (end < source.len and patternAtomMatches(atom, source[end])) end += 1;
+            if (quantifier == '+' and end == source_index) return null;
+            var candidate = end;
+            while (candidate >= source_index) : (candidate -= 1) {
+                if (matchPatternFrom(source, pattern, candidate, next_index)) |matched_end| return matched_end;
+                if (candidate == source_index) break;
+            }
+            return null;
+        },
+        '-' => {
+            var candidate = source_index;
+            while (true) {
+                if (matchPatternFrom(source, pattern, candidate, next_index)) |matched_end| return matched_end;
+                if (candidate >= source.len or !patternAtomMatches(atom, source[candidate])) return null;
+                candidate += 1;
+            }
+        },
+        else => unreachable,
     }
-    return s;
 }
 
 fn nextPatternAtom(pattern: []const u8, index: usize) usize {
@@ -334,10 +360,16 @@ fn patternAtomMatches(atom: []const u8, source_byte: u8) bool {
     if (atom[0] == '%') return switch (atom[1]) {
         'a' => std.ascii.isAlphabetic(source_byte),
         'A' => !std.ascii.isAlphabetic(source_byte),
+        'c' => isControl(source_byte),
+        'C' => !isControl(source_byte),
         'd' => std.ascii.isDigit(source_byte),
         'D' => !std.ascii.isDigit(source_byte),
+        'g' => source_byte > ' ' and source_byte < 0x7f,
+        'G' => !(source_byte > ' ' and source_byte < 0x7f),
         'l' => std.ascii.isLower(source_byte),
         'L' => !std.ascii.isLower(source_byte),
+        'p' => isPunctuation(source_byte),
+        'P' => !isPunctuation(source_byte),
         's' => std.ascii.isWhitespace(source_byte),
         'S' => !std.ascii.isWhitespace(source_byte),
         'u' => std.ascii.isUpper(source_byte),
@@ -346,6 +378,8 @@ fn patternAtomMatches(atom: []const u8, source_byte: u8) bool {
         'W' => !std.ascii.isAlphanumeric(source_byte),
         'x' => std.ascii.isHex(source_byte),
         'X' => !std.ascii.isHex(source_byte),
+        'z' => source_byte == 0,
+        'Z' => source_byte != 0,
         else => atom[1] == source_byte,
     };
     if (atom[0] == '[' and atom[atom.len - 1] == ']') {
@@ -366,6 +400,14 @@ fn patternAtomMatches(atom: []const u8, source_byte: u8) bool {
     return false;
 }
 
+fn isControl(code: u8) bool {
+    return code < 0x20 or code == 0x7f;
+}
+
+fn isPunctuation(code: u8) bool {
+    return (code >= '!' and code <= '/') or (code >= ':' and code <= '@') or (code >= '[' and code <= '`') or (code >= '{' and code <= '~');
+}
+
 fn appendQuoted(allocator: std.mem.Allocator, out: *std.ArrayList(u8), source: []const u8) !void {
     try out.append(allocator, '"');
     for (source) |source_byte| switch (source_byte) {
@@ -377,6 +419,17 @@ fn appendQuoted(allocator: std.mem.Allocator, out: *std.ArrayList(u8), source: [
         else => try out.append(allocator, source_byte),
     };
     try out.append(allocator, '"');
+}
+
+fn appendPointer(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
+    const address: usize = switch (value) {
+        .string => |string| @intFromPtr(string.ptr),
+        .table => |table| @intFromPtr(table),
+        .closure => |closure| @intFromPtr(closure),
+        .thread => |thread| @intFromPtr(thread),
+        else => 0,
+    };
+    try runtime.appendFmt(allocator, out, "0x{x}", .{address});
 }
 
 const Endian = enum { little, big };

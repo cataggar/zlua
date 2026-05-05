@@ -12,8 +12,8 @@ pub fn char(state: *State, thread: *Thread, op: bytecode.Call) !void {
     defer out.deinit(state.allocator);
     for (0..op.arg_count) |index| {
         const code = runtime.toInteger(runtime.argValue(state, thread, op, @intCast(index))) orelse return state.fail("integer expected");
-        var bytes: [4]u8 = undefined;
-        const encoded_len = encode(@intCast(code), &bytes) orelse return state.fail("value out of range");
+        var bytes: [6]u8 = undefined;
+        const encoded_len = encode(code, &bytes) orelse return state.fail("value out of range");
         try out.appendSlice(state.allocator, bytes[0..encoded_len]);
     }
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
@@ -127,7 +127,7 @@ fn decodeAt(bytes: []const u8, pos: usize) ?Decoded {
     if (pos >= bytes.len) return null;
     const first = bytes[pos];
     if (first < 0x80) return .{ .codepoint = first, .len = 1 };
-    const decoded_len: usize = if ((first & 0xe0) == 0xc0) 2 else if ((first & 0xf0) == 0xe0) 3 else if ((first & 0xf8) == 0xf0) 4 else return null;
+    const decoded_len: usize = if ((first & 0xe0) == 0xc0) 2 else if ((first & 0xf0) == 0xe0) 3 else if ((first & 0xf8) == 0xf0) 4 else if ((first & 0xfc) == 0xf8) 5 else if ((first & 0xfe) == 0xfc) 6 else return null;
     if (pos + decoded_len > bytes.len) return null;
     var code: i64 = first & (@as(u8, 0x7f) >> @intCast(decoded_len));
     for (bytes[pos + 1 .. pos + decoded_len]) |byte| {
@@ -137,7 +137,12 @@ fn decodeAt(bytes: []const u8, pos: usize) ?Decoded {
     return .{ .codepoint = code, .len = decoded_len };
 }
 
-fn encode(code: u21, out: *[4]u8) ?usize {
+fn encode(code: i64, out: *[6]u8) ?usize {
+    if (code < 0 or code > @as(i64, max_lua_utf8_codepoint)) return null;
+    return encodeUnsigned(@intCast(code), out);
+}
+
+fn encodeUnsigned(code: u32, out: *[6]u8) ?usize {
     if (code <= 0x7f) {
         out[0] = @intCast(code);
         return 1;
@@ -153,12 +158,29 @@ fn encode(code: u21, out: *[4]u8) ?usize {
         out[2] = 0x80 | @as(u8, @intCast(code & 0x3f));
         return 3;
     }
-    if (code <= 0x10ffff) {
+    if (code <= 0x1fffff) {
         out[0] = 0xf0 | @as(u8, @intCast(code >> 18));
         out[1] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
         out[2] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
         out[3] = 0x80 | @as(u8, @intCast(code & 0x3f));
         return 4;
+    }
+    if (code <= 0x3ffffff) {
+        out[0] = 0xf8 | @as(u8, @intCast(code >> 24));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 5;
+    }
+    if (code <= max_lua_utf8_codepoint) {
+        out[0] = 0xfc | @as(u8, @intCast(code >> 30));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 24) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[5] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 6;
     }
     return null;
 }
@@ -166,3 +188,5 @@ fn encode(code: u21, out: *[4]u8) ?usize {
 fn isContinuation(byte: u8) bool {
     return (byte & 0xc0) == 0x80;
 }
+
+const max_lua_utf8_codepoint: u32 = 0x7fffffff;

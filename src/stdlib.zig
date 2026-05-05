@@ -91,6 +91,7 @@ pub const NativeFn = enum {
     os_time,
     os_date,
     os_getenv,
+    os_setlocale,
     os_execute,
     debug_getinfo,
 
@@ -170,6 +171,7 @@ pub const NativeFn = enum {
             .os_time => "os.time",
             .os_date => "os.date",
             .os_getenv => "os.getenv",
+            .os_setlocale => "os.setlocale",
             .os_execute => "os.execute",
             .debug_getinfo => "debug.getinfo",
         };
@@ -252,6 +254,7 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .os_time => try os.time(state, thread, op),
         .os_date => try os.date(state, thread, op),
         .os_getenv => try os.getenv(state, thread, op),
+        .os_setlocale => try os.setlocale(state, thread, op),
         .os_execute => try os.execute(state, thread, op),
         .debug_getinfo => try debug.getinfo(state, thread, op),
     }

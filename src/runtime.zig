@@ -395,6 +395,7 @@ pub const ExecuteOptions = struct {
 pub const State = struct {
     allocator: std.mem.Allocator,
     globals: std.StringHashMap(Value),
+    global_table: ?*Table = null,
     strings: std.StringHashMap([]const u8),
     string_allocations: std.ArrayList(StringAllocation) = .empty,
     table_allocations: std.ArrayList(*Table) = .empty,
@@ -432,6 +433,7 @@ pub const State = struct {
         };
         errdefer state.deinit();
         try state.openLibraries(options.stdlib);
+        if (options.stdlib != .none) try state.installGlobalTable();
         return state;
     }
 
@@ -449,6 +451,21 @@ pub const State = struct {
                 try state.openSystemLibraries();
             },
         }
+    }
+
+    fn installGlobalTable(state: *State) !void {
+        const global_value = try state.newTableWithHints(0, @intCast(state.globals.count() + 1));
+        const table = global_value.table;
+        state.global_table = table;
+
+        var globals = state.globals.iterator();
+        while (globals.next()) |entry| {
+            try table.set(state.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+        }
+
+        const key = try state.intern("_G");
+        try state.globals.put(key, global_value);
+        try table.set(state.allocator, .{ .string = key }, global_value);
     }
 
     fn openBaseLibrary(state: *State) !void {
@@ -577,6 +594,7 @@ pub const State = struct {
         try state.setTable(os_lib, .{ .string = try state.intern("time") }, .{ .native = .os_time });
         try state.setTable(os_lib, .{ .string = try state.intern("date") }, .{ .native = .os_date });
         try state.setTable(os_lib, .{ .string = try state.intern("getenv") }, .{ .native = .os_getenv });
+        try state.setTable(os_lib, .{ .string = try state.intern("setlocale") }, .{ .native = .os_setlocale });
         try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
         try state.globals.put(try state.intern("os"), os_lib);
 
@@ -674,7 +692,7 @@ pub const State = struct {
                 .load_bool => |op| self.set(thread, op.dest, .{ .boolean = op.value }),
                 .load_const => |op| self.set(thread, op.dest, try self.loadConstant(proto.constants.items[op.constant])),
                 .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
-                .get_global => |op| self.set(thread, op.register, self.globals.get(constantString(proto, op.name)) orelse .nil),
+                .get_global => |op| self.set(thread, op.register, self.getGlobalValue(constantString(proto, op.name))),
                 .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
                 .add => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .add)),
                 .sub => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .sub)),
@@ -743,11 +761,31 @@ pub const State = struct {
     fn setGlobal(self: *State, name: []const u8, value: Value) !void {
         const key = if (self.globals.contains(name)) name else try self.intern(name);
         try self.globals.put(key, value);
+        if (self.global_table) |table| {
+            try table.set(self.allocator, .{ .string = key }, value);
+            self.writeTableBarrier(table, .{ .string = key }, value);
+        }
         self.markValue(value);
     }
 
-    pub fn getGlobal(self: *State, name: []const u8) Value {
+    fn getGlobalValue(self: *State, name: []const u8) Value {
+        if (self.global_table) |table| return table.get(.{ .string = name });
         return self.globals.get(name) orelse .nil;
+    }
+
+    pub fn getGlobal(self: *State, name: []const u8) Value {
+        return self.getGlobalValue(name);
+    }
+
+    pub fn currentLine(self: *State, thread: *Thread, level: i64) ?usize {
+        _ = self;
+        if (level < 1) return null;
+        const depth: usize = @intCast(level);
+        if (depth > thread.frames.items.len) return null;
+        const frame = thread.frames.items[thread.frames.items.len - depth];
+        if (frame.proto.line_info.items.len == 0) return null;
+        const pc = if (frame.pc == 0) @as(usize, 0) else frame.pc - 1;
+        return frame.proto.line_info.items[@min(pc, frame.proto.line_info.items.len - 1)].line;
     }
 
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -866,12 +904,16 @@ pub const State = struct {
 
     pub fn intern(self: *State, bytes: []const u8) ![]const u8 {
         if (self.strings.get(bytes)) |interned| return interned;
-        const interned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(interned);
-        try self.string_allocations.append(self.allocator, .{ .bytes = interned });
-        errdefer _ = self.string_allocations.pop();
+        const interned = try self.allocateString(bytes);
         try self.strings.put(interned, interned);
         return interned;
+    }
+
+    pub fn allocateString(self: *State, bytes: []const u8) ![]const u8 {
+        const allocated = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(allocated);
+        try self.string_allocations.append(self.allocator, .{ .bytes = allocated });
+        return allocated;
     }
 
     fn decodeStringLiteral(self: *State, lexeme: []const u8) ![]const u8 {
@@ -927,18 +969,22 @@ pub const State = struct {
                     var value: u32 = 0;
                     var count: usize = 0;
                     while (index < lexeme.len - 1 and lexeme[index] != '}') : (index += 1) {
-                        value = value * 16 + hexValue(lexeme[index]);
+                        value = appendUnicodeEscapeDigit(value, hexValue(lexeme[index]));
                         count += 1;
                     }
-                    if (count == 0 or index >= lexeme.len - 1 or lexeme[index] != '}' or value > 0x10ffff) return self.fail("invalid unicode escape");
+                    if (count == 0 or index >= lexeme.len - 1 or lexeme[index] != '}' or value > max_lua_utf8_codepoint) return self.fail("invalid unicode escape");
                     index += 1;
-                    var encoded: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(@intCast(value), &encoded) catch return self.fail("invalid unicode escape");
+                    var encoded: [6]u8 = undefined;
+                    const len = encodeLuaUtf8(value, &encoded) orelse return self.fail("invalid unicode escape");
                     try out.appendSlice(self.allocator, encoded[0..len]);
                 },
-                '\n' => {},
+                '\n' => {
+                    if (index < lexeme.len - 1 and lexeme[index] == '\r') index += 1;
+                    try out.append(self.allocator, '\n');
+                },
                 '\r' => {
                     if (index < lexeme.len - 1 and lexeme[index] == '\n') index += 1;
+                    try out.append(self.allocator, '\n');
                 },
                 else => return self.fail("invalid string escape"),
             }
@@ -955,12 +1001,37 @@ pub const State = struct {
         const content_start = level + 2;
         const content_end = lexeme.len - level - 2;
         var content = lexeme[content_start..content_end];
-        if (std.mem.startsWith(u8, content, "\r\n")) {
+        if (std.mem.startsWith(u8, content, "\r\n") or std.mem.startsWith(u8, content, "\n\r")) {
             content = content[2..];
         } else if (std.mem.startsWith(u8, content, "\n") or std.mem.startsWith(u8, content, "\r")) {
             content = content[1..];
         }
+        if (std.mem.indexOfScalar(u8, content, '\r')) |_| {
+            const normalized = try self.normalizeLongStringLineEnds(content);
+            defer self.allocator.free(normalized);
+            return self.intern(normalized);
+        }
         return self.intern(content);
+    }
+
+    fn normalizeLongStringLineEnds(self: *State, content: []const u8) ![]const u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        var index: usize = 0;
+        while (index < content.len) {
+            const byte = content[index];
+            if (byte == '\r') {
+                try out.append(self.allocator, '\n');
+                index += if (index + 1 < content.len and content[index + 1] == '\n') 2 else 1;
+            } else if (byte == '\n' and index + 1 < content.len and content[index + 1] == '\r') {
+                try out.append(self.allocator, '\n');
+                index += 2;
+            } else {
+                try out.append(self.allocator, byte);
+                index += 1;
+            }
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     pub fn newTableWithHints(self: *State, array_hint: u32, hash_hint: u32) !Value {
@@ -1307,7 +1378,7 @@ pub const State = struct {
         defer out.deinit(self.allocator);
         try appendLuaString(self.allocator, &out, lhs);
         try appendLuaString(self.allocator, &out, rhs);
-        return .{ .string = try self.intern(out.items) };
+        return .{ .string = try self.allocateString(out.items) };
     }
 
     fn callValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -2090,6 +2161,8 @@ pub const State = struct {
         const state = self.get(thread, op.base + 1);
         const control = self.get(thread, op.base + 2);
         var fixed: [2]Value = undefined;
+        var owned_values: ?[]Value = null;
+        defer if (owned_values) |values| self.allocator.free(values);
         const values: []const Value = switch (iterator) {
             .native_next => blk: {
                 fixed = try self.nextValues(state, control);
@@ -2108,16 +2181,25 @@ pub const State = struct {
                     fixed = try stdlib.utf8.codesNext(self, state, control);
                     break :blk fixed[0..2];
                 },
-                else => return self.fail("attempt to call a non-function value"),
+                else => blk: {
+                    const args = [_]Value{ state, control };
+                    owned_values = try self.callCollect(thread, iterator, &args);
+                    break :blk owned_values.?;
+                },
             },
-            else => return self.fail("attempt to call a non-function value"),
+            else => blk: {
+                const args = [_]Value{ state, control };
+                owned_values = try self.callCollect(thread, iterator, &args);
+                break :blk owned_values.?;
+            },
         };
-        self.set(thread, op.base + 2, values[0]);
+        const first_value = if (values.len > 0) values[0] else Value.nil;
+        self.set(thread, op.base + 2, first_value);
         for (0..op.variable_count) |index| {
             const value = if (index < values.len) values[index] else Value.nil;
             self.set(thread, op.base + 3 + @as(bytecode.Register, @intCast(index)), value);
         }
-        return values[0] != .nil;
+        return first_value != .nil;
     }
 
     pub fn expectTable(self: *State, value: Value) !*Table {
@@ -3230,6 +3312,58 @@ fn hexValue(byte: u8) u32 {
         'A'...'F' => byte - 'A' + 10,
         else => 0,
     };
+}
+
+const max_lua_utf8_codepoint: u32 = 0x7fffffff;
+
+fn appendUnicodeEscapeDigit(value: u32, digit: u32) u32 {
+    if (value > max_lua_utf8_codepoint / 16) return max_lua_utf8_codepoint + 1;
+    const next = value * 16 + digit;
+    if (next > max_lua_utf8_codepoint) return max_lua_utf8_codepoint + 1;
+    return next;
+}
+
+fn encodeLuaUtf8(code: u32, out: *[6]u8) ?usize {
+    if (code <= 0x7f) {
+        out[0] = @intCast(code);
+        return 1;
+    }
+    if (code <= 0x7ff) {
+        out[0] = 0xc0 | @as(u8, @intCast(code >> 6));
+        out[1] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 2;
+    }
+    if (code <= 0xffff) {
+        out[0] = 0xe0 | @as(u8, @intCast(code >> 12));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 3;
+    }
+    if (code <= 0x1fffff) {
+        out[0] = 0xf0 | @as(u8, @intCast(code >> 18));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 4;
+    }
+    if (code <= 0x3ffffff) {
+        out[0] = 0xf8 | @as(u8, @intCast(code >> 24));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 5;
+    }
+    if (code <= max_lua_utf8_codepoint) {
+        out[0] = 0xfc | @as(u8, @intCast(code >> 30));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 24) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[5] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 6;
+    }
+    return null;
 }
 
 test "executes basic print and arithmetic" {
