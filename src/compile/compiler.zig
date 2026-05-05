@@ -22,6 +22,7 @@ const Local = struct {
     name: []const u8,
     register: bytecode.Register,
     debug_index: usize,
+    captured: bool = false,
 };
 
 const PendingLocal = struct {
@@ -679,18 +680,25 @@ const FunctionCompiler = struct {
     }
 
     fn lookupLocal(self: *FunctionCompiler, name: []const u8) ?Local {
+        const index = self.lookupLocalIndex(name) orelse return null;
+        return self.locals.items[index];
+    }
+
+    fn lookupLocalIndex(self: *FunctionCompiler, name: []const u8) ?usize {
         var index = self.locals.items.len;
         while (index > 0) {
             index -= 1;
             const local = self.locals.items[index];
-            if (std.mem.eql(u8, local.name, name)) return local;
+            if (std.mem.eql(u8, local.name, name)) return index;
         }
         return null;
     }
 
     fn lookupUpvalue(self: *FunctionCompiler, name: []const u8) !?bytecode.UpvalueIndex {
         if (self.parent) |parent| {
-            if (parent.lookupLocal(name)) |local| {
+            if (parent.lookupLocalIndex(name)) |local_index| {
+                parent.locals.items[local_index].captured = true;
+                const local = parent.locals.items[local_index];
                 return try self.proto.addUpvalue(.{ .name = name, .in_stack = true, .index = local.register });
             }
             if (try parent.lookupUpvalue(name)) |parent_upvalue| {
@@ -706,9 +714,12 @@ const FunctionCompiler = struct {
 
     fn leaveScope(self: *FunctionCompiler) !void {
         const scope = self.scopes.items[self.scopes.items.len - 1];
+        var has_captured = false;
         for (self.locals.items[scope.local_start..]) |local| {
+            has_captured = has_captured or local.captured;
             self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
         }
+        if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
         self.locals.items.len = scope.local_start;
         self.next_register = scope.next_register;
         self.scopes.items.len -= 1;

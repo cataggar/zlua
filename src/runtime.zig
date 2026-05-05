@@ -37,6 +37,14 @@ pub const Value = union(enum) {
 
 const Closure = struct {
     proto: *const proto_mod.Proto,
+    upvalues: []const *Upvalue,
+};
+
+const Upvalue = struct {
+    stack_index: usize,
+    closed: Value = .nil,
+    is_open: bool = true,
+    next: ?*Upvalue = null,
 };
 
 const TableEntry = struct {
@@ -154,14 +162,16 @@ const Table = struct {
 pub const Thread = struct {
     stack: std.ArrayList(Value) = .empty,
     frames: std.ArrayList(CallFrame) = .empty,
+    open_upvalues: ?*Upvalue = null,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, proto: *const proto_mod.Proto) !Thread {
+    pub fn init(allocator: std.mem.Allocator, closure: *Closure) !Thread {
         var thread = Thread{};
         errdefer thread.deinit(allocator);
+        const proto = closure.proto;
         try thread.ensureStack(allocator, @max(proto.max_registers, 1));
-        try thread.frames.append(allocator, .{ .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0, .varargs = &.{} });
+        try thread.frames.append(allocator, .{ .closure = closure, .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0, .varargs = &.{} });
         return thread;
     }
 
@@ -181,6 +191,7 @@ pub const Thread = struct {
 };
 
 const CallFrame = struct {
+    closure: *Closure,
     proto: *const proto_mod.Proto,
     base: usize,
     pc: usize,
@@ -231,7 +242,8 @@ pub const State = struct {
     }
 
     pub fn execute(self: *State, proto: *const proto_mod.Proto) !void {
-        var thread = try Thread.init(self.allocator, proto);
+        const root = try self.newRootClosure(proto);
+        var thread = try Thread.init(self.allocator, root);
         defer thread.deinit(self.allocator);
         try self.runThread(&thread);
     }
@@ -288,8 +300,11 @@ pub const State = struct {
                 .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) jump(frame, op.offset),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
                 .tfor_loop => |op| jump(frame, op.offset),
-                .closure => |op| self.set(thread, op.dest, try self.newClosure(proto.children.items[op.proto])),
-                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
+                .closure => |op| self.set(thread, op.dest, try self.newClosure(thread, proto.children.items[op.proto])),
+                .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
+                .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
+                .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
+                .band, .bor, .bxor, .bnot, .shl, .shr, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
@@ -421,10 +436,77 @@ pub const State = struct {
         return .{ .table = table };
     }
 
-    fn newClosure(self: *State, proto: *const proto_mod.Proto) !Value {
+    fn newRootClosure(self: *State, proto: *const proto_mod.Proto) !*Closure {
         const closure = try self.arena.allocator().create(Closure);
-        closure.* = .{ .proto = proto };
+        closure.* = .{ .proto = proto, .upvalues = &.{} };
+        return closure;
+    }
+
+    fn newClosure(self: *State, thread: *Thread, proto: *const proto_mod.Proto) !Value {
+        const parent = thread.frames.items[thread.frames.items.len - 1];
+        const upvalues = try self.arena.allocator().alloc(*Upvalue, proto.upvalues.items.len);
+        for (proto.upvalues.items, 0..) |desc, index| {
+            upvalues[index] = if (desc.in_stack)
+                try self.captureUpvalue(thread, parent.base + desc.index)
+            else
+                parent.closure.upvalues[desc.index];
+        }
+
+        const closure = try self.arena.allocator().create(Closure);
+        closure.* = .{ .proto = proto, .upvalues = upvalues };
         return .{ .closure = closure };
+    }
+
+    fn captureUpvalue(self: *State, thread: *Thread, stack_index: usize) !*Upvalue {
+        var current = thread.open_upvalues;
+        while (current) |upvalue| : (current = upvalue.next) {
+            if (upvalue.is_open and upvalue.stack_index == stack_index) return upvalue;
+        }
+
+        const upvalue = try self.arena.allocator().create(Upvalue);
+        upvalue.* = .{ .stack_index = stack_index, .next = thread.open_upvalues };
+        thread.open_upvalues = upvalue;
+        return upvalue;
+    }
+
+    fn readUpvalue(self: *State, thread: *Thread, index: bytecode.UpvalueIndex) Value {
+        _ = self;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const upvalue = frame.closure.upvalues[index];
+        return if (upvalue.is_open) thread.stack.items[upvalue.stack_index] else upvalue.closed;
+    }
+
+    fn writeUpvalue(self: *State, thread: *Thread, index: bytecode.UpvalueIndex, value: Value) void {
+        _ = self;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const upvalue = frame.closure.upvalues[index];
+        if (upvalue.is_open) {
+            thread.stack.items[upvalue.stack_index] = value;
+        } else {
+            upvalue.closed = value;
+        }
+    }
+
+    fn closeUpvalues(self: *State, thread: *Thread, first_stack_index: usize) void {
+        _ = self;
+        var previous: ?*Upvalue = null;
+        var current = thread.open_upvalues;
+        while (current) |upvalue| {
+            const next = upvalue.next;
+            if (upvalue.is_open and upvalue.stack_index >= first_stack_index) {
+                upvalue.closed = thread.stack.items[upvalue.stack_index];
+                upvalue.is_open = false;
+                upvalue.next = null;
+                if (previous) |prev| {
+                    prev.next = next;
+                } else {
+                    thread.open_upvalues = next;
+                }
+            } else {
+                previous = upvalue;
+            }
+            current = next;
+        }
     }
 
     fn getTable(self: *State, table_value: Value, key_value: Value) !Value {
@@ -539,6 +621,7 @@ pub const State = struct {
         const frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
 
         try thread.frames.append(self.allocator, .{
+            .closure = frame.closure,
             .proto = frame.proto,
             .base = frame.base,
             .pc = frame.pc,
@@ -554,6 +637,7 @@ pub const State = struct {
         const resolved = try self.resolveCall(thread, op);
         switch (callee) {
             .closure => |closure| {
+                self.closeUpvalues(thread, frame.base);
                 const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
                 thread.frames.items[thread.frames.items.len - 1] = new_frame;
             },
@@ -568,6 +652,7 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const source_start = frame.base + first;
         const source_count = try self.resolveResultCount(thread, source_start, count);
+        self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
             thread.frames.items.len = 0;
             return;
@@ -612,6 +697,7 @@ pub const State = struct {
         }
 
         return .{
+            .closure = closure,
             .proto = closure.proto,
             .base = frame_base,
             .pc = 0,
