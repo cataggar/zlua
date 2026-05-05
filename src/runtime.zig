@@ -14,6 +14,7 @@ pub const RuntimeError = error{
 
 const max_stack_values: usize = 8192;
 const max_call_frames: usize = 256;
+const max_metamethod_depth: usize = 64;
 
 pub const Value = union(enum) {
     nil,
@@ -25,8 +26,12 @@ pub const Value = union(enum) {
     closure: *Closure,
     native_print,
     native_tostring,
+    native_getmetatable,
+    native_setmetatable,
+    native_rawequal,
     native_rawget,
     native_rawset,
+    native_rawlen,
     native_next,
     native_pairs,
     native_ipairs,
@@ -219,8 +224,12 @@ pub const State = struct {
         errdefer state.deinit();
         try state.globals.put(try state.intern("print"), .native_print);
         try state.globals.put(try state.intern("tostring"), .native_tostring);
+        try state.globals.put(try state.intern("getmetatable"), .native_getmetatable);
+        try state.globals.put(try state.intern("setmetatable"), .native_setmetatable);
+        try state.globals.put(try state.intern("rawequal"), .native_rawequal);
         try state.globals.put(try state.intern("rawget"), .native_rawget);
         try state.globals.put(try state.intern("rawset"), .native_rawset);
+        try state.globals.put(try state.intern("rawlen"), .native_rawlen);
         try state.globals.put(try state.intern("next"), .native_next);
         try state.globals.put(try state.intern("pairs"), .native_pairs);
         try state.globals.put(try state.intern("ipairs"), .native_ipairs);
@@ -245,11 +254,11 @@ pub const State = struct {
         const root = try self.newRootClosure(proto);
         var thread = try Thread.init(self.allocator, root);
         defer thread.deinit(self.allocator);
-        try self.runThread(&thread);
+        try self.runThreadUntil(&thread, 0);
     }
 
-    fn runThread(self: *State, thread: *Thread) !void {
-        while (thread.frames.items.len > 0) {
+    fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
+        while (thread.frames.items.len > target_frame_count) {
             var frame = &thread.frames.items[thread.frames.items.len - 1];
             const proto = frame.proto;
             if (frame.pc >= proto.instructions.items.len) {
@@ -266,26 +275,32 @@ pub const State = struct {
                 .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
                 .get_global => |op| self.set(thread, op.register, self.globals.get(constantString(proto, op.name)) orelse .nil),
                 .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
-                .add => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .add)),
-                .sub => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .sub)),
-                .mul => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .mul)),
-                .div => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .div)),
-                .idiv => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .idiv)),
-                .mod => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .mod)),
-                .pow => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .pow)),
-                .unm => |op| self.set(thread, op.dest, try numericUnary(self.get(thread, op.source), .negate)),
-                .concat => |op| self.set(thread, op.dest, try self.concatValues(self.get(thread, op.left), self.get(thread, op.right))),
-                .eq => |op| self.set(thread, op.dest, .{ .boolean = valuesEqual(self.get(thread, op.left), self.get(thread, op.right)) }),
-                .lt => |op| self.set(thread, op.dest, .{ .boolean = try lessThan(self.get(thread, op.left), self.get(thread, op.right)) }),
-                .le => |op| self.set(thread, op.dest, .{ .boolean = try lessEqual(self.get(thread, op.left), self.get(thread, op.right)) }),
+                .add => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .add)),
+                .sub => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .sub)),
+                .mul => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .mul)),
+                .div => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .div)),
+                .idiv => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .idiv)),
+                .mod => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .mod)),
+                .pow => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .pow)),
+                .band => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .band)),
+                .bor => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .bor)),
+                .bxor => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .bxor)),
+                .shl => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .shl)),
+                .shr => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .shr)),
+                .unm => |op| self.set(thread, op.dest, try self.unaryOp(thread, self.get(thread, op.source), .unm)),
+                .bnot => |op| self.set(thread, op.dest, try self.unaryOp(thread, self.get(thread, op.source), .bnot)),
+                .concat => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .concat)),
+                .eq => |op| self.set(thread, op.dest, .{ .boolean = try self.equalValues(thread, self.get(thread, op.left), self.get(thread, op.right)) }),
+                .lt => |op| self.set(thread, op.dest, .{ .boolean = try self.compareValues(thread, self.get(thread, op.left), self.get(thread, op.right), .lt) }),
+                .le => |op| self.set(thread, op.dest, .{ .boolean = try self.compareValues(thread, self.get(thread, op.left), self.get(thread, op.right), .le) }),
                 .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
-                .len => |op| self.set(thread, op.dest, try self.lengthOf(self.get(thread, op.source))),
+                .len => |op| self.set(thread, op.dest, try self.lengthOf(thread, self.get(thread, op.source))),
                 .new_table => |op| self.set(thread, op.dest, try self.newTableWithHints(op.array_hint, op.hash_hint)),
                 .set_list => |op| try self.setList(thread, op),
-                .get_table => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), self.get(thread, op.key))),
-                .set_table => |op| try self.setTable(self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
-                .get_field => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) })),
-                .set_field => |op| try self.setTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
+                .get_table => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), self.get(thread, op.key), 0)),
+                .set_table => |op| try self.setTableFromThread(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
+                .get_field => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, 0)),
+                .set_field => |op| try self.setTableFromThread(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
                 .jmp => |offset| jump(frame, offset),
                 .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) jump(frame, op.offset),
                 .test_set => |op| {
@@ -304,7 +319,7 @@ pub const State = struct {
                 .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
                 .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
                 .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
-                .band, .bor, .bxor, .bnot, .shl, .shr, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
+                .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
@@ -510,6 +525,33 @@ pub const State = struct {
     }
 
     fn getTable(self: *State, table_value: Value, key_value: Value) !Value {
+        return self.getTableDepth(null, table_value, key_value, 0);
+    }
+
+    fn getTableDepth(self: *State, thread: ?*Thread, table_value: Value, key_value: Value, depth: usize) !Value {
+        if (depth > max_metamethod_depth) return self.fail("'__index' chain too long");
+        const key = try self.readableTableKey(key_value) orelse return .nil;
+
+        if (table_value == .table) {
+            const value = table_value.table.get(key);
+            if (value != .nil) return value;
+        }
+
+        const metamethod = try self.getMetamethod(table_value, "__index") orelse {
+            if (table_value == .table) return .nil;
+            return self.fail("attempt to index a non-table value");
+        };
+
+        return switch (metamethod) {
+            .table => self.getTableDepth(thread, metamethod, key, depth + 1),
+            else => if (thread) |active_thread|
+                try self.callOneResult(active_thread, metamethod, &.{ table_value, key })
+            else
+                self.fail("attempt to call a non-function value"),
+        };
+    }
+
+    fn rawGet(self: *State, table_value: Value, key_value: Value) !Value {
         const table = switch (table_value) {
             .table => |table| table,
             else => return self.fail("attempt to index a non-table value"),
@@ -519,11 +561,41 @@ pub const State = struct {
     }
 
     fn setTable(self: *State, table_value: Value, key_value: Value, value: Value) !void {
-        const table = switch (table_value) {
-            .table => |table| table,
-            else => return self.fail("attempt to index a non-table value"),
+        try self.setTableDepth(null, table_value, key_value, value, 0);
+    }
+
+    fn setTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
+        try self.setTableDepth(thread, table_value, key_value, value, 0);
+    }
+
+    fn setTableDepth(self: *State, thread: ?*Thread, table_value: Value, key_value: Value, value: Value, depth: usize) !void {
+        if (depth > max_metamethod_depth) return self.fail("'__newindex' chain too long");
+        const key = try self.writableTableKey(key_value);
+
+        if (table_value == .table) {
+            const table = table_value.table;
+            if (table.get(key) != .nil) {
+                try table.set(self.arena.allocator(), key, value);
+                return;
+            }
+        }
+
+        const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
+            if (table_value == .table) {
+                try table_value.table.set(self.arena.allocator(), key, value);
+                return;
+            }
+            return self.fail("attempt to index a non-table value");
         };
-        try table.set(self.arena.allocator(), try self.writableTableKey(key_value), value);
+
+        switch (metamethod) {
+            .table => try self.setTableDepth(thread, metamethod, key, value, depth + 1),
+            else => if (thread) |active_thread| {
+                _ = try self.callOneResult(active_thread, metamethod, &.{ table_value, key, value });
+            } else {
+                return self.fail("attempt to call a non-function value");
+            },
+        }
     }
 
     fn readableTableKey(self: *State, value: Value) !?Value {
@@ -543,10 +615,13 @@ pub const State = struct {
         };
     }
 
-    fn lengthOf(self: *State, value: Value) !Value {
+    fn lengthOf(self: *State, thread: *Thread, value: Value) !Value {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
-            .table => |table| .{ .integer = table.len() },
+            .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod|
+                try self.callOneResult(thread, metamethod, &.{value})
+            else
+                .{ .integer = table.len() },
             else => self.fail("attempt to get length of a non-string value"),
         };
     }
@@ -560,31 +635,42 @@ pub const State = struct {
     }
 
     fn callValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        const callee = self.get(thread, op.base);
         const resolved = try self.resolveCall(thread, op);
+        try self.invokeValue(thread, resolved, 0);
+    }
+
+    fn invokeValue(self: *State, thread: *Thread, resolved: bytecode.Call, depth: usize) anyerror!void {
+        if (depth > max_metamethod_depth) return self.fail("'__call' chain too long");
+        const callee = self.get(thread, resolved.base);
         switch (callee) {
             .closure => |closure| try self.callClosure(thread, resolved, closure),
             .native_print => {
                 for (0..resolved.arg_count) |index| {
                     if (index != 0) try self.stdout.append(self.allocator, '\t');
-                    try appendValue(self.allocator, &self.stdout, self.get(thread, resolved.base + 1 + @as(bytecode.Register, @intCast(index))));
+                    const text = try self.valueToString(thread, self.get(thread, resolved.base + 1 + @as(bytecode.Register, @intCast(index))));
+                    try self.stdout.appendSlice(self.allocator, text);
                 }
                 try self.stdout.append(self.allocator, '\n');
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{});
             },
             .native_tostring => {
-                var out = std.ArrayList(u8).empty;
-                defer out.deinit(self.allocator);
                 const value = if (resolved.arg_count == 0) Value.nil else self.get(thread, resolved.base + 1);
-                try appendValue(self.allocator, &out, value);
-                try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .string = try self.intern(out.items) }});
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .string = try self.valueToString(thread, value) }});
             },
+            .native_getmetatable => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.getMetatableValue(argValue(self, thread, resolved, 0))}),
+            .native_setmetatable => {
+                const table_value = argValue(self, thread, resolved, 0);
+                try self.setMetatableValue(table_value, argValue(self, thread, resolved, 1));
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{table_value});
+            },
+            .native_rawequal => try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .boolean = valuesEqual(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1)) }}),
             .native_rawget => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.rawGet(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1))}),
             .native_rawset => {
                 const table = argValue(self, thread, resolved, 0);
                 try self.rawSet(table, argValue(self, thread, resolved, 1), argValue(self, thread, resolved, 2));
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{table});
             },
+            .native_rawlen => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.rawLen(argValue(self, thread, resolved, 0))}),
             .native_next => {
                 const values = try self.nextValues(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1));
                 try self.returnValues(thread, resolved.base, resolved.return_count, &values);
@@ -609,7 +695,137 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
             },
             .native_select => try self.selectValues(thread, resolved),
-            else => return self.fail("attempt to call a non-function value"),
+            else => {
+                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
+                try self.prependCallArgument(thread, resolved, metamethod, callee);
+                try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
+            },
+        }
+    }
+
+    fn prependCallArgument(self: *State, thread: *Thread, resolved: bytecode.Call, metamethod: Value, receiver: Value) !void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const base = frame.base + resolved.base;
+        try thread.ensureStack(self.allocator, base + 2 + resolved.arg_count);
+        var index: usize = resolved.arg_count;
+        while (index > 0) {
+            index -= 1;
+            thread.stack.items[base + 2 + index] = thread.stack.items[base + 1 + index];
+        }
+        thread.stack.items[base] = metamethod;
+        thread.stack.items[base + 1] = receiver;
+    }
+
+    fn callOneResult(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!Value {
+        const frame_count = thread.frames.items.len;
+        const frame = thread.frames.items[frame_count - 1];
+        const relative_base: bytecode.Register = frame.proto.max_registers;
+        const base = frame.base + @as(usize, relative_base);
+        try thread.ensureStack(self.allocator, base + 1 + args.len);
+        thread.stack.items[base] = callable;
+        for (args, 0..) |arg, index| thread.stack.items[base + 1 + index] = arg;
+
+        try self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = 1 }, 0);
+        try self.runThreadUntil(thread, frame_count);
+        return thread.stack.items[base];
+    }
+
+    fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
+        if (try self.getMetamethod(value, "__tostring")) |metamethod| {
+            const result = try self.callOneResult(thread, metamethod, &.{value});
+            return switch (result) {
+                .string => |string| string,
+                else => self.fail("'__tostring' must return a string"),
+            };
+        }
+
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try appendValue(self.allocator, &out, value);
+        return self.intern(out.items);
+    }
+
+    fn getMetatableValue(self: *State, value: Value) !Value {
+        _ = self;
+        const metatable = switch (value) {
+            .table => |table| table.metatable orelse return .nil,
+            else => return .nil,
+        };
+        const locked = metatable.get(.{ .string = "__metatable" });
+        if (locked != .nil) return locked;
+        return .{ .table = metatable };
+    }
+
+    fn setMetatableValue(self: *State, table_value: Value, metatable_value: Value) !void {
+        const table = try self.expectTable(table_value);
+        if (table.metatable) |metatable| {
+            if (metatable.get(.{ .string = "__metatable" }) != .nil) return self.fail("cannot change a protected metatable");
+        }
+        table.metatable = switch (metatable_value) {
+            .nil => null,
+            .table => |metatable| metatable,
+            else => return self.fail("nil or table expected"),
+        };
+    }
+
+    fn getMetamethod(self: *State, value: Value, name: []const u8) !?Value {
+        _ = self;
+        const metatable = switch (value) {
+            .table => |table| table.metatable orelse return null,
+            else => return null,
+        };
+        const metamethod = metatable.get(.{ .string = name });
+        return if (metamethod == .nil) null else metamethod;
+    }
+
+    fn getEitherMetamethod(self: *State, lhs: Value, rhs: Value, name: []const u8) !?Value {
+        if (try self.getMetamethod(lhs, name)) |metamethod| return metamethod;
+        return self.getMetamethod(rhs, name);
+    }
+
+    fn rawLen(self: *State, value: Value) !Value {
+        return switch (value) {
+            .string => |string| .{ .integer = @intCast(string.len) },
+            .table => |table| .{ .integer = table.len() },
+            else => self.fail("table or string expected"),
+        };
+    }
+
+    fn binaryOp(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: BinaryOp) !Value {
+        if (op == .concat and luaStringLike(lhs) and luaStringLike(rhs)) return self.concatValues(lhs, rhs);
+        if (try rawBinaryOp(lhs, rhs, op)) |value| return value;
+        const metamethod_name = binaryMetamethod(op);
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse return self.fail("attempt to perform operation on unsupported values");
+        return self.callOneResult(thread, metamethod, &.{ lhs, rhs });
+    }
+
+    fn unaryOp(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) !Value {
+        if (rawUnaryOp(value, op)) |result| return result;
+        const metamethod = (try self.getMetamethod(value, unaryMetamethod(op))) orelse return self.fail("attempt to perform operation on unsupported value");
+        return self.callOneResult(thread, metamethod, &.{value});
+    }
+
+    fn equalValues(self: *State, thread: *Thread, lhs: Value, rhs: Value) !bool {
+        if (valuesEqual(lhs, rhs)) return true;
+        if (lhs != .table or rhs != .table) return false;
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__eq")) orelse return false;
+        return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+    }
+
+    fn compareValues(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: CompareOp) !bool {
+        if (rawCompare(lhs, rhs, op)) |result| return result;
+        switch (op) {
+            .lt => {
+                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+            },
+            .le => {
+                if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
+                    return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+                }
+                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                return !truthy(try self.callOneResult(thread, lt, &.{ rhs, lhs }));
+            },
         }
     }
 
@@ -631,7 +847,7 @@ pub const State = struct {
         });
     }
 
-    fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
+    fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) anyerror!void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const callee = self.get(thread, op.base);
         const resolved = try self.resolveCall(thread, op);
@@ -642,7 +858,9 @@ pub const State = struct {
                 thread.frames.items[thread.frames.items.len - 1] = new_frame;
             },
             else => {
+                const frame_count = thread.frames.items.len;
                 try self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count });
+                try self.runThreadUntil(thread, frame_count);
                 try self.returnFromFrame(thread, resolved.base, frame.return_count);
             },
         }
@@ -716,9 +934,10 @@ pub const State = struct {
 
     fn namedVarargTable(self: *State, varargs: []const Value) !Value {
         const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
-        try self.setTable(table_value, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
+        const table = table_value.table;
+        try table.set(self.arena.allocator(), .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
         for (varargs, 0..) |value, index| {
-            try self.setTable(table_value, .{ .integer = @intCast(index + 1) }, value);
+            try table.set(self.arena.allocator(), .{ .integer = @intCast(index + 1) }, value);
         }
         return table_value;
     }
@@ -788,12 +1007,6 @@ pub const State = struct {
             try values.append(self.allocator, argValue(self, thread, op, @intCast(arg_index)));
         }
         try self.returnValues(thread, op.base, op.return_count, values.items);
-    }
-
-    fn rawGet(self: *State, table_value: Value, key_value: Value) !Value {
-        const table = try self.expectTable(table_value);
-        const key = try self.readableTableKey(key_value) orelse return .nil;
-        return table.get(key);
     }
 
     fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
@@ -892,27 +1105,39 @@ pub fn executeSource(allocator: std.mem.Allocator, source: []const u8) !process.
     };
 }
 
-const NumericOp = enum { add, sub, mul, div, idiv, mod, pow };
-const UnaryOp = enum { negate };
+const BinaryOp = enum { add, sub, mul, div, idiv, mod, pow, band, bor, bxor, shl, shr, concat };
+const UnaryMetamethodOp = enum { unm, bnot };
+const CompareOp = enum { lt, le };
 
-fn numericBinary(lhs: Value, rhs: Value, op: NumericOp) !Value {
-    if (op != .div and op != .pow) {
-        if (toInteger(lhs)) |left| {
-            if (toInteger(rhs)) |right| {
-                return switch (op) {
-                    .add => .{ .integer = left +% right },
-                    .sub => .{ .integer = left -% right },
-                    .mul => .{ .integer = left *% right },
-                    .idiv => if (right == 0) error.RuntimeError else .{ .integer = floorDiv(left, right) },
-                    .mod => if (right == 0) error.RuntimeError else .{ .integer = floorMod(left, right) },
-                    else => unreachable,
-                };
+fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
+    switch (op) {
+        .add, .sub, .mul, .idiv, .mod => {
+            if (toInteger(lhs)) |left| {
+                if (toInteger(rhs)) |right| {
+                    return switch (op) {
+                        .add => .{ .integer = left +% right },
+                        .sub => .{ .integer = left -% right },
+                        .mul => .{ .integer = left *% right },
+                        .idiv => if (right == 0) error.RuntimeError else .{ .integer = floorDiv(left, right) },
+                        .mod => if (right == 0) error.RuntimeError else .{ .integer = floorMod(left, right) },
+                        else => unreachable,
+                    };
+                }
             }
-        }
+        },
+        .band, .bor, .bxor, .shl, .shr => {
+            if (toInteger(lhs)) |left| {
+                if (toInteger(rhs)) |right| {
+                    return .{ .integer = rawBitwise(left, right, op) };
+                }
+            }
+        },
+        .div, .pow, .concat => {},
     }
 
-    const left = try toNumber(lhs);
-    const right = try toNumber(rhs);
+    if (op == .concat) return null;
+    const left = toNumberMaybe(lhs) orelse return null;
+    const right = toNumberMaybe(rhs) orelse return null;
     return switch (op) {
         .add => .{ .number = left + right },
         .sub => .{ .number = left - right },
@@ -921,16 +1146,80 @@ fn numericBinary(lhs: Value, rhs: Value, op: NumericOp) !Value {
         .idiv => .{ .number = @floor(left / right) },
         .mod => .{ .number = left - @floor(left / right) * right },
         .pow => .{ .number = std.math.pow(f64, left, right) },
+        else => null,
     };
 }
 
-fn numericUnary(value: Value, op: UnaryOp) !Value {
+fn rawUnaryOp(value: Value, op: UnaryMetamethodOp) ?Value {
     return switch (op) {
-        .negate => switch (value) {
+        .unm => switch (value) {
             .integer => |integer| .{ .integer = -%integer },
             .number => |number| .{ .number = -number },
-            else => .{ .number = -(try toNumber(value)) },
+            else => if (toNumberMaybe(value)) |number| .{ .number = -number } else null,
         },
+        .bnot => if (toInteger(value)) |integer| .{ .integer = ~integer } else null,
+    };
+}
+
+fn rawBitwise(left: i64, right: i64, op: BinaryOp) i64 {
+    return switch (op) {
+        .band => left & right,
+        .bor => left | right,
+        .bxor => left ^ right,
+        .shl => shiftInteger(left, right),
+        .shr => shiftInteger(left, -right),
+        else => unreachable,
+    };
+}
+
+fn shiftInteger(value: i64, amount: i64) i64 {
+    if (amount == 0) return value;
+    if (amount >= 64 or amount <= -64) return 0;
+    return if (amount > 0)
+        value << @intCast(amount)
+    else
+        @as(i64, @bitCast(@as(u64, @bitCast(value)) >> @intCast(-amount)));
+}
+
+fn rawCompare(lhs: Value, rhs: Value, op: CompareOp) ?bool {
+    return switch (lhs) {
+        .integer, .number => if (toNumberMaybe(lhs)) |left| if (toNumberMaybe(rhs)) |right| switch (op) {
+            .lt => left < right,
+            .le => left <= right,
+        } else null else null,
+        .string => |left| switch (rhs) {
+            .string => |right| switch (op) {
+                .lt => std.mem.lessThan(u8, left, right),
+                .le => !std.mem.lessThan(u8, right, left),
+            },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn binaryMetamethod(op: BinaryOp) []const u8 {
+    return switch (op) {
+        .add => "__add",
+        .sub => "__sub",
+        .mul => "__mul",
+        .div => "__div",
+        .idiv => "__idiv",
+        .mod => "__mod",
+        .pow => "__pow",
+        .band => "__band",
+        .bor => "__bor",
+        .bxor => "__bxor",
+        .shl => "__shl",
+        .shr => "__shr",
+        .concat => "__concat",
+    };
+}
+
+fn unaryMetamethod(op: UnaryMetamethodOp) []const u8 {
+    return switch (op) {
+        .unm => "__unm",
+        .bnot => "__bnot",
     };
 }
 
@@ -953,8 +1242,12 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .closure => |value| rhs == .closure and value == rhs.closure,
         .native_print => rhs == .native_print,
         .native_tostring => rhs == .native_tostring,
+        .native_getmetatable => rhs == .native_getmetatable,
+        .native_setmetatable => rhs == .native_setmetatable,
+        .native_rawequal => rhs == .native_rawequal,
         .native_rawget => rhs == .native_rawget,
         .native_rawset => rhs == .native_rawset,
+        .native_rawlen => rhs == .native_rawlen,
         .native_next => rhs == .native_next,
         .native_pairs => rhs == .native_pairs,
         .native_ipairs => rhs == .native_ipairs,
@@ -1001,6 +1294,17 @@ fn toNumber(value: Value) !f64 {
         .number => |number| number,
         .string => |string| parseLuaNumber(string),
         else => error.RuntimeError,
+    };
+}
+
+fn toNumberMaybe(value: Value) ?f64 {
+    return toNumber(value) catch null;
+}
+
+fn luaStringLike(value: Value) bool {
+    return switch (value) {
+        .integer, .number, .string => true,
+        else => false,
     };
 }
 
@@ -1157,8 +1461,12 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .closure => try out.appendSlice(allocator, "function"),
         .native_print => try out.appendSlice(allocator, "function: print"),
         .native_tostring => try out.appendSlice(allocator, "function: tostring"),
+        .native_getmetatable => try out.appendSlice(allocator, "function: getmetatable"),
+        .native_setmetatable => try out.appendSlice(allocator, "function: setmetatable"),
+        .native_rawequal => try out.appendSlice(allocator, "function: rawequal"),
         .native_rawget => try out.appendSlice(allocator, "function: rawget"),
         .native_rawset => try out.appendSlice(allocator, "function: rawset"),
+        .native_rawlen => try out.appendSlice(allocator, "function: rawlen"),
         .native_next => try out.appendSlice(allocator, "function: next"),
         .native_pairs => try out.appendSlice(allocator, "function: pairs"),
         .native_ipairs => try out.appendSlice(allocator, "function: ipairs"),
