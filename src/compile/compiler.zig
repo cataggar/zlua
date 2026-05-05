@@ -100,11 +100,12 @@ const FunctionCompiler = struct {
         try self.leaveScope();
     }
 
-    fn compileFunctionBody(self: *FunctionCompiler, body: ast.FunctionBody, method: bool) !*proto_mod.Proto {
+    fn compileFunctionBody(self: *FunctionCompiler, body: ast.FunctionBody, method: bool, debug_name: ?[]const u8) !*proto_mod.Proto {
         const child = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(child);
         child.* = proto_mod.Proto.init(self.allocator);
         errdefer child.deinit();
+        if (debug_name) |name| try child.setDebugName(name);
 
         var child_context = FunctionCompiler.init(self.allocator, child, self);
         errdefer child_context.deinit();
@@ -228,7 +229,7 @@ const FunctionCompiler = struct {
     fn compileFunctionDecl(self: *FunctionCompiler, decl: ast.FunctionDecl) anyerror!void {
         const mark = self.registerMark();
         const closure_reg = try self.allocReg();
-        const child = try self.compileFunctionBody(decl.body, decl.name.method != null);
+        const child = try self.compileFunctionBody(decl.body, decl.name.method != null, functionDeclDebugName(decl.name));
         const child_index = try self.proto.addChild(child);
         _ = try self.emit(.{ .closure = .{ .dest = closure_reg, .proto = child_index } });
 
@@ -254,7 +255,7 @@ const FunctionCompiler = struct {
 
     fn compileLocalFunctionDecl(self: *FunctionCompiler, decl: ast.LocalFunctionDecl) anyerror!void {
         const register = try self.declareLocal(decl.name.name);
-        const child = try self.compileFunctionBody(decl.body, false);
+        const child = try self.compileFunctionBody(decl.body, false, decl.name.name);
         const child_index = try self.proto.addChild(child);
         _ = try self.emit(.{ .closure = .{ .dest = register, .proto = child_index } });
     }
@@ -315,7 +316,7 @@ const FunctionCompiler = struct {
 
     fn compileNumericFor(self: *FunctionCompiler, stmt: ast.NumericFor) anyerror!void {
         try self.enterScope();
-        const base = try self.declareLocal(stmt.name.name);
+        const base = try self.allocReg();
         try self.compileExpr(stmt.start, base);
         const limit = try self.allocReg();
         try self.compileExpr(stmt.limit, limit);
@@ -326,6 +327,9 @@ const FunctionCompiler = struct {
             const one = try self.proto.addConstant(.{ .integer = "1" });
             _ = try self.emit(.{ .load_const = .{ .dest = step, .constant = one } });
         }
+
+        const debug_index = try self.proto.addLocal(.{ .name = stmt.name.name, .register = base, .start_pc = self.proto.pc() });
+        try self.locals.append(self.allocator, .{ .name = stmt.name.name, .register = base, .debug_index = debug_index });
 
         const prep = try self.emit(.{ .for_prep = .{ .base = base, .offset = 0 } });
         const body_start = self.proto.pc();
@@ -425,7 +429,7 @@ const FunctionCompiler = struct {
             .identifier => |identifier| try self.loadName(identifier.name, dest),
             .table_constructor => |constructor| try self.compileTableConstructor(constructor, dest),
             .function_literal => |body| {
-                const child = try self.compileFunctionBody(body, false);
+                const child = try self.compileFunctionBody(body, false, null);
                 const child_index = try self.proto.addChild(child);
                 _ = try self.emit(.{ .closure = .{ .dest = dest, .proto = child_index } });
             },
@@ -950,6 +954,12 @@ fn isMultiResultExpr(expr: *const ast.Expr) bool {
 
 fn isCloseAttribute(attribute: ?ast.Identifier) bool {
     return if (attribute) |attr| std.mem.eql(u8, attr.name, "close") else false;
+}
+
+fn functionDeclDebugName(name: ast.FunctionName) []const u8 {
+    if (name.method) |method| return method.name;
+    if (name.fields.len != 0) return name.fields[name.fields.len - 1].name;
+    return name.root.name;
 }
 
 fn callReleaseMark(dest: bytecode.Register, count: u16) bytecode.Register {

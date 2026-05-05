@@ -37,10 +37,7 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
             try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(state.last_error_value.string) } });
             return;
         }
-        const unquoted = try removeSyntaxQuotes(state.allocator, source);
-        defer state.allocator.free(unquoted);
-        const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
-        const message = try std.fmt.allocPrint(state.allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number unexpected symbol", .{ source, unquoted, unicode_prefix });
+        const message = try loadFailureMessage(state.allocator, source);
         defer state.allocator.free(message);
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
@@ -110,6 +107,78 @@ fn isReaderFunction(value: Value) bool {
         .closure, .coroutine_wrapper, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => true,
         else => false,
     };
+}
+
+fn loadFailureMessage(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+    if (unknownAttribute(source)) |name| return std.fmt.allocPrint(allocator, "unknown attribute '{s}'", .{name});
+    if (try constAssignmentMessage(allocator, source)) |message| return message;
+
+    const unquoted = try removeSyntaxQuotes(allocator, source);
+    defer allocator.free(unquoted);
+    const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
+    return std.fmt.allocPrint(allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number unexpected symbol", .{ source, unquoted, unicode_prefix });
+}
+
+fn unknownAttribute(source: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, source, cursor, '<')) |open| {
+        const close = std.mem.indexOfScalarPos(u8, source, open + 1, '>') orelse return null;
+        const name = std.mem.trim(u8, source[open + 1 .. close], " \t\r\n");
+        if (name.len != 0 and !std.mem.eql(u8, name, "const") and !std.mem.eql(u8, name, "close")) return name;
+        cursor = close + 1;
+    }
+    return null;
+}
+
+fn constAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
+    var names = std.ArrayList([]const u8).empty;
+    defer names.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_number: usize = if (source.len != 0 and source[0] == '\n') 0 else 1;
+    while (lines.next()) |line| : (line_number += 1) {
+        if (attributeNameBefore(line, "<const>")) |name| try names.append(allocator, name);
+        if (attributeNameBefore(line, "<close>")) |name| try names.append(allocator, name);
+
+        for (names.items) |name| {
+            if (containsAssignmentTo(line, name)) {
+                const message = try std.fmt.allocPrint(allocator, ":{d}: attempt to assign to const variable '{s}'", .{ line_number, name });
+                return message;
+            }
+        }
+    }
+
+    return null;
+}
+
+fn attributeNameBefore(line: []const u8, attribute: []const u8) ?[]const u8 {
+    const attr_start = std.mem.indexOf(u8, line, attribute) orelse return null;
+    var end = attr_start;
+    while (end > 0 and std.ascii.isWhitespace(line[end - 1])) end -= 1;
+    var start = end;
+    while (start > 0 and isIdentifierByte(line[start - 1])) start -= 1;
+    if (start == end) return null;
+    return line[start..end];
+}
+
+fn containsAssignmentTo(line: []const u8, name: []const u8) bool {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, line, cursor, name)) |index| {
+        const before_ok = index == 0 or !isIdentifierByte(line[index - 1]);
+        const name_end = index + name.len;
+        const after_ok = name_end == line.len or !isIdentifierByte(line[name_end]);
+        if (before_ok and after_ok) {
+            var assign = name_end;
+            while (assign < line.len and std.ascii.isWhitespace(line[assign])) assign += 1;
+            if (assign < line.len and line[assign] == '=' and (assign + 1 == line.len or line[assign + 1] != '=')) return true;
+        }
+        cursor = name_end;
+    }
+    return false;
+}
+
+fn isIdentifierByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
 pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {

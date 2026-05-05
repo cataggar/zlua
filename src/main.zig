@@ -124,6 +124,8 @@ fn executeChunk(allocator: std.mem.Allocator, state: *zlua.runtime.State, source
         const detail = state.last_error orelse @errorName(err);
         const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
         defer allocator.free(message);
+        try stdoutWrite(state.options.io.?, state.stdout.items);
+        try stderrWrite(state.options.io.?, state.stderr.items);
         try stderrWrite(state.options.io.?, message);
         return 1;
     };

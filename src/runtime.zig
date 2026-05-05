@@ -842,6 +842,14 @@ pub const State = struct {
         return frame.varargs.len;
     }
 
+    pub fn currentFunctionName(self: *State, thread: *Thread, level: i64) ?[]const u8 {
+        _ = self;
+        if (level < 1) return null;
+        const depth: usize = @intCast(level);
+        if (depth > thread.frames.items.len) return null;
+        return thread.frames.items[thread.frames.items.len - depth].proto.debug_name;
+    }
+
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
         try self.setGlobal(name, value);
     }

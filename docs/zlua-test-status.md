@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=14`, `categorized_failed=18`, `skipped=1`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=15`, `categorized_failed=17`, `skipped=1`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused `calls.lua` work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,14 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, and `just official-file calls`.
+Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, and `just official-file constructs`.
+
+Latest focused `constructs.lua` work:
+
+- Numeric `for` variables are not visible to their own start/limit/step expressions, so nested `for i = i, ...` resolves the initializer from the outer scope.
+- CLI error exits flush buffered stdout/stderr before printing the runtime error, matching CLua-visible progress output.
+- `load` reports official-compatible messages for unknown local attributes and assignment to `<const>`/`<close>` locals.
+- `debug.getinfo(level, "n").name` reports names for named Lua function declarations.
 
 Latest focused `calls.lua` work:
 
@@ -49,7 +56,7 @@ Latest focused `closure.lua` work:
 - Automatic GC now clears weak-table sentinels at safe loop backedges without retaining stale temporaries indefinitely.
 - Debug upvalue APIs used by the closure tests are available: `debug.getupvalue`, `debug.setupvalue`, `debug.upvalueid`, and `debug.upvaluejoin`.
 
-`calls.lua` now passes in the basic official dashboard.
+`constructs.lua` now passes in the basic official dashboard.
 
 ## Official Lua 5.5 Files
 
@@ -66,7 +73,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `calls.lua` | Pass | Pass |  |
 | `closure.lua` | Pass | Pass |  |
 | `code.lua` | Pass | Pass |  |
-| `constructs.lua` | Pass | XFail | `runtime` |
+| `constructs.lua` | Pass | Pass |  |
 | `coroutine.lua` | Pass | XFail | `runtime` |
 | `cstack.lua` | Pass | XFail | `runtime` |
 | `db.lua` | Pass | XFail | `runtime` |
@@ -102,7 +109,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 14 |
-| Categorized zlua failures | 18 |
+| zlua passes | 15 |
+| Categorized zlua failures | 17 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

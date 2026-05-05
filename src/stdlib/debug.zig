@@ -30,6 +30,9 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try table.set(state.allocator, .{ .string = try state.intern("currentline") }, .{ .integer = currentline });
     const extraargs: i64 = if (if (target == .integer) state.currentExtraArgs(thread, target.integer) else null) |count| @intCast(count) else 0;
     try table.set(state.allocator, .{ .string = try state.intern("extraargs") }, .{ .integer = extraargs });
+    if (if (target == .integer) state.currentFunctionName(thread, target.integer) else if (target == .closure) target.closure.proto.debug_name else null) |name| {
+        try table.set(state.allocator, .{ .string = try state.intern("name") }, .{ .string = try state.intern(name) });
+    }
     try state.returnValues(thread, op.base, op.return_count, &.{value});
 }
 

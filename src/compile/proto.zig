@@ -32,6 +32,7 @@ pub const Proto = struct {
     param_count: u16 = 0,
     is_vararg: bool = false,
     source_name: []const u8 = "zlua",
+    debug_name: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Proto {
         return .{
@@ -117,6 +118,10 @@ pub const Proto = struct {
     pub fn addChild(self: *Proto, child: *Proto) !bytecode.ProtoIndex {
         try self.children.append(self.allocator, child);
         return @intCast(self.children.items.len - 1);
+    }
+
+    pub fn setDebugName(self: *Proto, name: []const u8) !void {
+        self.debug_name = try self.dupe(name);
     }
 
     fn ownConstant(self: *Proto, constant: bytecode.Constant) !bytecode.Constant {
