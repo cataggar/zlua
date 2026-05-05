@@ -65,7 +65,7 @@ fn writeInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instr
         .get_field => |op| try appendFmt(allocator, out, "GET_FIELD r{d} r{d} K{d}", .{ op.dest, op.table, op.name }),
         .set_field => |op| try appendFmt(allocator, out, "SET_FIELD r{d} K{d} r{d}", .{ op.table, op.name, op.value }),
         .new_table => |op| try appendFmt(allocator, out, "NEW_TABLE r{d} array={d} hash={d}", .{ op.dest, op.array_hint, op.hash_hint }),
-        .set_list => |op| try appendFmt(allocator, out, "SET_LIST r{d} first=r{d} count={d}", .{ op.table, op.first, op.count }),
+        .set_list => |op| try appendFmt(allocator, out, "SET_LIST r{d} first=r{d} count={d} start={d}", .{ op.table, op.first, op.count, op.start_index }),
         .add => |op| try writeBinary(allocator, out, "ADD", op),
         .sub => |op| try writeBinary(allocator, out, "SUB", op),
         .mul => |op| try writeBinary(allocator, out, "MUL", op),

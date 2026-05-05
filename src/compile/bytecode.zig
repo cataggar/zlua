@@ -6,6 +6,7 @@ pub const ProtoIndex = u32;
 pub const UpvalueIndex = u16;
 pub const LocalIndex = u16;
 pub const JumpOffset = i32;
+pub const multret_count: u16 = std.math.maxInt(u16);
 
 pub const Constant = union(enum) {
     nil,
@@ -145,6 +146,7 @@ pub const SetList = struct {
     table: Register,
     first: Register,
     count: u32,
+    start_index: u32,
 };
 
 pub const Unary = struct {

@@ -32,6 +32,7 @@ pub const Value = union(enum) {
     native_ipairs,
     native_ipairs_iter,
     native_table_create,
+    native_select,
 };
 
 const Closure = struct {
@@ -153,12 +154,14 @@ const Table = struct {
 pub const Thread = struct {
     stack: std.ArrayList(Value) = .empty,
     frames: std.ArrayList(CallFrame) = .empty,
+    last_result_base: usize = 0,
+    last_result_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, proto: *const proto_mod.Proto) !Thread {
         var thread = Thread{};
         errdefer thread.deinit(allocator);
         try thread.ensureStack(allocator, @max(proto.max_registers, 1));
-        try thread.frames.append(allocator, .{ .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0 });
+        try thread.frames.append(allocator, .{ .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0, .varargs = &.{} });
         return thread;
     }
 
@@ -183,6 +186,7 @@ const CallFrame = struct {
     pc: usize,
     return_start: usize,
     return_count: u16,
+    varargs: []const Value,
 };
 
 pub const State = struct {
@@ -209,6 +213,7 @@ pub const State = struct {
         try state.globals.put(try state.intern("next"), .native_next);
         try state.globals.put(try state.intern("pairs"), .native_pairs);
         try state.globals.put(try state.intern("ipairs"), .native_ipairs);
+        try state.globals.put(try state.intern("select"), .native_select);
 
         const table_lib = try state.newTableWithHints(0, 1);
         try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
@@ -264,6 +269,7 @@ pub const State = struct {
                 .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
                 .len => |op| self.set(thread, op.dest, try self.lengthOf(self.get(thread, op.source))),
                 .new_table => |op| self.set(thread, op.dest, try self.newTableWithHints(op.array_hint, op.hash_hint)),
+                .set_list => |op| try self.setList(thread, op),
                 .get_table => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), self.get(thread, op.key))),
                 .set_table => |op| try self.setTable(self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
                 .get_field => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) })),
@@ -276,12 +282,14 @@ pub const State = struct {
                     if (truthy(value) == op.jump_if_truthy) jump(frame, op.offset);
                 },
                 .call => |op| try self.callValue(thread, op),
+                .tail_call => |op| try self.tailCallValue(thread, op),
                 .ret => |op| try self.returnFromFrame(thread, op.first, op.count),
+                .vararg => |op| try self.loadVarargs(thread, op),
                 .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) jump(frame, op.offset),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
                 .tfor_loop => |op| jump(frame, op.offset),
                 .closure => |op| self.set(thread, op.dest, try self.newClosure(proto.children.items[op.proto])),
-                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
+                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
@@ -471,53 +479,54 @@ pub const State = struct {
 
     fn callValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const callee = self.get(thread, op.base);
+        const resolved = try self.resolveCall(thread, op);
         switch (callee) {
-            .closure => |closure| try self.callClosure(thread, op, closure),
+            .closure => |closure| try self.callClosure(thread, resolved, closure),
             .native_print => {
-                for (0..op.arg_count) |index| {
+                for (0..resolved.arg_count) |index| {
                     if (index != 0) try self.stdout.append(self.allocator, '\t');
-                    try appendValue(self.allocator, &self.stdout, self.get(thread, op.base + 1 + @as(bytecode.Register, @intCast(index))));
+                    try appendValue(self.allocator, &self.stdout, self.get(thread, resolved.base + 1 + @as(bytecode.Register, @intCast(index))));
                 }
                 try self.stdout.append(self.allocator, '\n');
-                for (0..op.return_count) |index| self.set(thread, op.base + @as(bytecode.Register, @intCast(index)), .nil);
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{});
             },
             .native_tostring => {
                 var out = std.ArrayList(u8).empty;
                 defer out.deinit(self.allocator);
-                const value = if (op.arg_count == 0) Value.nil else self.get(thread, op.base + 1);
+                const value = if (resolved.arg_count == 0) Value.nil else self.get(thread, resolved.base + 1);
                 try appendValue(self.allocator, &out, value);
-                if (op.return_count > 0) self.set(thread, op.base, .{ .string = try self.intern(out.items) });
-                for (1..op.return_count) |index| self.set(thread, op.base + @as(bytecode.Register, @intCast(index)), .nil);
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .string = try self.intern(out.items) }});
             },
-            .native_rawget => try self.returnValues(thread, op.base, op.return_count, &.{try self.rawGet(argValue(self, thread, op, 0), argValue(self, thread, op, 1))}),
+            .native_rawget => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.rawGet(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1))}),
             .native_rawset => {
-                const table = argValue(self, thread, op, 0);
-                try self.rawSet(table, argValue(self, thread, op, 1), argValue(self, thread, op, 2));
-                try self.returnValues(thread, op.base, op.return_count, &.{table});
+                const table = argValue(self, thread, resolved, 0);
+                try self.rawSet(table, argValue(self, thread, resolved, 1), argValue(self, thread, resolved, 2));
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{table});
             },
             .native_next => {
-                const values = try self.nextValues(argValue(self, thread, op, 0), argValue(self, thread, op, 1));
-                try self.returnValues(thread, op.base, op.return_count, &values);
+                const values = try self.nextValues(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1));
+                try self.returnValues(thread, resolved.base, resolved.return_count, &values);
             },
             .native_pairs => {
-                const table = try self.expectTable(argValue(self, thread, op, 0));
+                const table = try self.expectTable(argValue(self, thread, resolved, 0));
                 _ = table;
-                try self.returnValues(thread, op.base, op.return_count, &.{ .native_next, argValue(self, thread, op, 0), .nil });
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_next, argValue(self, thread, resolved, 0), .nil });
             },
             .native_ipairs => {
-                const table = try self.expectTable(argValue(self, thread, op, 0));
+                const table = try self.expectTable(argValue(self, thread, resolved, 0));
                 _ = table;
-                try self.returnValues(thread, op.base, op.return_count, &.{ .native_ipairs_iter, argValue(self, thread, op, 0), .{ .integer = 0 } });
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_ipairs_iter, argValue(self, thread, resolved, 0), .{ .integer = 0 } });
             },
             .native_ipairs_iter => {
-                const values = try self.ipairsIterValues(argValue(self, thread, op, 0), argValue(self, thread, op, 1));
-                try self.returnValues(thread, op.base, op.return_count, &values);
+                const values = try self.ipairsIterValues(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1));
+                try self.returnValues(thread, resolved.base, resolved.return_count, &values);
             },
             .native_table_create => {
-                const array_hint = try self.tableCreateHint(argValue(self, thread, op, 0));
-                const hash_hint = if (op.arg_count >= 2) try self.tableCreateHint(argValue(self, thread, op, 1)) else 0;
-                try self.returnValues(thread, op.base, op.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
+                const array_hint = try self.tableCreateHint(argValue(self, thread, resolved, 0));
+                const hash_hint = if (resolved.arg_count >= 2) try self.tableCreateHint(argValue(self, thread, resolved, 1)) else 0;
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
             },
+            .native_select => try self.selectValues(thread, resolved),
             else => return self.fail("attempt to call a non-function value"),
         }
     }
@@ -527,46 +536,172 @@ pub const State = struct {
 
         const caller = thread.frames.items[thread.frames.items.len - 1];
         const base = caller.base + op.base;
-        const register_count = @max(closure.proto.max_registers, 1);
-        try thread.ensureStack(self.allocator, base + register_count);
-
-        const copied = @min(@as(usize, op.arg_count), @as(usize, closure.proto.max_registers));
-        for (0..copied) |index| thread.stack.items[base + index] = thread.stack.items[base + 1 + index];
-        for (copied..register_count) |index| thread.stack.items[base + index] = .nil;
+        const frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
 
         try thread.frames.append(self.allocator, .{
-            .proto = closure.proto,
-            .base = base,
-            .pc = 0,
-            .return_start = base,
-            .return_count = op.return_count,
+            .proto = frame.proto,
+            .base = frame.base,
+            .pc = frame.pc,
+            .return_start = frame.return_start,
+            .return_count = frame.return_count,
+            .varargs = frame.varargs,
         });
+    }
+
+    fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const callee = self.get(thread, op.base);
+        const resolved = try self.resolveCall(thread, op);
+        switch (callee) {
+            .closure => |closure| {
+                const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
+                thread.frames.items[thread.frames.items.len - 1] = new_frame;
+            },
+            else => {
+                try self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count });
+                try self.returnFromFrame(thread, resolved.base, frame.return_count);
+            },
+        }
     }
 
     fn returnFromFrame(self: *State, thread: *Thread, first: bytecode.Register, count: u16) !void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
+        const source_start = frame.base + first;
+        const source_count = try self.resolveResultCount(thread, source_start, count);
         if (thread.frames.items.len == 1) {
             thread.frames.items.len = 0;
             return;
         }
 
-        const source_start = frame.base + first;
         const return_start = frame.return_start;
-        const return_count = frame.return_count;
+        const return_count = try self.resolveReturnCount(frame.return_count, source_count);
         thread.frames.items.len -= 1;
 
         try thread.ensureStack(self.allocator, return_start + return_count);
-        for (0..return_count) |index| {
-            thread.stack.items[return_start + index] = if (index < count) thread.stack.items[source_start + index] else .nil;
-        }
+        const copied = @min(return_count, source_count);
+        copyStackValues(thread, return_start, source_start, copied);
+        for (copied..return_count) |index| thread.stack.items[return_start + index] = .nil;
+        thread.last_result_base = return_start;
+        thread.last_result_count = return_count;
     }
 
     fn returnValues(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value) !void {
-        _ = self;
         const frame = thread.frames.items[thread.frames.items.len - 1];
-        for (0..return_count) |index| {
-            thread.stack.items[frame.base + base + @as(bytecode.Register, @intCast(index))] = if (index < values.len) values[index] else .nil;
+        const actual_count = try self.resolveReturnCount(return_count, values.len);
+        const absolute_base = frame.base + base;
+        try thread.ensureStack(self.allocator, absolute_base + actual_count);
+        for (0..actual_count) |index| {
+            thread.stack.items[absolute_base + index] = if (index < values.len) values[index] else .nil;
         }
+        thread.last_result_base = absolute_base;
+        thread.last_result_count = actual_count;
+    }
+
+    fn prepareClosureFrame(self: *State, thread: *Thread, closure: *Closure, source_base: usize, frame_base: usize, arg_count: usize, return_start: usize, return_count: u16) !CallFrame {
+        const register_count = @max(closure.proto.max_registers, 1);
+        const param_count = @as(usize, closure.proto.param_count);
+        const copied = @min(arg_count, param_count);
+        const varargs = try self.captureVarargs(thread, source_base + 1 + param_count, if (closure.proto.is_vararg and arg_count > param_count) arg_count - param_count else 0);
+        try thread.ensureStack(self.allocator, frame_base + register_count);
+
+        for (0..copied) |index| thread.stack.items[frame_base + index] = thread.stack.items[source_base + 1 + index];
+        for (copied..register_count) |index| thread.stack.items[frame_base + index] = .nil;
+
+        if (closure.proto.is_vararg and closure.proto.max_registers > closure.proto.param_count) {
+            thread.stack.items[frame_base + param_count] = try self.namedVarargTable(varargs);
+        }
+
+        return .{
+            .proto = closure.proto,
+            .base = frame_base,
+            .pc = 0,
+            .return_start = return_start,
+            .return_count = return_count,
+            .varargs = varargs,
+        };
+    }
+
+    fn captureVarargs(self: *State, thread: *Thread, source_start: usize, count: usize) ![]const Value {
+        if (count == 0) return &.{};
+        const values = try self.arena.allocator().alloc(Value, count);
+        for (0..count) |index| values[index] = thread.stack.items[source_start + index];
+        return values;
+    }
+
+    fn namedVarargTable(self: *State, varargs: []const Value) !Value {
+        const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
+        try self.setTable(table_value, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
+        for (varargs, 0..) |value, index| {
+            try self.setTable(table_value, .{ .integer = @intCast(index + 1) }, value);
+        }
+        return table_value;
+    }
+
+    fn resolveCall(self: *State, thread: *Thread, op: bytecode.Call) !bytecode.Call {
+        if (op.arg_count != bytecode.multret_count) return op;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const expected_base = frame.base + op.base + 1;
+        if (thread.last_result_base < expected_base) return self.fail("invalid multiple-return call state");
+        const end = thread.last_result_base + thread.last_result_count;
+        const count = if (end <= expected_base) 0 else end - expected_base;
+        return .{ .base = op.base, .arg_count = @intCast(count), .return_count = op.return_count };
+    }
+
+    fn resolveResultCount(self: *State, thread: *Thread, source_start: usize, count: u16) !usize {
+        if (count != bytecode.multret_count) return count;
+        if (thread.last_result_base < source_start) return self.fail("invalid multiple-return result state");
+        const end = thread.last_result_base + thread.last_result_count;
+        return if (end <= source_start) 0 else end - source_start;
+    }
+
+    fn resolveReturnCount(self: *State, count: u16, available: usize) !usize {
+        _ = self;
+        return if (count == bytecode.multret_count) available else count;
+    }
+
+    fn loadVarargs(self: *State, thread: *Thread, op: bytecode.Vararg) !void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const actual_count = try self.resolveReturnCount(op.count, frame.varargs.len);
+        const dest = frame.base + op.dest;
+        try thread.ensureStack(self.allocator, dest + actual_count);
+        const copied = @min(actual_count, frame.varargs.len);
+        for (0..copied) |index| thread.stack.items[dest + index] = frame.varargs[index];
+        for (copied..actual_count) |index| thread.stack.items[dest + index] = .nil;
+        thread.last_result_base = dest;
+        thread.last_result_count = actual_count;
+    }
+
+    fn setList(self: *State, thread: *Thread, op: bytecode.SetList) !void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        const source_start = frame.base + op.first;
+        const count = if (op.count == bytecode.multret_count) try self.resolveResultCount(thread, source_start, bytecode.multret_count) else op.count;
+        const table_value = self.get(thread, op.table);
+        for (0..count) |index| {
+            try self.setTable(table_value, .{ .integer = @intCast(op.start_index + index) }, thread.stack.items[source_start + index]);
+        }
+    }
+
+    fn selectValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (op.arg_count == 0) return self.fail("bad argument #1 to 'select'");
+        const first = argValue(self, thread, op, 0);
+        if (first == .string and std.mem.eql(u8, first.string, "#")) {
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @intCast(op.arg_count - 1) }});
+            return;
+        }
+
+        var index = toInteger(first) orelse return self.fail("bad argument #1 to 'select'");
+        const count: i64 = @intCast(op.arg_count - 1);
+        if (index < 0) index = count + index + 1;
+        if (index < 1 or index > count + 1) return self.fail("bad argument #1 to 'select'");
+
+        var values = std.ArrayList(Value).empty;
+        defer values.deinit(self.allocator);
+        var arg_index: usize = @intCast(index);
+        const last_arg: usize = @intCast(count);
+        while (arg_index <= last_arg) : (arg_index += 1) {
+            try values.append(self.allocator, argValue(self, thread, op, @intCast(arg_index)));
+        }
+        try self.returnValues(thread, op.base, op.return_count, values.items);
     }
 
     fn rawGet(self: *State, table_value: Value, key_value: Value) !Value {
@@ -739,6 +874,7 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_ipairs => rhs == .native_ipairs,
         .native_ipairs_iter => rhs == .native_ipairs_iter,
         .native_table_create => rhs == .native_table_create,
+        .native_select => rhs == .native_select,
     };
 }
 
@@ -802,6 +938,19 @@ fn jump(frame: *CallFrame, offset: bytecode.JumpOffset) void {
         frame.pc += @intCast(offset);
     } else {
         frame.pc -= @intCast(-offset);
+    }
+}
+
+fn copyStackValues(thread: *Thread, dest: usize, source: usize, count: usize) void {
+    if (count == 0 or dest == source) return;
+    if (dest > source and dest < source + count) {
+        var index = count;
+        while (index > 0) {
+            index -= 1;
+            thread.stack.items[dest + index] = thread.stack.items[source + index];
+        }
+    } else {
+        for (0..count) |index| thread.stack.items[dest + index] = thread.stack.items[source + index];
     }
 }
 
@@ -929,6 +1078,7 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .native_ipairs => try out.appendSlice(allocator, "function: ipairs"),
         .native_ipairs_iter => try out.appendSlice(allocator, "function: ipairs iterator"),
         .native_table_create => try out.appendSlice(allocator, "function: table.create"),
+        .native_select => try out.appendSlice(allocator, "function: select"),
     }
 }
 
@@ -987,7 +1137,7 @@ test "executes if while and repeat jumps" {
 test "reports stack overflow for unbounded Lua recursion" {
     var result = try executeSource(std.testing.allocator,
         \\function f()
-        \\  return f()
+        \\  return 1 + f()
         \\end
         \\f()
     );
