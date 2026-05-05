@@ -1,3 +1,4 @@
+const std = @import("std");
 const compile = @import("../compile.zig");
 const runtime = @import("../runtime.zig");
 
@@ -30,4 +31,83 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const extraargs: i64 = if (if (target == .integer) state.currentExtraArgs(thread, target.integer) else null) |count| @intCast(count) else 0;
     try table.set(state.allocator, .{ .string = try state.intern("extraargs") }, .{ .integer = extraargs });
     try state.returnValues(thread, op.base, op.return_count, &.{value});
+}
+
+pub fn getupvalue(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const target = runtime.argValue(state, thread, op, 0);
+    const index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    const upvalue = getClosureUpvalue(target, index) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    const name = target.closure.proto.upvalues.items[index].name;
+    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(name) }, readUpvalue(upvalue) });
+}
+
+pub fn setupvalue(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const target = runtime.argValue(state, thread, op, 0);
+    const index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    const upvalue = getClosureUpvalue(target, index) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    writeUpvalue(upvalue, runtime.argValue(state, thread, op, 2));
+    const name = target.closure.proto.upvalues.items[index].name;
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(name) }});
+}
+
+pub fn upvalueid(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const target = runtime.argValue(state, thread, op, 0);
+    const index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    const upvalue = getClosureUpvalue(target, index) orelse {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    };
+    const id = try std.fmt.allocPrint(state.allocator, "upvalue:{x}", .{@intFromPtr(upvalue)});
+    defer state.allocator.free(id);
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(id) }});
+}
+
+pub fn upvaluejoin(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const first = runtime.argValue(state, thread, op, 0);
+    const first_index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse return state.fail("invalid upvalue index");
+    const second = runtime.argValue(state, thread, op, 2);
+    const second_index = upvalueIndex(runtime.argValue(state, thread, op, 3)) orelse return state.fail("invalid upvalue index");
+    const replacement = getClosureUpvalue(second, second_index) orelse return state.fail("invalid upvalue index");
+    if (first != .closure or first_index >= first.closure.upvalues.len) return state.fail("invalid upvalue index");
+    first.closure.upvalues[first_index] = replacement;
+    try state.returnValues(thread, op.base, op.return_count, &.{});
+}
+
+fn upvalueIndex(value: Value) ?usize {
+    const integer = runtime.toInteger(value) orelse return null;
+    if (integer <= 0) return null;
+    return @intCast(integer - 1);
+}
+
+fn getClosureUpvalue(value: Value, index: usize) ?*runtime.Upvalue {
+    if (value != .closure) return null;
+    if (index >= value.closure.upvalues.len) return null;
+    return value.closure.upvalues[index];
+}
+
+fn readUpvalue(upvalue: *runtime.Upvalue) Value {
+    return if (upvalue.is_open) upvalue.owner.stack.items[upvalue.stack_index] else upvalue.closed;
+}
+
+fn writeUpvalue(upvalue: *runtime.Upvalue, value: Value) void {
+    if (upvalue.is_open) {
+        upvalue.owner.stack.items[upvalue.stack_index] = value;
+    } else {
+        upvalue.closed = value;
+    }
 }

@@ -70,11 +70,11 @@ const CoroutineResumeResult = union(enum) {
 
 const Closure = struct {
     proto: *const proto_mod.Proto,
-    upvalues: []const *Upvalue,
+    upvalues: []*Upvalue,
     marked: bool = false,
 };
 
-const Upvalue = struct {
+pub const Upvalue = struct {
     owner: *Thread,
     stack_index: usize,
     closed: Value = .nil,
@@ -417,6 +417,7 @@ pub const State = struct {
     gc_running: bool = true,
     gc_mode: GcMode = .generational,
     gc_params: GcParams = .{},
+    gc_next_total: usize = 0,
     mark_all_stack_registers: bool = false,
     random_state: u64 = 0x123456789abcdef0,
 
@@ -434,6 +435,7 @@ pub const State = struct {
         errdefer state.deinit();
         try state.openLibraries(options.stdlib);
         if (options.stdlib != .none) try state.installGlobalTable();
+        state.resetAutoGcThreshold();
         return state;
     }
 
@@ -598,9 +600,13 @@ pub const State = struct {
         try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
         try state.globals.put(try state.intern("os"), os_lib);
 
-        const debug_lib = try state.newTableWithHints(0, 2);
+        const debug_lib = try state.newTableWithHints(0, 6);
         try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
         try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
+        try state.setTable(debug_lib, .{ .string = try state.intern("getupvalue") }, .{ .native = .debug_getupvalue });
+        try state.setTable(debug_lib, .{ .string = try state.intern("setupvalue") }, .{ .native = .debug_setupvalue });
+        try state.setTable(debug_lib, .{ .string = try state.intern("upvalueid") }, .{ .native = .debug_upvalueid });
+        try state.setTable(debug_lib, .{ .string = try state.intern("upvaluejoin") }, .{ .native = .debug_upvaluejoin });
         try state.globals.put(try state.intern("debug"), debug_lib);
 
         const package_lib = try state.newTableWithHints(0, 8);
@@ -744,7 +750,7 @@ pub const State = struct {
                 .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, .nil),
             }
 
-            if (self.collect_after_instruction and self.gc_running) try self.collectGarbageConservatively(thread);
+            if (self.gc_running and (self.collect_after_instruction or self.shouldRunAutoGc())) try self.collectGarbageConservatively(thread);
         }
     }
 
@@ -2369,6 +2375,16 @@ pub const State = struct {
         self.sweepClosures();
         self.sweepUpvalues();
         self.sweepTables();
+        self.resetAutoGcThreshold();
+    }
+
+    fn shouldRunAutoGc(self: State) bool {
+        return !self.is_collecting and self.allocationStats().total() >= self.gc_next_total;
+    }
+
+    fn resetAutoGcThreshold(self: *State) void {
+        const total = self.allocationStats().total();
+        self.gc_next_total = total + @max(total / 2, 256);
     }
 
     fn resetMarks(self: *State) void {
@@ -3634,4 +3650,47 @@ test "string.dump is explicitly unsupported" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "false\ttrue\n"));
+}
+
+test "official closure upvalue edge cases" {
+    var result = try executeSource(std.testing.allocator,
+        \\local a = {}
+        \\local i = 1
+        \\repeat
+        \\  local x = i
+        \\  a[i] = function () i = x + 1; return x end
+        \\until i > 10 or a[i]() ~= x
+        \\assert(i == 11 and a[1]() == 1 and a[3]() == 3 and i == 4)
+        \\
+        \\a = {}
+        \\for j = 1, 3 do
+        \\  if j % 3 == 2 then
+        \\    local t
+        \\    goto make
+        \\    ::assign:: a[j] = t; goto done
+        \\    ::make::
+        \\    local y = 2
+        \\    t = function (x) local old = y; y = x; return old end
+        \\    goto assign
+        \\    ::done::
+        \\  end
+        \\end
+        \\assert(a[2](20) == 2 and a[2]() == 20)
+        \\
+        \\local debug = require "debug"
+        \\local foo1, foo2
+        \\do
+        \\  local x, y = 3, 5
+        \\  foo1 = function () return x + y end
+        \\  foo2 = function () return y + x end
+        \\end
+        \\assert(debug.upvalueid(foo1, 1) == debug.upvalueid(foo2, 2))
+        \\debug.upvaluejoin(foo1, 2, foo2, 2)
+        \\assert(foo1() == 6 and foo2() == 8)
+        \\print("ok")
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "ok\n"));
 }

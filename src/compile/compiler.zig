@@ -87,6 +87,8 @@ const FunctionCompiler = struct {
     fn compileChunk(self: *FunctionCompiler, block: ast.Block) !void {
         defer self.deinit();
         try self.enterScope();
+        const env = try self.declareLocal("_ENV");
+        _ = try self.emit(.{ .get_global = .{ .register = env, .name = try self.nameConstant("_G") } });
         try self.compileBlock(block);
         if (!blockEndsWithReturn(block)) {
             _ = try self.emit(.{ .ret = .{ .first = 0, .count = 0 } });
@@ -299,6 +301,8 @@ const FunctionCompiler = struct {
         const mark = self.registerMark();
         const condition = try self.allocReg();
         try self.compileExpr(stmt.condition, condition);
+        const scope = self.scopes.items[self.scopes.items.len - 1];
+        _ = try self.emit(.{ .close = scope.next_register });
         const repeat_jump = try self.emit(.{ .test_op = .{ .register = condition, .jump_if_truthy = false, .offset = 0 } });
         self.release(mark);
         try self.leaveScope();
@@ -323,7 +327,8 @@ const FunctionCompiler = struct {
         const prep = try self.emit(.{ .for_prep = .{ .base = base, .offset = 0 } });
         const body_start = self.proto.pc();
         try self.enterLoop();
-        try self.compileBlock(stmt.body);
+        try self.compileScopedBlock(stmt.body);
+        _ = try self.emit(.{ .close = base });
         try self.leaveLoop(self.proto.pc() + 1);
         const loop = try self.emit(.{ .for_loop = .{ .base = base, .offset = 0 } });
         try self.proto.patchJump(loop, body_start);
@@ -357,7 +362,8 @@ const FunctionCompiler = struct {
         const loop_start = self.proto.pc();
         const prep = try self.emit(.{ .tfor_prep = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
         try self.enterLoop();
-        try self.compileBlock(stmt.body);
+        try self.compileScopedBlock(stmt.body);
+        if (stmt.names.len != 0) _ = try self.emit(.{ .close = base + 3 });
         try self.leaveLoop(self.proto.pc() + 1);
         const loop = try self.emit(.{ .tfor_loop = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
         try self.proto.patchJump(loop, loop_start);
@@ -371,6 +377,7 @@ const FunctionCompiler = struct {
     }
 
     fn compileGoto(self: *FunctionCompiler, name: ast.Identifier) !void {
+        _ = try self.emit(.{ .close = 0 });
         const pc = try self.emit(.{ .jmp = 0 });
         try self.gotos.append(self.allocator, .{ .name = name.name, .pc = pc });
     }

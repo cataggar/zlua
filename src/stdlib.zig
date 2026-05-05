@@ -94,6 +94,10 @@ pub const NativeFn = enum {
     os_setlocale,
     os_execute,
     debug_getinfo,
+    debug_getupvalue,
+    debug_setupvalue,
+    debug_upvalueid,
+    debug_upvaluejoin,
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
@@ -174,6 +178,10 @@ pub const NativeFn = enum {
             .os_setlocale => "os.setlocale",
             .os_execute => "os.execute",
             .debug_getinfo => "debug.getinfo",
+            .debug_getupvalue => "debug.getupvalue",
+            .debug_setupvalue => "debug.setupvalue",
+            .debug_upvalueid => "debug.upvalueid",
+            .debug_upvaluejoin => "debug.upvaluejoin",
         };
     }
 };
@@ -257,6 +265,10 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .os_setlocale => try os.setlocale(state, thread, op),
         .os_execute => try os.execute(state, thread, op),
         .debug_getinfo => try debug.getinfo(state, thread, op),
+        .debug_getupvalue => try debug.getupvalue(state, thread, op),
+        .debug_setupvalue => try debug.setupvalue(state, thread, op),
+        .debug_upvalueid => try debug.upvalueid(state, thread, op),
+        .debug_upvaluejoin => try debug.upvaluejoin(state, thread, op),
     }
 }
 
