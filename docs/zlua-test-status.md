@@ -11,7 +11,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
 | Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=12`, `categorized_failed=20`, `skipped=1`, `unexpected_failed=0`. |
-| Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Current summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Categorized zlua failures remain expected work items. |
+| Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused `calls.lua` work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
 
@@ -22,6 +22,23 @@ This document tracks the test layers currently used for zlua and the current sta
 | Pass | zlua exits successfully for the file in the basic official dashboard. |
 | XFail | CLua exits successfully, but zlua currently exits unsuccessfully and the dashboard categorizes the failure. |
 | Not run | The file exists in the official suite but is not part of the per-file basic dashboard. |
+
+## Focused Official Progress
+
+Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, and `just official-file calls`.
+
+`calls.lua` is still XFail, but now gets substantially further. Currently working in that file:
+
+- Lua 5.5 `global function name(...) ... end` declarations parse and execute.
+- `type()` with no arguments errors, so `pcall(type)` matches CLua.
+- Tail calls through `__call` metamethod chains avoid stack overflow.
+- `__call` chains use the official 15-link limit and report `too long` for longer chains.
+- `debug.getinfo(level, "t").extraargs` reports extra arguments from chained `__call` invocations.
+- `load` accepts reader functions, treats empty reader chunks as EOF, and returns `nil, message` for reader errors or non-string chunks.
+- `load` preserves chunk names for `debug.getinfo(f).source`.
+- `load` rejects text chunks in binary-only mode and binary chunks in text-only mode.
+
+The next known `calls.lua` blocker is binary chunk dumping/loading around `string.dump`, currently failing with `unable to dump given function`.
 
 ## Official Lua 5.5 Files
 
@@ -35,7 +52,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `big.lua` | Pass | Pass |  |
 | `bitwise.lua` | Pass | Pass |  |
 | `bwcoercion.lua` | Pass | Pass |  |
-| `calls.lua` | Pass | XFail | `runtime` |
+| `calls.lua` | Pass | XFail | `runtime`; now reaches the binary chunk / `string.dump` section (`unable to dump given function`) |
 | `closure.lua` | Pass | XFail | `runtime` |
 | `code.lua` | Pass | Pass |  |
 | `constructs.lua` | Pass | XFail | `runtime` |
