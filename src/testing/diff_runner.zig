@@ -6,6 +6,7 @@ const frontend = @import("../frontend.zig");
 const metadata = @import("metadata.zig");
 const normalizer = @import("normalizer.zig");
 const process = @import("process.zig");
+const runtime = @import("../runtime.zig");
 
 const Options = struct {
     path: []const u8 = "tests/diff",
@@ -222,12 +223,7 @@ fn runZluaForStage(
         .parse => runZluaParseStage(allocator, source),
         .resolve => runZluaResolveStage(allocator, source),
         .compile => runZluaCompileStage(allocator, source),
-        .runtime, .stdlib, .official => process.ownedResult(
-            allocator,
-            "",
-            "zlua runtime execution is not implemented in milestone 0\n",
-            1,
-        ),
+        .runtime, .stdlib, .official => runtime.executeSource(allocator, source),
     };
 }
 

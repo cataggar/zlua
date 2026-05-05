@@ -1,3 +1,0 @@
-[[failure]]
-path = "tests/diff/runtime/not_implemented.lua"
-reason = "runtime execution is not implemented in milestone 0"

@@ -1,6 +1,6 @@
 -- expect: pass
 -- stage: runtime
--- feature: runtime
+-- feature: return
 -- normalize: none
 
-print("zlua runtime smoke")
+return 1, "done"

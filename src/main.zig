@@ -32,8 +32,16 @@ pub fn main(init: std.process.Init) !void {
         return CliError.Usage;
     }
 
-    try stderrPrint(io, "script execution is not implemented yet: {s}\n", .{command});
-    std.process.exit(1);
+    const source = std.Io.Dir.cwd().readFileAlloc(io, command, allocator, .limited(1024 * 1024)) catch |err| {
+        try stderrPrint(io, "cannot read script {s}: {s}\n", .{ command, @errorName(err) });
+        std.process.exit(1);
+    };
+    var result = try zlua.runtime.executeSource(allocator, source);
+    defer result.deinit(allocator);
+
+    try stdoutWrite(io, result.stdout);
+    try stderrWrite(io, result.stderr);
+    std.process.exit(result.exit_code orelse 1);
 }
 
 fn printVersion(io: std.Io) !void {
@@ -57,10 +65,24 @@ fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try writer.interface.flush();
 }
 
+fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
+}
+
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
     var writer = std.Io.File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
+    try writer.interface.flush();
+}
+
+fn stderrWrite(io: std.Io, bytes: []const u8) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stderr().writer(io, &buffer);
+    try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 }
 
