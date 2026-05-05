@@ -97,6 +97,8 @@ const FunctionCompiler = struct {
         try child_context.enterScope();
         if (method) _ = try child_context.declareLocal("self");
         for (body.params) |param| _ = try child_context.declareLocal(param.name);
+        child.param_count = @intCast(body.params.len + @as(usize, if (method) 1 else 0));
+        child.is_vararg = body.is_vararg;
         if (body.is_vararg) {
             const name = if (body.vararg_name) |vararg_name| vararg_name.name else "...";
             _ = try child_context.declareLocal(name);
@@ -442,7 +444,17 @@ const FunctionCompiler = struct {
                 _ = try self.emit(.{ .get_field = .{ .dest = dest, .table = table, .name = try self.nameConstant(field.name.name) } });
                 self.release(mark);
             },
-            .call, .method_call => _ = try self.compileCallInto(expr, 1, dest),
+            .call, .method_call => {
+                if (dest + 1 == self.registerMark()) {
+                    _ = try self.compileCallInto(expr, 1, dest);
+                } else {
+                    const mark = self.registerMark();
+                    const base = try self.allocReg();
+                    _ = try self.compileCallInto(expr, 1, base);
+                    _ = try self.emit(.{ .move = .{ .dest = dest, .source = base } });
+                    self.release(mark);
+                }
+            },
             .unary => |unary| try self.compileUnary(unary, dest),
             .binary => |binary| try self.compileBinary(binary, dest),
         }
@@ -528,24 +540,26 @@ const FunctionCompiler = struct {
         switch (expr.*) {
             .call => |call| {
                 try self.compileExpr(call.callee, dest);
-                for (call.args) |arg| {
-                    const reg = try self.allocReg();
+                try self.reserveRegistersUntil(dest + 1 + @as(bytecode.Register, @intCast(call.args.len)));
+                for (call.args, 0..) |arg, index| {
+                    const reg = dest + 1 + @as(bytecode.Register, @intCast(index));
                     try self.compileExpr(arg, reg);
-                    self.release(reg + 1);
                 }
                 _ = try self.emit(.{ .call = .{ .base = dest, .arg_count = @intCast(call.args.len), .return_count = returns } });
+                self.release(dest + @as(bytecode.Register, @intCast(returns)));
                 return dest;
             },
             .method_call => |call| {
-                const receiver = try self.allocReg();
+                const receiver = dest + 1;
+                try self.reserveRegistersUntil(dest + 2 + @as(bytecode.Register, @intCast(call.args.len)));
                 try self.compileExpr(call.receiver, receiver);
                 _ = try self.emit(.{ .get_field = .{ .dest = dest, .table = receiver, .name = try self.nameConstant(call.method.name) } });
-                for (call.args) |arg| {
-                    const reg = try self.allocReg();
+                for (call.args, 0..) |arg, index| {
+                    const reg = dest + 2 + @as(bytecode.Register, @intCast(index));
                     try self.compileExpr(arg, reg);
-                    self.release(reg + 1);
                 }
                 _ = try self.emit(.{ .call = .{ .base = dest, .arg_count = @intCast(call.args.len + 1), .return_count = returns } });
+                self.release(dest + @as(bytecode.Register, @intCast(returns)));
                 return dest;
             },
             else => return error.CompileError,

@@ -28,6 +28,8 @@ pub const Proto = struct {
     upvalues: std.ArrayList(UpvalueDesc) = .empty,
     children: std.ArrayList(*Proto) = .empty,
     max_registers: u16 = 0,
+    param_count: u16 = 0,
+    is_vararg: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Proto {
         return .{

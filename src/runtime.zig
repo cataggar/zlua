@@ -12,6 +12,9 @@ pub const RuntimeError = error{
     UnsupportedOpcode,
 };
 
+const max_stack_values: usize = 8192;
+const max_call_frames: usize = 256;
+
 pub const Value = union(enum) {
     nil,
     boolean: bool,
@@ -19,6 +22,7 @@ pub const Value = union(enum) {
     number: f64,
     string: []const u8,
     table: *Table,
+    closure: *Closure,
     native_print,
     native_tostring,
     native_rawget,
@@ -28,6 +32,10 @@ pub const Value = union(enum) {
     native_ipairs,
     native_ipairs_iter,
     native_table_create,
+};
+
+const Closure = struct {
+    proto: *const proto_mod.Proto,
 };
 
 const TableEntry = struct {
@@ -143,28 +151,38 @@ const Table = struct {
 };
 
 pub const Thread = struct {
-    stack: []Value,
-    frames: []CallFrame,
+    stack: std.ArrayList(Value) = .empty,
+    frames: std.ArrayList(CallFrame) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator, register_count: usize) !Thread {
-        const count = @max(register_count, 1);
-        const stack = try allocator.alloc(Value, count);
-        @memset(stack, .nil);
-        const frames = try allocator.alloc(CallFrame, 1);
-        frames[0] = .{ .base = 0, .pc = 0 };
-        return .{ .stack = stack, .frames = frames };
+    pub fn init(allocator: std.mem.Allocator, proto: *const proto_mod.Proto) !Thread {
+        var thread = Thread{};
+        errdefer thread.deinit(allocator);
+        try thread.ensureStack(allocator, @max(proto.max_registers, 1));
+        try thread.frames.append(allocator, .{ .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0 });
+        return thread;
     }
 
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
-        allocator.free(self.frames);
-        allocator.free(self.stack);
+        self.frames.deinit(allocator);
+        self.stack.deinit(allocator);
         self.* = undefined;
+    }
+
+    fn ensureStack(self: *Thread, allocator: std.mem.Allocator, size: usize) !void {
+        if (size > max_stack_values) return error.StackOverflow;
+        const old_len = self.stack.items.len;
+        if (size <= old_len) return;
+        try self.stack.resize(allocator, size);
+        @memset(self.stack.items[old_len..], .nil);
     }
 };
 
 const CallFrame = struct {
+    proto: *const proto_mod.Proto,
     base: usize,
     pc: usize,
+    return_start: usize,
+    return_count: u16,
 };
 
 pub const State = struct {
@@ -208,14 +226,19 @@ pub const State = struct {
     }
 
     pub fn execute(self: *State, proto: *const proto_mod.Proto) !void {
-        var thread = try Thread.init(self.allocator, proto.max_registers);
+        var thread = try Thread.init(self.allocator, proto);
         defer thread.deinit(self.allocator);
-        try self.runProto(proto, &thread);
+        try self.runThread(&thread);
     }
 
-    fn runProto(self: *State, proto: *const proto_mod.Proto, thread: *Thread) !void {
-        var frame = &thread.frames[0];
-        while (frame.pc < proto.instructions.items.len) {
+    fn runThread(self: *State, thread: *Thread) !void {
+        while (thread.frames.items.len > 0) {
+            var frame = &thread.frames.items[thread.frames.items.len - 1];
+            const proto = frame.proto;
+            if (frame.pc >= proto.instructions.items.len) {
+                try self.returnFromFrame(thread, 0, 0);
+                continue;
+            }
             const instruction = proto.instructions.items[frame.pc];
             frame.pc += 1;
 
@@ -252,22 +275,25 @@ pub const State = struct {
                     self.set(thread, op.dest, value);
                     if (truthy(value) == op.jump_if_truthy) jump(frame, op.offset);
                 },
-                .call => |op| try self.callNative(thread, op),
-                .ret => return,
+                .call => |op| try self.callValue(thread, op),
+                .ret => |op| try self.returnFromFrame(thread, op.first, op.count),
                 .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) jump(frame, op.offset),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
                 .tfor_loop => |op| jump(frame, op.offset),
-                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .closure, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
+                .closure => |op| self.set(thread, op.dest, try self.newClosure(proto.children.items[op.proto])),
+                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .close, .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
 
     fn get(_: *State, thread: *Thread, register: bytecode.Register) Value {
-        return thread.stack[register];
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        return thread.stack.items[frame.base + register];
     }
 
     fn set(_: *State, thread: *Thread, register: bytecode.Register, value: Value) void {
-        thread.stack[register] = value;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        thread.stack.items[frame.base + register] = value;
     }
 
     fn setGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -387,6 +413,12 @@ pub const State = struct {
         return .{ .table = table };
     }
 
+    fn newClosure(self: *State, proto: *const proto_mod.Proto) !Value {
+        const closure = try self.arena.allocator().create(Closure);
+        closure.* = .{ .proto = proto };
+        return .{ .closure = closure };
+    }
+
     fn getTable(self: *State, table_value: Value, key_value: Value) !Value {
         const table = switch (table_value) {
             .table => |table| table,
@@ -437,9 +469,10 @@ pub const State = struct {
         return .{ .string = try self.intern(out.items) };
     }
 
-    fn callNative(self: *State, thread: *Thread, op: bytecode.Call) !void {
+    fn callValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const callee = self.get(thread, op.base);
         switch (callee) {
+            .closure => |closure| try self.callClosure(thread, op, closure),
             .native_print => {
                 for (0..op.arg_count) |index| {
                     if (index != 0) try self.stdout.append(self.allocator, '\t');
@@ -489,10 +522,50 @@ pub const State = struct {
         }
     }
 
+    fn callClosure(self: *State, thread: *Thread, op: bytecode.Call, closure: *Closure) !void {
+        if (thread.frames.items.len >= max_call_frames) return self.fail("stack overflow");
+
+        const caller = thread.frames.items[thread.frames.items.len - 1];
+        const base = caller.base + op.base;
+        const register_count = @max(closure.proto.max_registers, 1);
+        try thread.ensureStack(self.allocator, base + register_count);
+
+        const copied = @min(@as(usize, op.arg_count), @as(usize, closure.proto.max_registers));
+        for (0..copied) |index| thread.stack.items[base + index] = thread.stack.items[base + 1 + index];
+        for (copied..register_count) |index| thread.stack.items[base + index] = .nil;
+
+        try thread.frames.append(self.allocator, .{
+            .proto = closure.proto,
+            .base = base,
+            .pc = 0,
+            .return_start = base,
+            .return_count = op.return_count,
+        });
+    }
+
+    fn returnFromFrame(self: *State, thread: *Thread, first: bytecode.Register, count: u16) !void {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        if (thread.frames.items.len == 1) {
+            thread.frames.items.len = 0;
+            return;
+        }
+
+        const source_start = frame.base + first;
+        const return_start = frame.return_start;
+        const return_count = frame.return_count;
+        thread.frames.items.len -= 1;
+
+        try thread.ensureStack(self.allocator, return_start + return_count);
+        for (0..return_count) |index| {
+            thread.stack.items[return_start + index] = if (index < count) thread.stack.items[source_start + index] else .nil;
+        }
+    }
+
     fn returnValues(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value) !void {
         _ = self;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
         for (0..return_count) |index| {
-            thread.stack[base + @as(bytecode.Register, @intCast(index))] = if (index < values.len) values[index] else .nil;
+            thread.stack.items[frame.base + base + @as(bytecode.Register, @intCast(index))] = if (index < values.len) values[index] else .nil;
         }
     }
 
@@ -656,6 +729,7 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         },
         .string => |value| rhs == .string and std.mem.eql(u8, value, rhs.string),
         .table => |value| rhs == .table and value == rhs.table,
+        .closure => |value| rhs == .closure and value == rhs.closure,
         .native_print => rhs == .native_print,
         .native_tostring => rhs == .native_tostring,
         .native_rawget => rhs == .native_rawget,
@@ -845,6 +919,7 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .number => |number| try appendNumber(allocator, out, number),
         .string => |string| try out.appendSlice(allocator, string),
         .table => try out.appendSlice(allocator, "table"),
+        .closure => try out.appendSlice(allocator, "function"),
         .native_print => try out.appendSlice(allocator, "function: print"),
         .native_tostring => try out.appendSlice(allocator, "function: tostring"),
         .native_rawget => try out.appendSlice(allocator, "function: rawget"),
@@ -907,4 +982,28 @@ test "executes if while and repeat jumps" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "while\n0\n"));
+}
+
+test "reports stack overflow for unbounded Lua recursion" {
+    var result = try executeSource(std.testing.allocator,
+        \\function f()
+        \\  return f()
+        \\end
+        \\f()
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "stack overflow") != null);
+}
+
+test "reports calls to non-functions" {
+    var result = try executeSource(std.testing.allocator,
+        \\local value = 1
+        \\value()
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a non-function value") != null);
 }
