@@ -348,8 +348,48 @@ const RuntimeAllocationStats = struct {
     }
 };
 
+pub const StdlibMode = enum {
+    none,
+    base,
+    safe,
+    full,
+};
+
+pub const MemoryFile = struct {
+    path: []const u8,
+    contents: []const u8,
+};
+
+pub const FilesystemCapability = union(enum) {
+    disabled,
+    memory: []const MemoryFile,
+    host_cwd,
+};
+
+pub const ClockCapability = union(enum) {
+    disabled,
+    fixed: i64,
+    system,
+};
+
+pub const ProcessCapability = enum {
+    disabled,
+    enabled,
+};
+
+pub const StateOptions = struct {
+    stdlib: StdlibMode = .full,
+    io: ?std.Io = null,
+    filesystem: FilesystemCapability = .disabled,
+    environment: ?*const std.process.Environ.Map = null,
+    clock: ClockCapability = .system,
+    process: ProcessCapability = .disabled,
+    stdin: []const u8 = "",
+};
+
 pub const ExecuteOptions = struct {
     collect_after_instruction: bool = false,
+    state: StateOptions = .{},
 };
 
 pub const State = struct {
@@ -361,8 +401,12 @@ pub const State = struct {
     closure_allocations: std.ArrayList(*Closure) = .empty,
     upvalue_allocations: std.ArrayList(*Upvalue) = .empty,
     thread_allocations: std.ArrayList(*Thread) = .empty,
+    proto_allocations: std.ArrayList(*proto_mod.Proto) = .empty,
+    source_allocations: std.ArrayList([]const u8) = .empty,
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
+    options: StateOptions,
+    stdin_pos: usize = 0,
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
     current_thread: ?*Thread = null,
@@ -375,12 +419,38 @@ pub const State = struct {
     random_state: u64 = 0x123456789abcdef0,
 
     pub fn init(allocator: std.mem.Allocator) !State {
+        return initWithOptions(allocator, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: StateOptions) !State {
         var state = State{
             .allocator = allocator,
             .globals = std.StringHashMap(Value).init(allocator),
             .strings = std.StringHashMap([]const u8).init(allocator),
+            .options = options,
         };
         errdefer state.deinit();
+        try state.openLibraries(options.stdlib);
+        return state;
+    }
+
+    fn openLibraries(state: *State, mode: StdlibMode) !void {
+        switch (mode) {
+            .none => return,
+            .base => try state.openBaseLibrary(),
+            .safe => {
+                try state.openBaseLibrary();
+                try state.openSafeLibraries();
+            },
+            .full => {
+                try state.openBaseLibrary();
+                try state.openSafeLibraries();
+                try state.openSystemLibraries();
+            },
+        }
+    }
+
+    fn openBaseLibrary(state: *State) !void {
         try state.globals.put(try state.intern("print"), .native_print);
         try state.globals.put(try state.intern("tostring"), .native_tostring);
         try state.globals.put(try state.intern("getmetatable"), .native_getmetatable);
@@ -402,7 +472,9 @@ pub const State = struct {
         try state.globals.put(try state.intern("tonumber"), .{ .native = .tonumber });
         try state.globals.put(try state.intern("warn"), .{ .native = .warn });
         try state.globals.put(try state.intern("_VERSION"), .{ .string = try state.intern("Lua 5.5") });
+    }
 
+    fn openSafeLibraries(state: *State) !void {
         const table_lib = try state.newTableWithHints(0, 8);
         try state.setTable(table_lib, .{ .string = try state.intern("concat") }, .{ .native = .table_concat });
         try state.setTable(table_lib, .{ .string = try state.intern("insert") }, .{ .native = .table_insert });
@@ -471,10 +543,6 @@ pub const State = struct {
         try state.setTable(utf8_lib, .{ .string = try state.intern("offset") }, .{ .native = .utf8_offset });
         try state.globals.put(try state.intern("utf8"), utf8_lib);
 
-        const debug_lib = try state.newTableWithHints(0, 1);
-        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
-        try state.globals.put(try state.intern("debug"), debug_lib);
-
         const coroutine_lib = try state.newTableWithHints(0, 6);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("create") }, .native_coroutine_create);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("resume") }, .native_coroutine_resume);
@@ -483,7 +551,44 @@ pub const State = struct {
         try state.setTable(coroutine_lib, .{ .string = try state.intern("running") }, .native_coroutine_running);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("wrap") }, .native_coroutine_wrap);
         try state.globals.put(try state.intern("coroutine"), coroutine_lib);
-        return state;
+    }
+
+    fn openSystemLibraries(state: *State) !void {
+        try state.globals.put(try state.intern("loadfile"), .{ .native = .loadfile });
+        try state.globals.put(try state.intern("dofile"), .{ .native = .dofile });
+        try state.globals.put(try state.intern("require"), .{ .native = .require });
+
+        const io_lib = try state.newTableWithHints(0, 4);
+        try state.setTable(io_lib, .{ .string = try state.intern("read") }, .{ .native = .io_read });
+        try state.setTable(io_lib, .{ .string = try state.intern("write") }, .{ .native = .io_write });
+        try state.setTable(io_lib, .{ .string = try state.intern("open") }, .{ .native = .io_open });
+        try state.setTable(io_lib, .{ .string = try state.intern("type") }, .{ .native = .io_type });
+        try state.globals.put(try state.intern("io"), io_lib);
+
+        const os_lib = try state.newTableWithHints(0, 4);
+        try state.setTable(os_lib, .{ .string = try state.intern("time") }, .{ .native = .os_time });
+        try state.setTable(os_lib, .{ .string = try state.intern("date") }, .{ .native = .os_date });
+        try state.setTable(os_lib, .{ .string = try state.intern("getenv") }, .{ .native = .os_getenv });
+        try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
+        try state.globals.put(try state.intern("os"), os_lib);
+
+        const package_lib = try state.newTableWithHints(0, 8);
+        const loaded = try state.newTableWithHints(0, 8);
+        const preload = try state.newTableWithHints(0, 4);
+        const searchers = try state.newTableWithHints(2, 0);
+        try searchers.table.set(state.allocator, .{ .integer = 1 }, .{ .native = .package_searcher_preload });
+        try searchers.table.set(state.allocator, .{ .integer = 2 }, .{ .native = .package_searcher_lua });
+        try state.setTable(package_lib, .{ .string = try state.intern("loaded") }, loaded);
+        try state.setTable(package_lib, .{ .string = try state.intern("preload") }, preload);
+        try state.setTable(package_lib, .{ .string = try state.intern("searchers") }, searchers);
+        try state.setTable(package_lib, .{ .string = try state.intern("path") }, .{ .string = try state.intern("./?.lua;./?/init.lua") });
+        try state.setTable(package_lib, .{ .string = try state.intern("cpath") }, .{ .string = try state.intern("") });
+        try state.globals.put(try state.intern("package"), package_lib);
+
+        const debug_lib = try state.newTableWithHints(0, 2);
+        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
+        try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
+        try state.globals.put(try state.intern("debug"), debug_lib);
     }
 
     pub fn deinit(self: *State) void {
@@ -495,7 +600,14 @@ pub const State = struct {
         for (self.closure_allocations.items) |closure| self.destroyClosure(closure);
         for (self.upvalue_allocations.items) |upvalue| self.allocator.destroy(upvalue);
         for (self.table_allocations.items) |table| self.destroyTable(table);
+        for (self.proto_allocations.items) |proto| {
+            proto.deinit();
+            self.allocator.destroy(proto);
+        }
+        for (self.source_allocations.items) |source| self.allocator.free(source);
         for (self.string_allocations.items) |allocation| self.allocator.free(allocation.bytes);
+        self.source_allocations.deinit(self.allocator);
+        self.proto_allocations.deinit(self.allocator);
         self.thread_allocations.deinit(self.allocator);
         self.upvalue_allocations.deinit(self.allocator);
         self.closure_allocations.deinit(self.allocator);
@@ -604,6 +716,114 @@ pub const State = struct {
         const key = if (self.globals.contains(name)) name else try self.intern(name);
         try self.globals.put(key, value);
         self.markValue(value);
+    }
+
+    pub fn getGlobal(self: *State, name: []const u8) Value {
+        return self.globals.get(name) orelse .nil;
+    }
+
+    pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
+        try self.setGlobal(name, value);
+    }
+
+    pub fn readFileAlloc(self: *State, path: []const u8) ![]const u8 {
+        switch (self.options.filesystem) {
+            .disabled => return self.fail("filesystem access disabled"),
+            .memory => |files| {
+                for (files) |file| {
+                    if (std.mem.eql(u8, file.path, path)) return self.allocator.dupe(u8, file.contents);
+                }
+                return self.fail("cannot open file");
+            },
+            .host_cwd => {
+                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
+                return std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return self.fail("cannot open file");
+            },
+        }
+    }
+
+    pub fn writeFile(self: *State, path: []const u8, data: []const u8) !void {
+        switch (self.options.filesystem) {
+            .disabled, .memory => return self.fail("filesystem write access disabled"),
+            .host_cwd => {
+                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
+                std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data }) catch return self.fail("cannot write file");
+            },
+        }
+    }
+
+    pub fn getenv(self: *State, name: []const u8) ?[]const u8 {
+        const environment = self.options.environment orelse return null;
+        return environment.get(name);
+    }
+
+    pub fn currentTime(self: *State) !i64 {
+        return switch (self.options.clock) {
+            .disabled => self.fail("clock access disabled"),
+            .fixed => |value| value,
+            .system => {
+                const io = self.options.io orelse return self.fail("clock I/O unavailable");
+                return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+            },
+        };
+    }
+
+    pub fn processEnabled(self: *State) bool {
+        return self.options.process == .enabled;
+    }
+
+    pub fn readStdin(self: *State, spec: []const u8) !Value {
+        const input = self.options.stdin;
+        if (std.mem.eql(u8, spec, "*a") or std.mem.eql(u8, spec, "a")) {
+            const remaining = input[self.stdin_pos..];
+            self.stdin_pos = input.len;
+            return .{ .string = try self.intern(remaining) };
+        }
+        if (std.mem.eql(u8, spec, "*l") or std.mem.eql(u8, spec, "l")) {
+            if (self.stdin_pos >= input.len) return .nil;
+            const start = self.stdin_pos;
+            while (self.stdin_pos < input.len and input[self.stdin_pos] != '\n') self.stdin_pos += 1;
+            const line = input[start..self.stdin_pos];
+            if (self.stdin_pos < input.len and input[self.stdin_pos] == '\n') self.stdin_pos += 1;
+            return .{ .string = try self.intern(line) };
+        }
+        return self.fail("unsupported read option");
+    }
+
+    pub fn loadSourceAsClosure(self: *State, source: []const u8) !Value {
+        var tree = frontend.parse(self.allocator, source) catch return self.fail("cannot load source");
+        defer tree.deinit();
+
+        compile.resolver.resolve(self.allocator, &tree) catch return self.fail("cannot resolve source");
+        const proto = try self.allocator.create(proto_mod.Proto);
+        errdefer self.allocator.destroy(proto);
+        proto.* = compile.compile(self.allocator, &tree) catch return self.fail("cannot compile source");
+        errdefer proto.deinit();
+        try self.proto_allocations.append(self.allocator, proto);
+        errdefer _ = self.proto_allocations.pop();
+        return .{ .closure = try self.newRootClosure(proto) };
+    }
+
+    pub fn loadFileAsClosure(self: *State, path: []const u8) !Value {
+        const source = try self.readFileAlloc(path);
+        errdefer self.allocator.free(source);
+        const closure = try self.loadSourceAsClosure(source);
+        try self.source_allocations.append(self.allocator, source);
+        return closure;
+    }
+
+    pub fn callCollect(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror![]Value {
+        const frame_count = thread.frames.items.len;
+        const frame = thread.frames.items[frame_count - 1];
+        const relative_base: bytecode.Register = frame.proto.max_registers;
+        const base = frame.base + @as(usize, relative_base);
+        try thread.ensureStack(self.allocator, base + 1 + args.len);
+        thread.stack.items[base] = callable;
+        for (args, 0..) |arg, index| thread.stack.items[base + 1 + index] = arg;
+
+        try self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0);
+        try self.runThreadUntil(thread, frame_count);
+        return self.copyStackSlice(thread, thread.last_result_base, thread.last_result_count);
     }
 
     fn loadConstant(self: *State, constant: bytecode.Constant) !Value {
@@ -2383,7 +2603,7 @@ pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8
     };
     defer proto.deinit();
 
-    var state = try State.init(allocator);
+    var state = try State.initWithOptions(allocator, options.state);
     defer state.deinit();
     state.collect_after_instruction = options.collect_after_instruction;
     state.execute(&proto) catch |err| {
@@ -2955,6 +3175,46 @@ test "reports calls to non-functions" {
 
     try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a non-function value") != null);
+}
+
+test "safe stdlib omits host-facing libraries" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\print(type(io), type(os), type(package), type(debug))
+    , .{ .state = .{ .stdlib = .safe } });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "nil\tnil\tnil\tnil\n"));
+}
+
+test "full stdlib can use memory-backed filesystem and fixed clock" {
+    const files = [_]MemoryFile{
+        .{ .path = "input.txt", .contents = "alpha\nbeta" },
+        .{ .path = "loaded.lua", .contents = "return 'loaded'" },
+    };
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\local file = assert(io.open("input.txt", "r"))
+        \\print(file:read("*l"))
+        \\print(file:read("*a"))
+        \\print(assert(loadfile("loaded.lua"))())
+        \\print(os.date("!%Y", 0))
+    , .{ .state = .{ .filesystem = .{ .memory = &files }, .clock = .{ .fixed = 0 } } });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "alpha\nbeta\nloaded\n1970\n"));
+}
+
+test "disabled capabilities block filesystem and process access" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\local file, err = io.open("missing.lua", "r")
+        \\print(file == nil, type(err))
+        \\print(pcall(os.execute, "true"))
+    , .{ .state = .{ .filesystem = .disabled, .process = .disabled, .clock = .{ .fixed = 0 } } });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "true\tstring\nfalse\tprocess access disabled\n"));
 }
 
 test "collects unreachable runtime allocations" {

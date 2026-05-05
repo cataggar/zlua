@@ -71,7 +71,7 @@ pub fn runCli(
     };
 
     for (tests.items) |path| {
-        try runOne(allocator, io, out, path, clua_exe, registry, options, cwd, &counts);
+        try runOne(allocator, io, out, path, clua_exe, registry, options, cwd, environ_map, &counts);
     }
 
     try printSummary(out, counts);
@@ -146,6 +146,7 @@ fn runOne(
     registry: expected_failures.Registry,
     options: Options,
     cwd: []const u8,
+    environ_map: *const std.process.Environ.Map,
     counts: *Counts,
 ) !void {
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
@@ -176,7 +177,7 @@ fn runOne(
 
     var clua_result = try runCluaForStage(allocator, io, exe, path, meta.stage, options.timeout_ms);
     defer clua_result.deinit(allocator);
-    var zlua_result = try runZluaForStage(allocator, source, meta.stage, options);
+    var zlua_result = try runZluaForStage(allocator, io, source, meta.stage, options, environ_map);
     defer zlua_result.deinit(allocator);
 
     if (clua_result.timed_out or zlua_result.timed_out) counts.timed_out += 1;
@@ -218,16 +219,26 @@ fn runCluaForStage(
 
 fn runZluaForStage(
     allocator: std.mem.Allocator,
+    io: std.Io,
     source: []const u8,
     stage: metadata.Stage,
     options: Options,
+    environ_map: *const std.process.Environ.Map,
 ) !process.ProcessResult {
     return switch (stage) {
         .lex => runZluaLexStage(allocator, source),
         .parse => runZluaParseStage(allocator, source),
         .resolve => runZluaResolveStage(allocator, source),
         .compile => runZluaCompileStage(allocator, source),
-        .runtime, .stdlib, .official => runtime.executeSourceWithOptions(allocator, source, .{ .collect_after_instruction = options.gc_stress }),
+        .runtime, .stdlib, .official => runtime.executeSourceWithOptions(allocator, source, .{
+            .collect_after_instruction = options.gc_stress,
+            .state = .{
+                .io = io,
+                .filesystem = .host_cwd,
+                .environment = environ_map,
+                .process = .disabled,
+            },
+        }),
     };
 }
 

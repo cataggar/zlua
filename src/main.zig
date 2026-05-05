@@ -36,7 +36,14 @@ pub fn main(init: std.process.Init) !void {
         try stderrPrint(io, "cannot read script {s}: {s}\n", .{ command, @errorName(err) });
         std.process.exit(1);
     };
-    var result = try zlua.runtime.executeSource(allocator, source);
+    var result = try zlua.runtime.executeSourceWithOptions(allocator, source, .{
+        .state = .{
+            .io = io,
+            .filesystem = .host_cwd,
+            .environment = init.environ_map,
+            .process = .enabled,
+        },
+    });
     defer result.deinit(allocator);
 
     try stdoutWrite(io, result.stdout);
