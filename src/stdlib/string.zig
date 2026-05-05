@@ -13,9 +13,11 @@ pub fn byte(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const stop = normalizeIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse @as(i64, @intCast(start)) else @as(i64, @intCast(start)), source.len);
     var values = std.ArrayList(Value).empty;
     defer values.deinit(state.allocator);
-    if (start <= stop and start >= 1) {
-        var index = start;
-        while (index <= stop and index <= source.len) : (index += 1) try values.append(state.allocator, .{ .integer = source[index - 1] });
+    const first = @max(start, 1);
+    const last = @min(stop, source.len);
+    if (first <= last) {
+        var index = first;
+        while (index <= last) : (index += 1) try values.append(state.allocator, .{ .integer = source[index - 1] });
     }
     try state.returnValues(thread, op.base, op.return_count, values.items);
 }
@@ -79,29 +81,296 @@ pub fn format(state: *State, thread: *Thread, op: bytecode.Call) !void {
             continue;
         }
         index += 1;
-        if (index >= fmt.len) return state.fail("invalid format");
+        if (index >= fmt.len) return state.fail("invalid conversion");
         if (fmt[index] == '%') {
             try out.append(state.allocator, '%');
             continue;
         }
-        while (index < fmt.len and std.mem.indexOfScalar(u8, "-+ #0.123456789", fmt[index]) != null) index += 1;
-        if (index >= fmt.len) return state.fail("invalid format");
+        const spec_start = index;
+        const spec = parseFormatSpec(fmt, &index, spec_start) orelse return state.fail("invalid conversion");
+        if (spec.raw_len >= 22) return state.fail("format too long");
+        if (spec.width_digits > 2 or spec.precision_digits > 2) return state.fail("invalid conversion");
+        if (arg >= op.arg_count) return state.fail("no value");
         const value = runtime.argValue(state, thread, op, arg);
         arg += 1;
-        switch (fmt[index]) {
-            's' => try runtime.appendValue(state.allocator, &out, value),
-            'q' => try appendQuoted(state.allocator, &out, try state.expectString(value)),
-            'd', 'i' => try runtime.appendFmt(state.allocator, &out, "{d}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
-            'u' => try runtime.appendFmt(state.allocator, &out, "{d}", .{@as(u64, @bitCast(runtime.toInteger(value) orelse return state.fail("number expected")))}),
-            'x' => try runtime.appendFmt(state.allocator, &out, "{x}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
-            'X' => try runtime.appendFmt(state.allocator, &out, "{X}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
-            'o' => try runtime.appendFmt(state.allocator, &out, "{o}", .{runtime.toInteger(value) orelse return state.fail("number expected")}),
-            'p' => try appendPointer(state.allocator, &out, value),
-            'f', 'e', 'E', 'g', 'G' => try runtime.appendNumber(state.allocator, &out, try runtime.toNumber(value)),
-            else => return state.fail("invalid format"),
+        switch (spec.conversion) {
+            'c' => try appendCharFormat(state, &out, value, spec),
+            's' => try appendStringFormat(state, thread, &out, value, spec),
+            'q' => {
+                if (spec.left_align or spec.force_sign or spec.space_sign or spec.alternate or spec.zero_pad or spec.width != null or spec.precision != null) return state.fail("specifier '%q' cannot have modifiers");
+                try appendLiteral(state, &out, value);
+            },
+            'd', 'i', 'u', 'x', 'X', 'o' => try appendIntegerFormat(state, &out, value, spec),
+            'p' => try appendPointer(state, &out, value, spec),
+            'a', 'A' => try appendHexFloatFormat(state, &out, value, spec),
+            'f' => try appendFloatFormat(state, &out, value, spec),
+            'e', 'E', 'g', 'G' => try appendGeneralFloatFormat(state, &out, value, spec),
+            else => return state.fail("invalid conversion"),
         }
     }
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
+}
+
+fn appendCharFormat(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    if (spec.force_sign or spec.space_sign or spec.alternate or spec.zero_pad or spec.precision != null) return state.fail("invalid conversion");
+    const integer = formatInteger(value) orelse return state.fail("number expected");
+    if (integer < 0 or integer > 255) return state.fail("value out of range");
+    const char_bytes: [1]u8 = .{@intCast(integer)};
+    try appendPadded(state.allocator, out, char_bytes[0..], spec.width, spec.left_align, ' ');
+}
+
+fn formatInteger(value: Value) ?i64 {
+    return switch (value) {
+        .integer => |integer| integer,
+        .number => |number| runtime.floatToInteger(number),
+        .string => |string| runtime.parseIntegerStrict(string),
+        else => null,
+    };
+}
+
+fn appendStringFormat(state: *State, thread: *Thread, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    if (spec.force_sign or spec.space_sign or spec.alternate or spec.zero_pad) return state.fail("invalid conversion");
+    const text = try state.valueToString(thread, value);
+    if (spec.left_align or spec.width != null or spec.precision != null) {
+        if (std.mem.indexOfScalar(u8, text, 0) != null) return state.fail("string contains zeros");
+    }
+    const precision = spec.precision orelse text.len;
+    const formatted = text[0..@min(precision, text.len)];
+    try appendPadded(state.allocator, out, formatted, spec.width, spec.left_align, ' ');
+}
+
+fn appendIntegerFormat(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    const integer = formatInteger(value) orelse return state.fail("number expected");
+    var digits = std.ArrayList(u8).empty;
+    defer digits.deinit(state.allocator);
+
+    const signed = spec.conversion == 'd' or spec.conversion == 'i';
+    const negative = signed and integer < 0;
+    const unsigned: u64 = if (signed)
+        if (negative) 0 -% @as(u64, @bitCast(integer)) else @intCast(integer)
+    else
+        @bitCast(integer);
+
+    if (!(spec.precision == 0 and unsigned == 0)) switch (spec.conversion) {
+        'd', 'i', 'u' => try runtime.appendFmt(state.allocator, &digits, "{d}", .{unsigned}),
+        'x' => try runtime.appendFmt(state.allocator, &digits, "{x}", .{unsigned}),
+        'X' => try runtime.appendFmt(state.allocator, &digits, "{X}", .{unsigned}),
+        'o' => try runtime.appendFmt(state.allocator, &digits, "{o}", .{unsigned}),
+        else => unreachable,
+    };
+
+    var prefix = std.ArrayList(u8).empty;
+    defer prefix.deinit(state.allocator);
+    if (negative) {
+        try prefix.append(state.allocator, '-');
+    } else if (signed and spec.force_sign) {
+        try prefix.append(state.allocator, '+');
+    } else if (signed and spec.space_sign) {
+        try prefix.append(state.allocator, ' ');
+    }
+    if (spec.alternate and unsigned != 0) switch (spec.conversion) {
+        'x' => try prefix.appendSlice(state.allocator, "0x"),
+        'X' => try prefix.appendSlice(state.allocator, "0X"),
+        'o' => if (digits.items.len == 0 or digits.items[0] != '0') try prefix.append(state.allocator, '0'),
+        else => return state.fail("invalid conversion"),
+    };
+
+    const precision_zeroes = if (spec.precision) |precision| if (precision > digits.items.len) precision - digits.items.len else 0 else 0;
+    const unpadded_len = prefix.items.len + precision_zeroes + digits.items.len;
+    const width = spec.width orelse 0;
+    const width_padding = if (width > unpadded_len) width - unpadded_len else 0;
+    const zero_width_padding = spec.zero_pad and spec.precision == null and !spec.left_align;
+
+    if (!spec.left_align and !zero_width_padding) try out.appendNTimes(state.allocator, ' ', width_padding);
+    try out.appendSlice(state.allocator, prefix.items);
+    if (zero_width_padding) try out.appendNTimes(state.allocator, '0', width_padding);
+    try out.appendNTimes(state.allocator, '0', precision_zeroes);
+    try out.appendSlice(state.allocator, digits.items);
+    if (spec.left_align) try out.appendNTimes(state.allocator, ' ', width_padding);
+}
+
+fn appendFloatFormat(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    const number = try runtime.toNumber(value);
+    const precision = spec.precision orelse 6;
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &raw, "{d:1.[1]}", .{ number, precision });
+    if (std.mem.eql(u8, raw.items, "(float)")) {
+        raw.clearRetainingCapacity();
+        try appendFixedFromScientific(state, &raw, number, precision);
+    }
+    if (spec.alternate and precision == 0 and std.mem.indexOfScalar(u8, raw.items, '.') == null) try raw.append(state.allocator, '.');
+    if (number >= 0 and spec.force_sign) {
+        try raw.insert(state.allocator, 0, '+');
+    } else if (number >= 0 and spec.space_sign) {
+        try raw.insert(state.allocator, 0, ' ');
+    }
+    const zero_width_padding = spec.zero_pad and !spec.left_align;
+    if (!zero_width_padding) {
+        try appendPadded(state.allocator, out, raw.items, spec.width, spec.left_align, ' ');
+        return;
+    }
+    const width = spec.width orelse 0;
+    const padding = if (width > raw.items.len) width - raw.items.len else 0;
+    if (raw.items.len > 0 and (raw.items[0] == '+' or raw.items[0] == '-' or raw.items[0] == ' ')) {
+        try out.append(state.allocator, raw.items[0]);
+        try out.appendNTimes(state.allocator, '0', padding);
+        try out.appendSlice(state.allocator, raw.items[1..]);
+    } else {
+        try out.appendNTimes(state.allocator, '0', padding);
+        try out.appendSlice(state.allocator, raw.items);
+    }
+}
+
+fn appendHexFloatFormat(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    const number = try runtime.toNumber(value);
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(state.allocator);
+    if (spec.precision) |precision| {
+        try runtime.appendFmt(state.allocator, &raw, "{x:1.[1]}", .{ number, precision });
+    } else {
+        try runtime.appendFmt(state.allocator, &raw, "{x}", .{number});
+    }
+    if (spec.conversion == 'A') {
+        for (raw.items) |*byte_value| byte_value.* = std.ascii.toUpper(byte_value.*);
+    }
+    if (number >= 0 and raw.items.len > 0 and raw.items[0] != '-' and spec.force_sign) {
+        try raw.insert(state.allocator, 0, '+');
+    } else if (number >= 0 and raw.items.len > 0 and raw.items[0] != '-' and spec.space_sign) {
+        try raw.insert(state.allocator, 0, ' ');
+    }
+    try appendPadded(state.allocator, out, raw.items, spec.width, spec.left_align, if (spec.zero_pad) '0' else ' ');
+}
+
+fn appendGeneralFloatFormat(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    const number = try runtime.toNumber(value);
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(state.allocator);
+    if (spec.conversion == 'e' or spec.conversion == 'E') {
+        const precision = spec.precision orelse 6;
+        try runtime.appendFmt(state.allocator, &raw, "{e:1.[1]}", .{ number, precision });
+    } else if (spec.precision == 1 and (@abs(number) >= 1000 or (@abs(number) > 0 and @abs(number) < 0.1))) {
+        try runtime.appendFmt(state.allocator, &raw, "{e:1.[1]}", .{ number, @as(usize, 0) });
+    } else {
+        try runtime.appendNumber(state.allocator, &raw, number);
+    }
+    if (spec.conversion == 'E' or spec.conversion == 'G') {
+        for (raw.items) |*byte_value| byte_value.* = std.ascii.toUpper(byte_value.*);
+    }
+    normalizeExponent(state.allocator, &raw) catch {};
+    if (number >= 0 and raw.items.len > 0 and raw.items[0] != '-' and spec.force_sign) {
+        try raw.insert(state.allocator, 0, '+');
+    } else if (number >= 0 and raw.items.len > 0 and raw.items[0] != '-' and spec.space_sign) {
+        try raw.insert(state.allocator, 0, ' ');
+    }
+    try appendPadded(state.allocator, out, raw.items, spec.width, spec.left_align, if (spec.zero_pad) '0' else ' ');
+}
+
+fn normalizeExponent(allocator: std.mem.Allocator, text: *std.ArrayList(u8)) !void {
+    const marker = std.mem.indexOfAny(u8, text.items, "eE") orelse return;
+    var sign_index = marker + 1;
+    if (sign_index >= text.items.len) return;
+    if (text.items[sign_index] != '+' and text.items[sign_index] != '-') {
+        try text.insert(allocator, sign_index, '+');
+    }
+    sign_index = marker + 1;
+    const digit_index = sign_index + 1;
+    if (digit_index < text.items.len and digit_index + 1 == text.items.len) try text.insert(allocator, digit_index, '0');
+}
+
+fn appendFixedFromScientific(state: *State, out: *std.ArrayList(u8), number: f64, precision: usize) !void {
+    var scientific = std.ArrayList(u8).empty;
+    defer scientific.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &scientific, "{e:1.[1]}", .{ number, @as(usize, 17) });
+
+    const exponent_index = std.mem.indexOfAny(u8, scientific.items, "eE") orelse return out.appendSlice(state.allocator, scientific.items);
+    const mantissa = scientific.items[0..exponent_index];
+    const exponent = std.fmt.parseInt(i64, scientific.items[exponent_index + 1 ..], 10) catch return out.appendSlice(state.allocator, scientific.items);
+    const negative = mantissa.len > 0 and mantissa[0] == '-';
+
+    var digits = std.ArrayList(u8).empty;
+    defer digits.deinit(state.allocator);
+    for (mantissa[if (negative) 1 else 0..]) |byte_value| {
+        if (byte_value != '.') try digits.append(state.allocator, byte_value);
+    }
+    while (digits.items.len > 1 and digits.items[digits.items.len - 1] == '0') _ = digits.pop();
+
+    if (negative) try out.append(state.allocator, '-');
+    const decimal_pos = exponent + 1;
+    if (decimal_pos <= 0) {
+        try out.appendSlice(state.allocator, "0.");
+        try out.appendNTimes(state.allocator, '0', @intCast(-decimal_pos));
+        try out.appendSlice(state.allocator, digits.items);
+        if (precision > @as(usize, @intCast(-decimal_pos)) + digits.items.len) try out.appendNTimes(state.allocator, '0', precision - @as(usize, @intCast(-decimal_pos)) - digits.items.len);
+        return;
+    }
+
+    const integer_digits: usize = @intCast(decimal_pos);
+    if (integer_digits <= digits.items.len) {
+        try out.appendSlice(state.allocator, digits.items[0..integer_digits]);
+    } else {
+        try out.appendSlice(state.allocator, digits.items);
+        try out.appendNTimes(state.allocator, '0', integer_digits - digits.items.len);
+    }
+    if (precision == 0) return;
+    try out.append(state.allocator, '.');
+    if (integer_digits < digits.items.len) {
+        const fractional = digits.items[integer_digits..];
+        const take = @min(precision, fractional.len);
+        try out.appendSlice(state.allocator, fractional[0..take]);
+        try out.appendNTimes(state.allocator, '0', precision - take);
+    } else {
+        try out.appendNTimes(state.allocator, '0', precision);
+    }
+}
+
+const FormatSpec = struct {
+    conversion: u8,
+    left_align: bool = false,
+    force_sign: bool = false,
+    space_sign: bool = false,
+    alternate: bool = false,
+    zero_pad: bool = false,
+    width: ?usize = null,
+    precision: ?usize = null,
+    width_digits: usize = 0,
+    precision_digits: usize = 0,
+    raw_len: usize = 0,
+};
+
+fn parseFormatSpec(fmt: []const u8, index: *usize, start: usize) ?FormatSpec {
+    var spec: FormatSpec = .{ .conversion = 0 };
+    while (index.* < fmt.len) : (index.* += 1) switch (fmt[index.*]) {
+        '-' => spec.left_align = true,
+        '+' => spec.force_sign = true,
+        ' ' => spec.space_sign = true,
+        '#' => spec.alternate = true,
+        '0' => spec.zero_pad = true,
+        else => break,
+    };
+    if (index.* < fmt.len and std.ascii.isDigit(fmt[index.*])) {
+        const width_start = index.*;
+        var width: usize = 0;
+        while (index.* < fmt.len and std.ascii.isDigit(fmt[index.*])) : (index.* += 1) {
+            if (width < 1000) width = width * 10 + fmt[index.*] - '0';
+        }
+        spec.width = width;
+        spec.width_digits = index.* - width_start;
+    }
+    if (index.* < fmt.len and fmt[index.*] == '.') {
+        index.* += 1;
+        const precision_start = index.*;
+        var precision: usize = 0;
+        while (index.* < fmt.len and std.ascii.isDigit(fmt[index.*])) : (index.* += 1) {
+            if (precision < 1000) precision = precision * 10 + fmt[index.*] - '0';
+        }
+        spec.precision = precision;
+        spec.precision_digits = index.* - precision_start;
+    }
+    if (index.* >= fmt.len) return null;
+    spec.conversion = fmt[index.*];
+    spec.raw_len = index.* - start + 1;
+    return spec;
 }
 
 pub fn gmatch(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -110,7 +379,7 @@ pub fn gmatch(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state_table.set(state.allocator, .{ .string = try state.intern("s") }, .{ .string = try state.expectString(runtime.argValue(state, thread, op, 0)) });
     try state_table.set(state.allocator, .{ .string = try state.intern("p") }, .{ .string = try state.expectString(runtime.argValue(state, thread, op, 1)) });
     try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = 0 });
-    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .native = .string_gmatch_iter }, state_value, .nil });
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .gmatch_iterator = state_value.table }});
 }
 
 pub fn gmatchIter(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -181,7 +450,7 @@ fn gsubReplacement(state: *State, thread: *Thread, replacement: Value, matched: 
                 break :blk try state.intern(out.items);
             },
         },
-        .closure, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => blk: {
+        .closure, .gmatch_iterator, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => blk: {
             const result = try state.callOneResult(thread, replacement, &.{.{ .string = try state.intern(matched) }});
             switch (result) {
                 .nil => break :blk matched,
@@ -260,6 +529,7 @@ pub fn rep(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
     const count = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
     const sep = if (op.arg_count >= 3) try state.expectString(runtime.argValue(state, thread, op, 2)) else "";
+    if (count > 0 and repeatedLengthTooLarge(source.len, sep.len, @intCast(count))) return state.fail("resulting string too large");
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
     if (count > 0) {
@@ -269,7 +539,18 @@ pub fn rep(state: *State, thread: *Thread, op: bytecode.Call) !void {
             try out.appendSlice(state.allocator, source);
         }
     }
-    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try internShortString(state, out.items) }});
+}
+
+fn internShortString(state: *State, bytes: []const u8) ![]const u8 {
+    return if (bytes.len <= 40) try state.intern(bytes) else try state.allocateString(bytes);
+}
+
+fn repeatedLengthTooLarge(source_len: usize, sep_len: usize, count: usize) bool {
+    const max_string_len = std.math.maxInt(i32);
+    var total = std.math.mul(usize, source_len, count) catch return true;
+    if (count > 1) total = std.math.add(usize, total, std.math.mul(usize, sep_len, count - 1) catch return true) catch return true;
+    return total > max_string_len;
 }
 
 pub fn reverse(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -344,6 +625,10 @@ fn findImpl(state: *State, thread: *Thread, op: bytecode.Call, positions: bool) 
     const pattern = try state.expectString(runtime.argValue(state, thread, op, 1));
     const initial = normalizeIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse 1 else 1, source.len);
     const plain = op.arg_count >= 4 and runtime.truthy(runtime.argValue(state, thread, op, 3));
+    if (pattern.len == 0 and initial > source.len + 1) {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    }
     const start = if (initial <= 1) 0 else @min(initial - 1, source.len);
     const found = if (plain) plainFind(source, pattern, start) else simplePatternFind(source, pattern, start);
     if (found) |range| {
@@ -498,28 +783,83 @@ fn isPunctuation(code: u8) bool {
     return (code >= '!' and code <= '/') or (code >= ':' and code <= '@') or (code >= '[' and code <= '`') or (code >= '{' and code <= '~');
 }
 
+fn appendLiteral(state: *State, out: *std.ArrayList(u8), value: Value) !void {
+    switch (value) {
+        .string => |string| try appendQuoted(state.allocator, out, string),
+        .integer => |integer| if (integer == std.math.minInt(i64))
+            try runtime.appendFmt(state.allocator, out, "0x{x}", .{@as(u64, @bitCast(integer))})
+        else
+            try runtime.appendFmt(state.allocator, out, "{d}", .{integer}),
+        .number => |number| {
+            if (std.math.isNan(number)) {
+                try out.appendSlice(state.allocator, "(0/0)");
+            } else if (number == std.math.inf(f64)) {
+                try out.appendSlice(state.allocator, "1e9999");
+            } else if (number == -std.math.inf(f64)) {
+                try out.appendSlice(state.allocator, "-1e9999");
+            } else {
+                try runtime.appendNumber(state.allocator, out, number);
+            }
+        },
+        .nil, .boolean => try runtime.appendValue(state.allocator, out, value),
+        else => return state.fail("value has no literal form"),
+    }
+}
+
 fn appendQuoted(allocator: std.mem.Allocator, out: *std.ArrayList(u8), source: []const u8) !void {
     try out.append(allocator, '"');
-    for (source) |source_byte| switch (source_byte) {
-        '\\' => try out.appendSlice(allocator, "\\\\"),
-        '"' => try out.appendSlice(allocator, "\\\""),
-        '\n' => try out.appendSlice(allocator, "\\n"),
-        '\r' => try out.appendSlice(allocator, "\\r"),
-        '\t' => try out.appendSlice(allocator, "\\t"),
-        else => try out.append(allocator, source_byte),
-    };
+    for (source, 0..) |source_byte, index| {
+        if (source_byte == '"' or source_byte == '\\' or source_byte == '\n') {
+            try out.append(allocator, '\\');
+            try out.append(allocator, source_byte);
+        } else if (std.ascii.isControl(source_byte)) {
+            const next_is_digit = index + 1 < source.len and std.ascii.isDigit(source[index + 1]);
+            if (next_is_digit) {
+                try runtime.appendFmt(allocator, out, "\\{d:0>3}", .{source_byte});
+            } else {
+                try runtime.appendFmt(allocator, out, "\\{d}", .{source_byte});
+            }
+        } else {
+            try out.append(allocator, source_byte);
+        }
+    }
     try out.append(allocator, '"');
 }
 
-fn appendPointer(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
-    const address: usize = switch (value) {
+fn appendPointer(state: *State, out: *std.ArrayList(u8), value: Value, spec: FormatSpec) !void {
+    if (spec.force_sign or spec.space_sign or spec.alternate or spec.zero_pad or spec.precision != null) return state.fail("invalid conversion");
+
+    var raw = std.ArrayList(u8).empty;
+    defer raw.deinit(state.allocator);
+    const address = pointerAddress(value) orelse {
+        try raw.appendSlice(state.allocator, "(null)");
+        try appendPadded(state.allocator, out, raw.items, spec.width, spec.left_align, ' ');
+        return;
+    };
+    try runtime.appendFmt(state.allocator, &raw, "0x{x}", .{address});
+    try appendPadded(state.allocator, out, raw.items, spec.width, spec.left_align, ' ');
+}
+
+fn pointerAddress(value: Value) ?usize {
+    return switch (value) {
         .string => |string| @intFromPtr(string.ptr),
         .table => |table| @intFromPtr(table),
         .closure => |closure| @intFromPtr(closure),
         .thread => |thread| @intFromPtr(thread),
-        else => 0,
+        .coroutine_wrapper => |thread| @intFromPtr(thread),
+        .gmatch_iterator => |table| @intFromPtr(table),
+        .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap => @as(usize, 0x1000) + @as(usize, @intFromEnum(std.meta.activeTag(value))),
+        .native => |native| @as(usize, 0x2000) + @as(usize, @intFromEnum(native)),
+        else => null,
     };
-    try runtime.appendFmt(allocator, out, "0x{x}", .{address});
+}
+
+fn appendPadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8, width: ?usize, left_align: bool, pad: u8) !void {
+    const target = width orelse 0;
+    const padding = if (target > text.len) target - text.len else 0;
+    if (!left_align) try out.appendNTimes(allocator, pad, padding);
+    try out.appendSlice(allocator, text);
+    if (left_align) try out.appendNTimes(allocator, pad, padding);
 }
 
 const Endian = enum { little, big };

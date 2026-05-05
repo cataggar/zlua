@@ -17,9 +17,21 @@ pub fn concat(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var index = start;
     while (index <= stop) : (index += 1) {
         if (index != start) try out.appendSlice(state.allocator, sep);
-        try runtime.appendLuaString(state.allocator, &out, table.get(.{ .integer = index }));
+        const value = table.get(.{ .integer = index });
+        switch (value) {
+            .integer, .number, .string => try runtime.appendLuaString(state.allocator, &out, value),
+            else => return state.fail(try concatIndexError(state, index)),
+        }
+        if (index == std.math.maxInt(i64)) break;
     }
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
+}
+
+fn concatIndexError(state: *State, index: i64) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &out, "invalid value at index {d}", .{index});
+    return state.intern(out.items);
 }
 
 pub fn insert(state: *State, thread: *Thread, op: bytecode.Call) !void {

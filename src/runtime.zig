@@ -29,6 +29,7 @@ pub const Value = union(enum) {
     closure: *Closure,
     thread: *Thread,
     coroutine_wrapper: *Thread,
+    gmatch_iterator: *Table,
     native_print,
     native_tostring,
     native_getmetatable,
@@ -653,6 +654,9 @@ pub const State = struct {
         try state.setTable(io_lib, .{ .string = try state.intern("write") }, .{ .native = .io_write });
         try state.setTable(io_lib, .{ .string = try state.intern("open") }, .{ .native = .io_open });
         try state.setTable(io_lib, .{ .string = try state.intern("type") }, .{ .native = .io_type });
+        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, try state.newTableWithHints(0, 0));
+        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, try state.newTableWithHints(0, 0));
+        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, try state.newTableWithHints(0, 0));
         try state.globals.put(try state.intern("io"), io_lib);
 
         const os_lib = try state.newTableWithHints(0, 4);
@@ -1652,6 +1656,10 @@ pub const State = struct {
             .native_coroutine_status => try self.coroutineStatus(thread, resolved),
             .native_coroutine_running => try self.coroutineRunning(thread, resolved),
             .native_coroutine_wrap => try self.coroutineWrap(thread, resolved),
+            .gmatch_iterator => |state_table| {
+                const values = try stdlib.string.gmatchNext(self, .{ .table = state_table });
+                try self.returnValues(thread, resolved.base, resolved.return_count, &values);
+            },
             .native => |native| try self.callNative(native, thread, resolved),
             else => {
                 const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
@@ -1752,13 +1760,22 @@ pub const State = struct {
         return failure;
     }
 
-    fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
+    pub fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
         if (try self.getMetamethod(value, "__tostring")) |metamethod| {
             const result = try self.callOneResult(thread, metamethod, &.{value});
             return switch (result) {
                 .string => |string| string,
                 else => self.fail("'__tostring' must return a string"),
             };
+        }
+
+        if (try self.getMetamethod(value, "__name")) |name| {
+            if (name == .string) {
+                var named = std.ArrayList(u8).empty;
+                defer named.deinit(self.allocator);
+                try appendNamedValue(self.allocator, &named, name.string, value);
+                return self.intern(named.items);
+            }
         }
 
         var out = std.ArrayList(u8).empty;
@@ -2193,6 +2210,10 @@ pub const State = struct {
     }
 
     fn coroutineWrap(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (argValue(self, thread, op, 0) == .gmatch_iterator) {
+            try self.returnValues(thread, op.base, op.return_count, &.{argValue(self, thread, op, 0)});
+            return;
+        }
         const closure = switch (argValue(self, thread, op, 0)) {
             .closure => |closure| closure,
             else => return self.fail("function expected"),
@@ -2605,6 +2626,7 @@ pub const State = struct {
             .table => |table| if (self.isTrackedTable(table)) self.markTable(table),
             .closure => |closure| if (self.isTrackedClosure(closure)) self.markClosure(closure),
             .thread, .coroutine_wrapper => |thread| if (self.isTrackedThread(thread) or thread == self.current_thread) self.markThread(thread),
+            .gmatch_iterator => |table| if (self.isTrackedTable(table)) self.markTable(table),
             else => {},
         }
     }
@@ -2642,6 +2664,7 @@ pub const State = struct {
     }
 
     fn markUpvalue(self: *State, upvalue: *Upvalue) void {
+        if (!self.isTrackedUpvalue(upvalue)) return;
         if (upvalue.marked) return;
         upvalue.marked = true;
         if (upvalue.is_open) {
@@ -2914,6 +2937,13 @@ pub const State = struct {
     fn isTrackedClosure(self: *State, closure: *Closure) bool {
         for (self.closure_allocations.items) |allocation| {
             if (allocation == closure) return true;
+        }
+        return false;
+    }
+
+    fn isTrackedUpvalue(self: *State, upvalue: *Upvalue) bool {
+        for (self.upvalue_allocations.items) |allocation| {
+            if (allocation == upvalue) return true;
         }
         return false;
     }
@@ -3243,6 +3273,7 @@ pub fn valuesEqual(lhs: Value, rhs: Value) bool {
         .closure => |value| rhs == .closure and value == rhs.closure,
         .thread => |value| rhs == .thread and value == rhs.thread,
         .coroutine_wrapper => |value| rhs == .coroutine_wrapper and value == rhs.coroutine_wrapper,
+        .gmatch_iterator => |value| rhs == .gmatch_iterator and value == rhs.gmatch_iterator,
         .native_print => rhs == .native_print,
         .native_tostring => rhs == .native_tostring,
         .native_getmetatable => rhs == .native_getmetatable,
@@ -3284,33 +3315,34 @@ fn hashValue(value: Value) u64 {
         .closure => |payload| hashPointer(6, payload),
         .thread => |payload| hashPointer(7, payload),
         .coroutine_wrapper => |payload| hashPointer(8, payload),
-        .native_print => hashTag(9),
-        .native_tostring => hashTag(10),
-        .native_getmetatable => hashTag(11),
-        .native_setmetatable => hashTag(12),
-        .native_rawequal => hashTag(13),
-        .native_rawget => hashTag(14),
-        .native_rawset => hashTag(15),
-        .native_rawlen => hashTag(16),
-        .native_next => hashTag(17),
-        .native_pairs => hashTag(18),
-        .native_ipairs => hashTag(19),
-        .native_ipairs_iter => hashTag(20),
-        .native_table_create => hashTag(21),
-        .native_select => hashTag(22),
-        .native_assert => hashTag(23),
-        .native_error => hashTag(24),
-        .native_pcall => hashTag(25),
-        .native_xpcall => hashTag(26),
-        .native_collectgarbage => hashTag(27),
-        .native_debug_traceback => hashTag(28),
-        .native_coroutine_create => hashTag(29),
-        .native_coroutine_resume => hashTag(30),
-        .native_coroutine_yield => hashTag(31),
-        .native_coroutine_status => hashTag(32),
-        .native_coroutine_running => hashTag(33),
-        .native_coroutine_wrap => hashTag(34),
-        .native => |payload| hashEnum(35, payload),
+        .gmatch_iterator => |payload| hashPointer(9, payload),
+        .native_print => hashTag(10),
+        .native_tostring => hashTag(11),
+        .native_getmetatable => hashTag(12),
+        .native_setmetatable => hashTag(13),
+        .native_rawequal => hashTag(14),
+        .native_rawget => hashTag(15),
+        .native_rawset => hashTag(16),
+        .native_rawlen => hashTag(17),
+        .native_next => hashTag(18),
+        .native_pairs => hashTag(19),
+        .native_ipairs => hashTag(20),
+        .native_ipairs_iter => hashTag(21),
+        .native_table_create => hashTag(22),
+        .native_select => hashTag(23),
+        .native_assert => hashTag(24),
+        .native_error => hashTag(25),
+        .native_pcall => hashTag(26),
+        .native_xpcall => hashTag(27),
+        .native_collectgarbage => hashTag(28),
+        .native_debug_traceback => hashTag(29),
+        .native_coroutine_create => hashTag(30),
+        .native_coroutine_resume => hashTag(31),
+        .native_coroutine_yield => hashTag(32),
+        .native_coroutine_status => hashTag(33),
+        .native_coroutine_running => hashTag(34),
+        .native_coroutine_wrap => hashTag(35),
+        .native => |payload| hashEnum(36, payload),
     };
 }
 
@@ -3646,10 +3678,11 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
         .integer => |integer| try appendFmt(allocator, out, "{d}", .{integer}),
         .number => |number| try appendNumber(allocator, out, number),
         .string => |string| try out.appendSlice(allocator, string),
-        .table => try out.appendSlice(allocator, "table"),
-        .closure => try out.appendSlice(allocator, "function"),
-        .thread => try out.appendSlice(allocator, "thread"),
-        .coroutine_wrapper => try out.appendSlice(allocator, "function"),
+        .table => |table| try appendFmt(allocator, out, "table: 0x{x}", .{@intFromPtr(table)}),
+        .closure => |closure| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(closure)}),
+        .thread => |thread| try appendFmt(allocator, out, "thread: 0x{x}", .{@intFromPtr(thread)}),
+        .coroutine_wrapper => |thread| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(thread)}),
+        .gmatch_iterator => |table| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(table)}),
         .native_print => try out.appendSlice(allocator, "function: print"),
         .native_tostring => try out.appendSlice(allocator, "function: tostring"),
         .native_getmetatable => try out.appendSlice(allocator, "function: getmetatable"),
@@ -3680,6 +3713,21 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
             try out.appendSlice(allocator, "function: ");
             try out.appendSlice(allocator, native.name());
         },
+    }
+}
+
+fn appendNamedValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: Value) !void {
+    const address: ?usize = switch (value) {
+        .table => |table| @intFromPtr(table),
+        .closure => |closure| @intFromPtr(closure),
+        .thread => |thread| @intFromPtr(thread),
+        .coroutine_wrapper => |thread| @intFromPtr(thread),
+        else => null,
+    };
+    if (address) |ptr| {
+        try appendFmt(allocator, out, "{s}: 0x{x}", .{ name, ptr });
+    } else {
+        try out.appendSlice(allocator, name);
     }
 }
 
