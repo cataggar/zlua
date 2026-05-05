@@ -33,6 +33,12 @@ const PendingLocal = struct {
     to_close: bool = false,
 };
 
+const PreparedTarget = union(enum) {
+    expr: *const ast.Expr,
+    field: struct { table: bytecode.Register, name: bytecode.ConstantIndex },
+    index: struct { table: bytecode.Register, key: bytecode.Register },
+};
+
 const Scope = struct {
     local_start: usize,
     next_register: bytecode.Register,
@@ -157,11 +163,15 @@ const FunctionCompiler = struct {
 
     fn compileAssignment(self: *FunctionCompiler, assignment: ast.Assignment) anyerror!void {
         const mark = self.registerMark();
+        var targets = std.ArrayList(PreparedTarget).empty;
+        defer targets.deinit(self.allocator);
+        for (assignment.targets) |target| try targets.append(self.allocator, try self.prepareAssignmentTarget(target));
+
         const first_value = try self.allocRegs(@intCast(assignment.targets.len));
         try self.compileExprListAdjusted(assignment.values, first_value, @intCast(assignment.targets.len));
 
-        for (assignment.targets, 0..) |target, index| {
-            try self.assignTarget(target, first_value + @as(bytecode.Register, @intCast(index)));
+        for (targets.items, 0..) |target, index| {
+            try self.assignPreparedTarget(target, first_value + @as(bytecode.Register, @intCast(index)));
         }
 
         self.release(mark);
@@ -568,7 +578,7 @@ const FunctionCompiler = struct {
         }
 
         while (value_index < values.len) : (value_index += 1) {
-            try self.compileDiscardedExpr(values[value_index], dest);
+            try self.compileDiscardedExpr(values[value_index], dest + needed);
         }
     }
 
@@ -667,11 +677,40 @@ const FunctionCompiler = struct {
         }
     }
 
+    fn prepareAssignmentTarget(self: *FunctionCompiler, target: *const ast.Expr) anyerror!PreparedTarget {
+        return switch (target.*) {
+            .identifier => .{ .expr = target },
+            .field => |field| blk: {
+                const table = try self.allocReg();
+                try self.compileExpr(field.receiver, table);
+                break :blk .{ .field = .{ .table = table, .name = try self.nameConstant(field.name.name) } };
+            },
+            .index => |index| blk: {
+                const table = try self.allocReg();
+                const key = try self.allocReg();
+                try self.compileExpr(index.receiver, table);
+                try self.compileExpr(index.key, key);
+                break :blk .{ .index = .{ .table = table, .key = key } };
+            },
+            else => error.CompileError,
+        };
+    }
+
+    fn assignPreparedTarget(self: *FunctionCompiler, target: PreparedTarget, value_reg: bytecode.Register) anyerror!void {
+        switch (target) {
+            .expr => |expr| try self.assignTarget(expr, value_reg),
+            .field => |field| _ = try self.emit(.{ .set_field = .{ .table = field.table, .name = field.name, .value = value_reg } }),
+            .index => |index| _ = try self.emit(.{ .set_table = .{ .table = index.table, .key = index.key, .value = value_reg } }),
+        }
+    }
+
     fn loadName(self: *FunctionCompiler, name: []const u8, dest: bytecode.Register) !void {
         if (self.lookupLocal(name)) |local| {
             _ = try self.emit(.{ .move = .{ .dest = dest, .source = local.register } });
         } else if (try self.lookupUpvalue(name)) |upvalue| {
             _ = try self.emit(.{ .get_upvalue = .{ .register = dest, .upvalue = upvalue } });
+        } else if (!std.mem.eql(u8, name, "_ENV") and try self.loadFromEnvironment(name, dest)) {
+            return;
         } else {
             _ = try self.emit(.{ .get_global = .{ .register = dest, .name = try self.nameConstant(name) } });
         }
@@ -682,9 +721,53 @@ const FunctionCompiler = struct {
             _ = try self.emit(.{ .move = .{ .dest = local.register, .source = value_reg } });
         } else if (try self.lookupUpvalue(name)) |upvalue| {
             _ = try self.emit(.{ .set_upvalue = .{ .register = value_reg, .upvalue = upvalue } });
+        } else if (!std.mem.eql(u8, name, "_ENV") and try self.storeInEnvironment(name, value_reg)) {
+            return;
         } else {
             _ = try self.emit(.{ .set_global = .{ .register = value_reg, .name = try self.nameConstant(name) } });
         }
+    }
+
+    fn loadFromEnvironment(self: *FunctionCompiler, name: []const u8, dest: bytecode.Register) !bool {
+        const mark = self.registerMark();
+        const key = try self.allocReg();
+        if (self.lookupLocal("_ENV")) |local| {
+            _ = try self.emit(.{ .load_const = .{ .dest = key, .constant = try self.nameConstant(name) } });
+            _ = try self.emit(.{ .get_table = .{ .dest = dest, .table = local.register, .key = key } });
+            self.release(mark);
+            return true;
+        }
+        if (try self.lookupUpvalue("_ENV")) |upvalue| {
+            const env = try self.allocReg();
+            _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = upvalue } });
+            _ = try self.emit(.{ .load_const = .{ .dest = key, .constant = try self.nameConstant(name) } });
+            _ = try self.emit(.{ .get_table = .{ .dest = dest, .table = env, .key = key } });
+            self.release(mark);
+            return true;
+        }
+        self.release(mark);
+        return false;
+    }
+
+    fn storeInEnvironment(self: *FunctionCompiler, name: []const u8, value_reg: bytecode.Register) !bool {
+        const mark = self.registerMark();
+        const key = try self.allocReg();
+        if (self.lookupLocal("_ENV")) |local| {
+            _ = try self.emit(.{ .load_const = .{ .dest = key, .constant = try self.nameConstant(name) } });
+            _ = try self.emit(.{ .set_table = .{ .table = local.register, .key = key, .value = value_reg } });
+            self.release(mark);
+            return true;
+        }
+        if (try self.lookupUpvalue("_ENV")) |upvalue| {
+            const env = try self.allocReg();
+            _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = upvalue } });
+            _ = try self.emit(.{ .load_const = .{ .dest = key, .constant = try self.nameConstant(name) } });
+            _ = try self.emit(.{ .set_table = .{ .table = env, .key = key, .value = value_reg } });
+            self.release(mark);
+            return true;
+        }
+        self.release(mark);
+        return false;
     }
 
     fn lookupLocal(self: *FunctionCompiler, name: []const u8) ?Local {

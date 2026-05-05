@@ -40,8 +40,13 @@ pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var loader = preload.get(name_key);
     var loader_data: Value = .nil;
     if (loader == .nil) {
-        const path = try state.expectString(package.get(.{ .string = try state.intern("path") }));
-        const found = try searchPath(state, name, path) orelse return state.fail("module not found");
+        const path_value = package.get(.{ .string = try state.intern("path") });
+        if (path_value != .string) return state.fail("package.path must be a string");
+        const path = path_value.string;
+        const found = try searchPath(state, name, path, ".", "/") orelse {
+            const message = try moduleNotFoundMessage(state, name, package, path);
+            return state.fail(message);
+        };
         defer state.allocator.free(found);
         loader = try state.loadFileAsClosure(found);
         loader_data = .{ .string = try state.intern(found) };
@@ -56,6 +61,25 @@ pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
     } else {
         try state.returnValues(thread, op.base, op.return_count, &.{ module_value, loader_data });
     }
+}
+
+pub fn searchpath(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const path = try state.expectString(runtime.argValue(state, thread, op, 1));
+    const sep_value = runtime.argValue(state, thread, op, 2);
+    const rep_value = runtime.argValue(state, thread, op, 3);
+    const sep = if (sep_value == .nil) "." else try state.expectString(sep_value);
+    const rep = if (rep_value == .nil) "/" else try state.expectString(rep_value);
+
+    if (try searchPath(state, name, path, sep, rep)) |found| {
+        defer state.allocator.free(found);
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(found) }});
+        return;
+    }
+
+    const message = try searchPathError(state, name, path, sep, rep);
+    defer state.allocator.free(message);
+    try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
 }
 
 pub fn searcherPreload(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -73,7 +97,7 @@ pub fn searcherLua(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const name = try state.expectString(runtime.argValue(state, thread, op, 0));
     const package = try packageTable(state);
     const path = try state.expectString(package.get(.{ .string = try state.intern("path") }));
-    const found = try searchPath(state, name, path) orelse {
+    const found = try searchPath(state, name, path, ".", "/") orelse {
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern("no matching file") }});
         return;
     };
@@ -89,28 +113,74 @@ fn packageTable(state: *State) !*runtime.Table {
     return state.expectTable(state.getGlobal("package"));
 }
 
-fn searchPath(state: *State, name: []const u8, path: []const u8) !?[]const u8 {
-    const module_path = try state.allocator.dupe(u8, name);
+fn searchPath(state: *State, name: []const u8, path: []const u8, sep: []const u8, rep: []const u8) !?[]const u8 {
+    const module_path = try modulePath(state, name, sep, rep);
     defer state.allocator.free(module_path);
-    for (module_path) |*byte| {
-        if (byte.* == '.') byte.* = '/';
-    }
 
     var iterator = std.mem.splitScalar(u8, path, ';');
     while (iterator.next()) |template| {
-        var candidate = std.ArrayList(u8).empty;
+        var candidate = try applyTemplate(state.allocator, template, module_path);
         defer candidate.deinit(state.allocator);
-        for (template) |byte| {
-            if (byte == '?') {
-                try candidate.appendSlice(state.allocator, module_path);
-            } else {
-                try candidate.append(state.allocator, byte);
-            }
-        }
         const contents = state.readFileAlloc(candidate.items) catch continue;
         state.allocator.free(contents);
         const found = try state.allocator.dupe(u8, candidate.items);
         return found;
     }
     return null;
+}
+
+fn moduleNotFoundMessage(state: *State, name: []const u8, package: *runtime.Table, path: []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &out, "module '{s}' not found:\n\tno field package.preload['{s}']", .{ name, name });
+    try appendSearchPathError(state, &out, name, path, ".", "/");
+    const cpath_value = package.get(.{ .string = try state.intern("cpath") });
+    if (cpath_value == .string) try appendSearchPathError(state, &out, name, cpath_value.string, ".", "/");
+    return state.intern(out.items);
+}
+
+fn searchPathError(state: *State, name: []const u8, path: []const u8, sep: []const u8, rep: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(state.allocator);
+    try appendSearchPathError(state, &out, name, path, sep, rep);
+    return out.toOwnedSlice(state.allocator);
+}
+
+fn appendSearchPathError(state: *State, out: *std.ArrayList(u8), name: []const u8, path: []const u8, sep: []const u8, rep: []const u8) !void {
+    const module_path = try modulePath(state, name, sep, rep);
+    defer state.allocator.free(module_path);
+
+    var iterator = std.mem.splitScalar(u8, path, ';');
+    while (iterator.next()) |template| {
+        var candidate = try applyTemplate(state.allocator, template, module_path);
+        defer candidate.deinit(state.allocator);
+        try runtime.appendFmt(state.allocator, out, "\n\tno file '{s}'", .{candidate.items});
+    }
+}
+
+fn modulePath(state: *State, name: []const u8, sep: []const u8, rep: []const u8) ![]u8 {
+    if (sep.len == 0) return state.allocator.dupe(u8, name);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(state.allocator);
+    var rest = name;
+    while (std.mem.indexOf(u8, rest, sep)) |index| {
+        try out.appendSlice(state.allocator, rest[0..index]);
+        try out.appendSlice(state.allocator, rep);
+        rest = rest[index + sep.len ..];
+    }
+    try out.appendSlice(state.allocator, rest);
+    return out.toOwnedSlice(state.allocator);
+}
+
+fn applyTemplate(allocator: std.mem.Allocator, template: []const u8, module_path: []const u8) !std.ArrayList(u8) {
+    var candidate = std.ArrayList(u8).empty;
+    errdefer candidate.deinit(allocator);
+    for (template) |byte| {
+        if (byte == '?') {
+            try candidate.appendSlice(allocator, module_path);
+        } else {
+            try candidate.append(allocator, byte);
+        }
+    }
+    return candidate;
 }

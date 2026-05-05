@@ -80,6 +80,10 @@ official-basic *args:
 official-complete *args:
     just official --mode=complete {{args}}
 
+# Run one official Lua 5.5 test file by name, e.g. `just official-file attrib`.
+official-file name *args: build
+    file="{{name}}"; if [[ "$file" != *.lua ]]; then file="$file.lua"; fi; cd tests/official/lua-5.5.0-tests; ../../../{{zlua}} -e "_U=true; _soft=true; _port=true; _nomsg=true; T=nil; ARG=arg" "$file" {{args}}
+
 # Remove build outputs and Zig cache directories.
 clean:
     rm -rf zig-out .zig-cache

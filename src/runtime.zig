@@ -519,7 +519,9 @@ pub const State = struct {
         try state.setTable(math_lib, .{ .string = try state.intern("fmod") }, .{ .native = .math_fmod });
         try state.setTable(math_lib, .{ .string = try state.intern("huge") }, .{ .number = std.math.inf(f64) });
         try state.setTable(math_lib, .{ .string = try state.intern("log") }, .{ .native = .math_log });
+        try state.setTable(math_lib, .{ .string = try state.intern("maxinteger") }, .{ .integer = std.math.maxInt(i64) });
         try state.setTable(math_lib, .{ .string = try state.intern("max") }, .{ .native = .math_max });
+        try state.setTable(math_lib, .{ .string = try state.intern("mininteger") }, .{ .integer = std.math.minInt(i64) });
         try state.setTable(math_lib, .{ .string = try state.intern("min") }, .{ .native = .math_min });
         try state.setTable(math_lib, .{ .string = try state.intern("modf") }, .{ .native = .math_modf });
         try state.setTable(math_lib, .{ .string = try state.intern("pi") }, .{ .number = std.math.pi });
@@ -572,23 +574,34 @@ pub const State = struct {
         try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
         try state.globals.put(try state.intern("os"), os_lib);
 
+        const debug_lib = try state.newTableWithHints(0, 2);
+        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
+        try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
+        try state.globals.put(try state.intern("debug"), debug_lib);
+
         const package_lib = try state.newTableWithHints(0, 8);
         const loaded = try state.newTableWithHints(0, 8);
         const preload = try state.newTableWithHints(0, 4);
         const searchers = try state.newTableWithHints(2, 0);
         try searchers.table.set(state.allocator, .{ .integer = 1 }, .{ .native = .package_searcher_preload });
         try searchers.table.set(state.allocator, .{ .integer = 2 }, .{ .native = .package_searcher_lua });
+        try state.setTable(loaded, .{ .string = try state.intern("coroutine") }, state.getGlobal("coroutine"));
+        try state.setTable(loaded, .{ .string = try state.intern("debug") }, debug_lib);
+        try state.setTable(loaded, .{ .string = try state.intern("io") }, io_lib);
+        try state.setTable(loaded, .{ .string = try state.intern("math") }, state.getGlobal("math"));
+        try state.setTable(loaded, .{ .string = try state.intern("os") }, os_lib);
+        try state.setTable(loaded, .{ .string = try state.intern("package") }, package_lib);
+        try state.setTable(loaded, .{ .string = try state.intern("string") }, state.getGlobal("string"));
+        try state.setTable(loaded, .{ .string = try state.intern("table") }, state.getGlobal("table"));
+        try state.setTable(loaded, .{ .string = try state.intern("utf8") }, state.getGlobal("utf8"));
         try state.setTable(package_lib, .{ .string = try state.intern("loaded") }, loaded);
         try state.setTable(package_lib, .{ .string = try state.intern("preload") }, preload);
         try state.setTable(package_lib, .{ .string = try state.intern("searchers") }, searchers);
+        try state.setTable(package_lib, .{ .string = try state.intern("searchpath") }, .{ .native = .package_searchpath });
         try state.setTable(package_lib, .{ .string = try state.intern("path") }, .{ .string = try state.intern("./?.lua;./?/init.lua") });
         try state.setTable(package_lib, .{ .string = try state.intern("cpath") }, .{ .string = try state.intern("") });
+        try state.setTable(package_lib, .{ .string = try state.intern("config") }, .{ .string = try state.intern("/\n;\n?\n!\n-\n") });
         try state.globals.put(try state.intern("package"), package_lib);
-
-        const debug_lib = try state.newTableWithHints(0, 2);
-        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
-        try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
-        try state.globals.put(try state.intern("debug"), debug_lib);
     }
 
     pub fn deinit(self: *State) void {
@@ -694,6 +707,8 @@ pub const State = struct {
                 .tail_call => |op| try self.tailCallValue(thread, op),
                 .ret => |op| try self.returnFromFrame(thread, op.first, op.count),
                 .vararg => |op| try self.loadVarargs(thread, op),
+                .for_prep => |op| try self.forPrep(thread, op),
+                .for_loop => |op| try self.forLoop(thread, op),
                 .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) try self.jumpThread(thread, op.offset),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
                 .tfor_loop => |op| try self.jumpThread(thread, op.offset),
@@ -703,7 +718,6 @@ pub const State = struct {
                 .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
                 .check_close => |register| try self.checkToBeClosedValue(self.get(thread, register)),
                 .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, .nil),
-                .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
 
             if (self.collect_after_instruction and self.gc_running) try self.collectGarbageConservatively(thread);
@@ -1062,6 +1076,49 @@ pub const State = struct {
         thread.frames.items[frame_index].pc = target_pc;
     }
 
+    fn forPrep(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
+        const initial = self.get(thread, op.base);
+        const limit = self.get(thread, op.base + 1);
+        const step = self.get(thread, op.base + 2);
+        if (toInteger(initial)) |initial_integer| {
+            if (toInteger(limit)) |limit_integer| {
+                if (toInteger(step)) |step_integer| {
+                    if (step_integer == 0) return self.fail("'for' step is zero");
+                    self.set(thread, op.base, .{ .integer = initial_integer });
+                    self.set(thread, op.base + 1, .{ .integer = limit_integer });
+                    self.set(thread, op.base + 2, .{ .integer = step_integer });
+                    if (!forLoopContinuesInteger(initial_integer, limit_integer, step_integer)) try self.jumpThread(thread, op.offset);
+                    return;
+                }
+            }
+        }
+
+        const initial_number = toNumberMaybe(initial) orelse return self.fail("'for' initial value must be a number");
+        const limit_number = toNumberMaybe(limit) orelse return self.fail("'for' limit must be a number");
+        const step_number = toNumberMaybe(step) orelse return self.fail("'for' step must be a number");
+        if (step_number == 0) return self.fail("'for' step is zero");
+        self.set(thread, op.base, .{ .number = initial_number });
+        self.set(thread, op.base + 1, .{ .number = limit_number });
+        self.set(thread, op.base + 2, .{ .number = step_number });
+        if (!forLoopContinuesNumber(initial_number, limit_number, step_number)) try self.jumpThread(thread, op.offset);
+    }
+
+    fn forLoop(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
+        const current = self.get(thread, op.base);
+        const limit = self.get(thread, op.base + 1);
+        const step = self.get(thread, op.base + 2);
+        if (current == .integer and limit == .integer and step == .integer) {
+            const next = current.integer +% step.integer;
+            self.set(thread, op.base, .{ .integer = next });
+            if (forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset);
+            return;
+        }
+
+        const next = (try toNumber(current)) + (try toNumber(step));
+        self.set(thread, op.base, .{ .number = next });
+        if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) try self.jumpThread(thread, op.offset);
+    }
+
     fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: Value) !void {
         const frame = thread.frames.items[frame_index];
         var pending_error = error_value;
@@ -1150,7 +1207,7 @@ pub const State = struct {
 
         const metamethod = try self.getMetamethod(table_value, "__index") orelse {
             if (table_value == .table) return .nil;
-            return self.fail("attempt to index a non-table value");
+            return self.fail(indexErrorMessage(table_value));
         };
 
         return switch (metamethod) {
@@ -1165,7 +1222,7 @@ pub const State = struct {
     fn rawGet(self: *State, table_value: Value, key_value: Value) !Value {
         const table = switch (table_value) {
             .table => |table| table,
-            else => return self.fail("attempt to index a non-table value"),
+            else => return self.fail(indexErrorMessage(table_value)),
         };
         const key = try self.readableTableKey(key_value) orelse return .nil;
         return table.get(key);
@@ -1198,7 +1255,7 @@ pub const State = struct {
                 self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
-            return self.fail("attempt to index a non-table value");
+            return self.fail(indexErrorMessage(table_value));
         };
 
         switch (metamethod) {
@@ -2758,11 +2815,11 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .boolean => |value| rhs == .boolean and rhs.boolean == value,
         .integer => |value| switch (rhs) {
             .integer => |other| value == other,
-            .number => |other| @as(f64, @floatFromInt(value)) == other,
+            .number => |other| if (floatToInteger(other)) |integer| value == integer else false,
             else => false,
         },
         .number => |value| switch (rhs) {
-            .integer => |other| value == @as(f64, @floatFromInt(other)),
+            .integer => |other| if (floatToInteger(value)) |integer| integer == other else false,
             .number => |other| value == other,
             else => false,
         },
@@ -2895,6 +2952,16 @@ fn luaStringLike(value: Value) bool {
     };
 }
 
+fn indexErrorMessage(value: Value) []const u8 {
+    return switch (value) {
+        .integer, .number => "attempt to index a number value",
+        .string => "attempt to index a string value",
+        .boolean => "attempt to index a boolean value",
+        .nil => "attempt to index a nil value",
+        else => "attempt to index a non-table value",
+    };
+}
+
 pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
     switch (value) {
         .integer, .number, .string => try appendValue(allocator, out, value),
@@ -2912,6 +2979,14 @@ fn floorMod(left: i64, right: i64) i64 {
 
 fn jumpTarget(pc: usize, offset: bytecode.JumpOffset) usize {
     return if (offset >= 0) pc + @as(usize, @intCast(offset)) else pc - @as(usize, @intCast(-offset));
+}
+
+fn forLoopContinuesInteger(current: i64, limit: i64, step: i64) bool {
+    return if (step > 0) current <= limit else current >= limit;
+}
+
+fn forLoopContinuesNumber(current: f64, limit: f64, step: f64) bool {
+    return if (step > 0) current <= limit else current >= limit;
 }
 
 fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
@@ -3025,7 +3100,7 @@ pub fn floatToInteger(number: f64) ?i64 {
     if (!std.math.isFinite(number) or @floor(number) != number) return null;
     const min = @as(f64, @floatFromInt(std.math.minInt(i64)));
     const max = @as(f64, @floatFromInt(std.math.maxInt(i64)));
-    if (number < min or number > max) return null;
+    if (number < min or number >= max) return null;
     return @intFromFloat(number);
 }
 
