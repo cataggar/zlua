@@ -1,5 +1,214 @@
-pub const safe = @import("stdlib/safe.zig");
+const compile = @import("compile.zig");
+const runtime = @import("runtime.zig");
+
+pub const base = @import("stdlib/base.zig");
+pub const table = @import("stdlib/table.zig");
+pub const string = @import("stdlib/string.zig");
+pub const math = @import("stdlib/math.zig");
+pub const utf8 = @import("stdlib/utf8.zig");
+pub const coroutine = @import("stdlib/coroutine.zig");
+pub const debug = @import("stdlib/debug.zig");
+pub const package = @import("stdlib/package.zig");
+pub const io = @import("stdlib/io.zig");
+pub const os = @import("stdlib/os.zig");
+
+const bytecode = compile.bytecode;
+const State = runtime.State;
+const Thread = runtime.Thread;
+
+pub const NativeFn = enum {
+    type,
+    tonumber,
+    warn,
+    table_concat,
+    table_insert,
+    table_move,
+    table_pack,
+    table_remove,
+    table_sort,
+    table_unpack,
+    string_byte,
+    string_char,
+    string_dump,
+    string_find,
+    string_format,
+    string_gmatch,
+    string_gmatch_iter,
+    string_gsub,
+    string_len,
+    string_lower,
+    string_match,
+    string_pack,
+    string_packsize,
+    string_rep,
+    string_reverse,
+    string_sub,
+    string_unpack,
+    string_upper,
+    math_abs,
+    math_acos,
+    math_asin,
+    math_atan,
+    math_ceil,
+    math_cos,
+    math_deg,
+    math_exp,
+    math_floor,
+    math_fmod,
+    math_log,
+    math_max,
+    math_min,
+    math_modf,
+    math_rad,
+    math_random,
+    math_randomseed,
+    math_sin,
+    math_sqrt,
+    math_tan,
+    math_tointeger,
+    math_type,
+    math_ult,
+    utf8_char,
+    utf8_codepoint,
+    utf8_codes,
+    utf8_codes_iter,
+    utf8_len,
+    utf8_offset,
+
+    pub fn name(self: NativeFn) []const u8 {
+        return switch (self) {
+            .type => "type",
+            .tonumber => "tonumber",
+            .warn => "warn",
+            .table_concat => "table.concat",
+            .table_insert => "table.insert",
+            .table_move => "table.move",
+            .table_pack => "table.pack",
+            .table_remove => "table.remove",
+            .table_sort => "table.sort",
+            .table_unpack => "table.unpack",
+            .string_byte => "string.byte",
+            .string_char => "string.char",
+            .string_dump => "string.dump",
+            .string_find => "string.find",
+            .string_format => "string.format",
+            .string_gmatch => "string.gmatch",
+            .string_gmatch_iter => "string.gmatch iterator",
+            .string_gsub => "string.gsub",
+            .string_len => "string.len",
+            .string_lower => "string.lower",
+            .string_match => "string.match",
+            .string_pack => "string.pack",
+            .string_packsize => "string.packsize",
+            .string_rep => "string.rep",
+            .string_reverse => "string.reverse",
+            .string_sub => "string.sub",
+            .string_unpack => "string.unpack",
+            .string_upper => "string.upper",
+            .math_abs => "math.abs",
+            .math_acos => "math.acos",
+            .math_asin => "math.asin",
+            .math_atan => "math.atan",
+            .math_ceil => "math.ceil",
+            .math_cos => "math.cos",
+            .math_deg => "math.deg",
+            .math_exp => "math.exp",
+            .math_floor => "math.floor",
+            .math_fmod => "math.fmod",
+            .math_log => "math.log",
+            .math_max => "math.max",
+            .math_min => "math.min",
+            .math_modf => "math.modf",
+            .math_rad => "math.rad",
+            .math_random => "math.random",
+            .math_randomseed => "math.randomseed",
+            .math_sin => "math.sin",
+            .math_sqrt => "math.sqrt",
+            .math_tan => "math.tan",
+            .math_tointeger => "math.tointeger",
+            .math_type => "math.type",
+            .math_ult => "math.ult",
+            .utf8_char => "utf8.char",
+            .utf8_codepoint => "utf8.codepoint",
+            .utf8_codes => "utf8.codes",
+            .utf8_codes_iter => "utf8.codes iterator",
+            .utf8_len => "utf8.len",
+            .utf8_offset => "utf8.offset",
+        };
+    }
+};
+
+pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode.Call) !void {
+    switch (native) {
+        .type => try base.typeValue(state, thread, op),
+        .tonumber => try base.tonumber(state, thread, op),
+        .warn => try base.warn(state, thread, op),
+        .table_concat => try table.concat(state, thread, op),
+        .table_insert => try table.insert(state, thread, op),
+        .table_move => try table.move(state, thread, op),
+        .table_pack => try table.pack(state, thread, op),
+        .table_remove => try table.remove(state, thread, op),
+        .table_sort => try table.sort(state, thread, op),
+        .table_unpack => try table.unpack(state, thread, op),
+        .string_byte => try string.byte(state, thread, op),
+        .string_char => try string.char(state, thread, op),
+        .string_dump => try string.dump(state, thread, op),
+        .string_find => try string.find(state, thread, op),
+        .string_format => try string.format(state, thread, op),
+        .string_gmatch => try string.gmatch(state, thread, op),
+        .string_gmatch_iter => try string.gmatchIter(state, thread, op),
+        .string_gsub => try string.gsub(state, thread, op),
+        .string_len => try string.len(state, thread, op),
+        .string_lower => try string.lower(state, thread, op),
+        .string_match => try string.match(state, thread, op),
+        .string_pack => try string.pack(state, thread, op),
+        .string_packsize => try string.packsize(state, thread, op),
+        .string_rep => try string.rep(state, thread, op),
+        .string_reverse => try string.reverse(state, thread, op),
+        .string_sub => try string.sub(state, thread, op),
+        .string_unpack => try string.unpack(state, thread, op),
+        .string_upper => try string.upper(state, thread, op),
+        .math_abs => try math.abs(state, thread, op),
+        .math_acos => try math.acos(state, thread, op),
+        .math_asin => try math.asin(state, thread, op),
+        .math_atan => try math.atan(state, thread, op),
+        .math_ceil => try math.ceil(state, thread, op),
+        .math_cos => try math.cos(state, thread, op),
+        .math_deg => try math.deg(state, thread, op),
+        .math_exp => try math.exp(state, thread, op),
+        .math_floor => try math.floor(state, thread, op),
+        .math_fmod => try math.fmod(state, thread, op),
+        .math_log => try math.log(state, thread, op),
+        .math_max => try math.max(state, thread, op),
+        .math_min => try math.min(state, thread, op),
+        .math_modf => try math.modf(state, thread, op),
+        .math_rad => try math.rad(state, thread, op),
+        .math_random => try math.random(state, thread, op),
+        .math_randomseed => try math.randomseed(state, thread, op),
+        .math_sin => try math.sin(state, thread, op),
+        .math_sqrt => try math.sqrt(state, thread, op),
+        .math_tan => try math.tan(state, thread, op),
+        .math_tointeger => try math.tointeger(state, thread, op),
+        .math_type => try math.typeValue(state, thread, op),
+        .math_ult => try math.ult(state, thread, op),
+        .utf8_char => try utf8.char(state, thread, op),
+        .utf8_codepoint => try utf8.codepoint(state, thread, op),
+        .utf8_codes => try utf8.codes(state, thread, op),
+        .utf8_codes_iter => try utf8.codesIter(state, thread, op),
+        .utf8_len => try utf8.len(state, thread, op),
+        .utf8_offset => try utf8.offset(state, thread, op),
+    }
+}
 
 test {
-    _ = safe;
+    _ = base;
+    _ = table;
+    _ = string;
+    _ = math;
+    _ = utf8;
+    _ = coroutine;
+    _ = debug;
+    _ = package;
+    _ = io;
+    _ = os;
 }

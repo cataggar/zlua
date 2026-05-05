@@ -2,7 +2,7 @@ const std = @import("std");
 const compile = @import("compile.zig");
 const frontend = @import("frontend.zig");
 const process = @import("testing/process.zig");
-const stdlib_safe = @import("stdlib/safe.zig");
+const stdlib = @import("stdlib.zig");
 
 const bytecode = compile.bytecode;
 const proto_mod = compile.proto;
@@ -56,7 +56,7 @@ pub const Value = union(enum) {
     native: NativeFn,
 };
 
-pub const NativeFn = stdlib_safe.NativeFn;
+pub const NativeFn = stdlib.NativeFn;
 
 const ProtectedCallResult = union(enum) {
     success: []Value,
@@ -1810,11 +1810,11 @@ pub const State = struct {
             },
             .native => |native| switch (native) {
                 .string_gmatch_iter => blk: {
-                    fixed = try stdlib_safe.stringGmatchNext(self, state);
+                    fixed = try stdlib.string.gmatchNext(self, state);
                     break :blk fixed[0..2];
                 },
                 .utf8_codes_iter => blk: {
-                    fixed = try stdlib_safe.utf8CodesNext(self, state, control);
+                    fixed = try stdlib.utf8.codesNext(self, state, control);
                     break :blk fixed[0..2];
                 },
                 else => return self.fail("attempt to call a non-function value"),
@@ -1857,7 +1857,7 @@ pub const State = struct {
     }
 
     fn callNative(self: *State, native: NativeFn, thread: *Thread, op: bytecode.Call) !void {
-        try stdlib_safe.callNative(self, native, thread, op);
+        try stdlib.callNative(self, native, thread, op);
     }
 
     fn collectGarbageValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
