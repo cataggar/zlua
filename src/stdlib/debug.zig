@@ -68,6 +68,10 @@ pub fn upvalueid(state: *State, thread: *Thread, op: bytecode.Call) !void {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
         return;
     };
+    if (nativeUpvalueId(target, index)) |id| {
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(id) }});
+        return;
+    }
     const upvalue = getClosureUpvalue(target, index) orelse {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
         return;
@@ -92,6 +96,15 @@ fn upvalueIndex(value: Value) ?usize {
     const integer = runtime.toInteger(value) orelse return null;
     if (integer <= 0) return null;
     return @intCast(integer - 1);
+}
+
+fn nativeUpvalueId(value: Value, index: usize) ?[]const u8 {
+    if (index != 0) return null;
+    if (value != .native) return null;
+    return switch (value.native) {
+        .string_gmatch_iter => "native:string.gmatch:1",
+        else => null,
+    };
 }
 
 fn getClosureUpvalue(value: Value, index: usize) ?*runtime.Upvalue {

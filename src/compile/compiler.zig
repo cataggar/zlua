@@ -373,6 +373,7 @@ const FunctionCompiler = struct {
 
     fn compileBreak(self: *FunctionCompiler) !void {
         if (self.loops.items.len == 0) return error.CompileError;
+        _ = try self.emit(.{ .close = 0 });
         try self.breaks.append(self.allocator, try self.emit(.{ .jmp = 0 }));
     }
 

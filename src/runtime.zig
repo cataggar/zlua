@@ -726,12 +726,12 @@ pub const State = struct {
                 .set_table => |op| try self.setTableFromThread(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
                 .get_field => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, 0)),
                 .set_field => |op| try self.setTableFromThread(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
-                .jmp => |offset| try self.jumpThread(thread, offset),
-                .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) try self.jumpThread(thread, op.offset),
+                .jmp => |offset| try self.jumpThread(thread, offset, true),
+                .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) try self.jumpThread(thread, op.offset, true),
                 .test_set => |op| {
                     const value = self.get(thread, op.source);
                     self.set(thread, op.dest, value);
-                    if (truthy(value) == op.jump_if_truthy) try self.jumpThread(thread, op.offset);
+                    if (truthy(value) == op.jump_if_truthy) try self.jumpThread(thread, op.offset, true);
                 },
                 .call => |op| try self.callValue(thread, op),
                 .tail_call => |op| try self.tailCallValue(thread, op),
@@ -739,9 +739,9 @@ pub const State = struct {
                 .vararg => |op| try self.loadVarargs(thread, op),
                 .for_prep => |op| try self.forPrep(thread, op),
                 .for_loop => |op| try self.forLoop(thread, op),
-                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) try self.jumpThread(thread, op.offset),
+                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) try self.jumpThread(thread, op.offset, false),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
-                .tfor_loop => |op| try self.jumpThread(thread, op.offset),
+                .tfor_loop => |op| try self.jumpThread(thread, op.offset, false),
                 .closure => |op| self.set(thread, op.dest, try self.newClosure(thread, proto.children.items[op.proto])),
                 .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
                 .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
@@ -1165,12 +1165,13 @@ pub const State = struct {
         };
     }
 
-    fn jumpThread(self: *State, thread: *Thread, offset: bytecode.JumpOffset) !void {
+    fn jumpThread(self: *State, thread: *Thread, offset: bytecode.JumpOffset, auto_gc: bool) !void {
         const frame_index = thread.frames.items.len - 1;
         const source_pc = thread.frames.items[frame_index].pc;
         const target_pc = jumpTarget(source_pc, offset);
         try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, .nil);
         thread.frames.items[frame_index].pc = target_pc;
+        if (auto_gc and self.gc_running and target_pc < source_pc and !self.is_collecting) try self.collectGarbageWithFinalizers(thread);
     }
 
     fn forPrep(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
@@ -1184,7 +1185,7 @@ pub const State = struct {
                     self.set(thread, op.base, .{ .integer = initial_integer });
                     self.set(thread, op.base + 1, .{ .integer = limit_integer });
                     self.set(thread, op.base + 2, .{ .integer = step_integer });
-                    if (!forLoopContinuesInteger(initial_integer, limit_integer, step_integer)) try self.jumpThread(thread, op.offset);
+                    if (!forLoopContinuesInteger(initial_integer, limit_integer, step_integer)) try self.jumpThread(thread, op.offset, false);
                     return;
                 }
             }
@@ -1197,7 +1198,7 @@ pub const State = struct {
         self.set(thread, op.base, .{ .number = initial_number });
         self.set(thread, op.base + 1, .{ .number = limit_number });
         self.set(thread, op.base + 2, .{ .number = step_number });
-        if (!forLoopContinuesNumber(initial_number, limit_number, step_number)) try self.jumpThread(thread, op.offset);
+        if (!forLoopContinuesNumber(initial_number, limit_number, step_number)) try self.jumpThread(thread, op.offset, false);
     }
 
     fn forLoop(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
@@ -1207,13 +1208,13 @@ pub const State = struct {
         if (current == .integer and limit == .integer and step == .integer) {
             const next = current.integer +% step.integer;
             self.set(thread, op.base, .{ .integer = next });
-            if (forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset);
+            if (forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset, false);
             return;
         }
 
         const next = (try toNumber(current)) + (try toNumber(step));
         self.set(thread, op.base, .{ .number = next });
-        if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) try self.jumpThread(thread, op.offset);
+        if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) try self.jumpThread(thread, op.offset, false);
     }
 
     fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: Value) !void {
