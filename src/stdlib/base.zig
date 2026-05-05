@@ -58,6 +58,8 @@ fn loadSource(state: *State, thread: *Thread, op: bytecode.Call) !LoadSource {
     var source = std.ArrayList(u8).empty;
     errdefer source.deinit(state.allocator);
     while (true) {
+        state.conservative_gc_depth += 1;
+        defer state.conservative_gc_depth -= 1;
         const result = try state.protectedCall(thread, source_value, &.{});
         const values = switch (result) {
             .success => |values| values,
@@ -111,6 +113,7 @@ fn isReaderFunction(value: Value) bool {
 
 fn loadFailureMessage(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
     if (unknownAttribute(source)) |name| return std.fmt.allocPrint(allocator, "unknown attribute '{s}'", .{name});
+    if (multipleCloseVariables(source)) return allocator.dupe(u8, "multiple to-be-closed variables in local list");
     if (try constAssignmentMessage(allocator, source)) |message| return message;
 
     const unquoted = try removeSyntaxQuotes(allocator, source);
@@ -137,11 +140,10 @@ fn constAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]
     var lines = std.mem.splitScalar(u8, source, '\n');
     var line_number: usize = if (source.len != 0 and source[0] == '\n') 0 else 1;
     while (lines.next()) |line| : (line_number += 1) {
-        if (attributeNameBefore(line, "<const>")) |name| try names.append(allocator, name);
-        if (attributeNameBefore(line, "<close>")) |name| try names.append(allocator, name);
+        try appendReadOnlyNames(allocator, line, &names);
 
         for (names.items) |name| {
-            if (containsAssignmentTo(line, name)) {
+            if (containsAssignmentTo(line, name) or containsFunctionDeclarationTo(line, name)) {
                 const message = try std.fmt.allocPrint(allocator, ":{d}: attempt to assign to const variable '{s}'", .{ line_number, name });
                 return message;
             }
@@ -151,14 +153,89 @@ fn constAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]
     return null;
 }
 
-fn attributeNameBefore(line: []const u8, attribute: []const u8) ?[]const u8 {
-    const attr_start = std.mem.indexOf(u8, line, attribute) orelse return null;
-    var end = attr_start;
-    while (end > 0 and std.ascii.isWhitespace(line[end - 1])) end -= 1;
-    var start = end;
-    while (start > 0 and isIdentifierByte(line[start - 1])) start -= 1;
-    if (start == end) return null;
-    return line[start..end];
+fn multipleCloseVariables(source: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        var close_count: usize = 0;
+        var cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, line, cursor, "<close>")) |index| {
+            close_count += 1;
+            cursor = index + "<close>".len;
+        }
+        if (close_count > 1) return true;
+        if (defaultCloseHasMultipleNames(line)) return true;
+    }
+    return false;
+}
+
+fn defaultCloseHasMultipleNames(line: []const u8) bool {
+    const local_start = std.mem.indexOf(u8, line, "local") orelse return false;
+    if (!keywordAt(line, local_start, "local")) return false;
+    var cursor = local_start + "local".len;
+    skipWhitespace(line, &cursor);
+    if (!std.mem.startsWith(u8, line[cursor..], "<close>")) return false;
+    cursor += "<close>".len;
+    while (cursor < line.len and line[cursor] != '=' and line[cursor] != ';') : (cursor += 1) {
+        if (line[cursor] == ',') return true;
+    }
+    return false;
+}
+
+fn appendReadOnlyNames(allocator: std.mem.Allocator, line: []const u8, names: *std.ArrayList([]const u8)) !void {
+    var cursor: usize = 0;
+    while (cursor < line.len) {
+        const keyword = nextDeclarationKeyword(line, cursor) orelse break;
+        cursor = keyword.end;
+
+        const default_read_only = consumeReadOnlyAttribute(line, &cursor);
+        while (cursor < line.len) {
+            skipWhitespace(line, &cursor);
+            const start = cursor;
+            if (start == line.len or !isIdentifierStart(line[start])) break;
+            cursor += 1;
+            while (cursor < line.len and isIdentifierByte(line[cursor])) cursor += 1;
+            const name = line[start..cursor];
+            const read_only = consumeReadOnlyAttribute(line, &cursor) or default_read_only;
+            if (read_only) try names.append(allocator, name);
+
+            skipWhitespace(line, &cursor);
+            if (cursor == line.len or line[cursor] != ',') break;
+            cursor += 1;
+        }
+    }
+}
+
+const DeclarationKeyword = struct { end: usize };
+
+fn nextDeclarationKeyword(line: []const u8, start: usize) ?DeclarationKeyword {
+    var cursor = start;
+    while (cursor < line.len) : (cursor += 1) {
+        if (keywordAt(line, cursor, "local") or keywordAt(line, cursor, "global")) {
+            return .{ .end = cursor + if (line[cursor] == 'l') @as(usize, 5) else @as(usize, 6) };
+        }
+    }
+    return null;
+}
+
+fn keywordAt(line: []const u8, index: usize, keyword: []const u8) bool {
+    if (index + keyword.len > line.len) return false;
+    if (!std.mem.eql(u8, line[index .. index + keyword.len], keyword)) return false;
+    if (index > 0 and isIdentifierByte(line[index - 1])) return false;
+    const end = index + keyword.len;
+    return end == line.len or !isIdentifierByte(line[end]);
+}
+
+fn consumeReadOnlyAttribute(line: []const u8, cursor: *usize) bool {
+    skipWhitespace(line, cursor);
+    if (cursor.* >= line.len or line[cursor.*] != '<') return false;
+    const close = std.mem.indexOfScalarPos(u8, line, cursor.* + 1, '>') orelse return false;
+    const name = std.mem.trim(u8, line[cursor.* + 1 .. close], " \t\r\n");
+    cursor.* = close + 1;
+    return std.mem.eql(u8, name, "const") or std.mem.eql(u8, name, "close");
+}
+
+fn skipWhitespace(line: []const u8, cursor: *usize) void {
+    while (cursor.* < line.len and std.ascii.isWhitespace(line[cursor.*])) cursor.* += 1;
 }
 
 fn containsAssignmentTo(line: []const u8, name: []const u8) bool {
@@ -175,6 +252,28 @@ fn containsAssignmentTo(line: []const u8, name: []const u8) bool {
         cursor = name_end;
     }
     return false;
+}
+
+fn containsFunctionDeclarationTo(line: []const u8, name: []const u8) bool {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, line, cursor, "function")) |index| {
+        if (!keywordAt(line, index, "function")) {
+            cursor = index + "function".len;
+            continue;
+        }
+        var name_start = index + "function".len;
+        skipWhitespace(line, &name_start);
+        if (name_start + name.len <= line.len and std.mem.eql(u8, line[name_start .. name_start + name.len], name)) {
+            const name_end = name_start + name.len;
+            if (name_end == line.len or !isIdentifierByte(line[name_end])) return true;
+        }
+        cursor = index + "function".len;
+    }
+    return false;
+}
+
+fn isIdentifierStart(byte: u8) bool {
+    return std.ascii.isAlphabetic(byte) or byte == '_';
 }
 
 fn isIdentifierByte(byte: u8) bool {

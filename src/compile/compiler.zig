@@ -177,7 +177,11 @@ const FunctionCompiler = struct {
         for (assignment.targets) |target| try targets.append(self.allocator, try self.prepareAssignmentTarget(target));
 
         const first_value = try self.allocRegs(@intCast(assignment.targets.len));
-        try self.compileExprListAdjusted(assignment.values, first_value, @intCast(assignment.targets.len));
+        if (assignment.targets.len == 1 and assignment.values.len == 1 and assignment.values[0].* == .function_literal) {
+            try self.compileFunctionLiteral(assignment.values[0].function_literal, first_value, assignmentTargetDebugName(assignment.targets[0]));
+        } else {
+            try self.compileExprListAdjusted(assignment.values, first_value, @intCast(assignment.targets.len));
+        }
 
         for (targets.items, 0..) |target, index| {
             try self.assignPreparedTarget(target, first_value + @as(bytecode.Register, @intCast(index)));
@@ -353,27 +357,29 @@ const FunctionCompiler = struct {
         if (stmt.iterators.len == 1 and isCallExpr(stmt.iterators[0])) {
             const call_base = try self.allocReg();
             std.debug.assert(call_base == base);
-            _ = try self.compileCallInto(stmt.iterators[0], 3, call_base, false);
-            try self.reserveRegistersUntil(base + 3);
+            _ = try self.compileCallInto(stmt.iterators[0], 4, call_base, false);
+            try self.reserveRegistersUntil(base + 4);
         } else {
             for (stmt.iterators) |iterator| {
                 const reg = try self.allocReg();
                 try self.compileExpr(iterator, reg);
             }
-            while (self.next_register < base + 3) {
+            while (self.next_register < base + 4) {
                 const reg = try self.allocReg();
                 _ = try self.emit(.{ .load_nil = reg });
             }
         }
-        self.release(base + 3);
+        self.release(base + 4);
 
+        const close_register = try self.declareLocalAt("(for state)", base + 3, true);
+        _ = try self.emit(.{ .check_close = close_register });
         for (stmt.names) |name| _ = try self.declareLocal(name.name);
 
         const loop_start = self.proto.pc();
         const prep = try self.emit(.{ .tfor_prep = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
         try self.enterLoop();
         try self.compileScopedBlock(stmt.body);
-        if (stmt.names.len != 0) _ = try self.emit(.{ .close = base + 3 });
+        if (stmt.names.len != 0) _ = try self.emit(.{ .close = base + 4 });
         try self.leaveLoop(self.proto.pc() + 1);
         const loop = try self.emit(.{ .tfor_loop = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
         try self.proto.patchJump(loop, loop_start);
@@ -418,7 +424,7 @@ const FunctionCompiler = struct {
 
     fn compileReturn(self: *FunctionCompiler, stmt: ast.ReturnStmt) anyerror!void {
         const first = self.registerMark();
-        if (stmt.values.len == 1 and isCallExpr(stmt.values[0])) {
+        if (stmt.values.len == 1 and isCallExpr(stmt.values[0]) and !self.hasActiveToCloseLocal()) {
             const base = try self.allocReg();
             _ = try self.compileCallInto(stmt.values[0], bytecode.multret_count, base, true);
             self.release(first);
@@ -441,11 +447,7 @@ const FunctionCompiler = struct {
             .vararg => try self.compileExprCount(expr, dest, 1),
             .identifier => |identifier| try self.loadName(identifier.name, dest),
             .table_constructor => |constructor| try self.compileTableConstructor(constructor, dest),
-            .function_literal => |body| {
-                const child = try self.compileFunctionBody(body, false, null);
-                const child_index = try self.proto.addChild(child);
-                _ = try self.emit(.{ .closure = .{ .dest = dest, .proto = child_index } });
-            },
+            .function_literal => |body| try self.compileFunctionLiteral(body, dest, null),
             .grouped => |inner| try self.compileExpr(inner, dest),
             .index => |index| {
                 const mark = self.registerMark();
@@ -477,6 +479,12 @@ const FunctionCompiler = struct {
             .unary => |unary| try self.compileUnary(unary, dest),
             .binary => |binary| try self.compileBinary(binary, dest),
         }
+    }
+
+    fn compileFunctionLiteral(self: *FunctionCompiler, body: ast.FunctionBody, dest: bytecode.Register, debug_name: ?[]const u8) !void {
+        const child = try self.compileFunctionBody(body, false, debug_name);
+        const child_index = try self.proto.addChild(child);
+        _ = try self.emit(.{ .closure = .{ .dest = dest, .proto = child_index } });
     }
 
     fn compileTableConstructor(self: *FunctionCompiler, constructor: ast.TableConstructor, dest: bytecode.Register) anyerror!void {
@@ -817,6 +825,13 @@ const FunctionCompiler = struct {
         return null;
     }
 
+    fn hasActiveToCloseLocal(self: FunctionCompiler) bool {
+        for (self.locals.items) |local| {
+            if (local.to_close) return true;
+        }
+        return false;
+    }
+
     fn lookupUpvalue(self: *FunctionCompiler, name: []const u8) !?bytecode.UpvalueIndex {
         if (self.parent) |parent| {
             if (parent.lookupLocalIndex(name)) |local_index| {
@@ -857,8 +872,13 @@ const FunctionCompiler = struct {
 
     fn declareLocal(self: *FunctionCompiler, name: []const u8) !bytecode.Register {
         const register = try self.allocReg();
+        return self.declareLocalAt(name, register, false);
+    }
+
+    fn declareLocalAt(self: *FunctionCompiler, name: []const u8, register: bytecode.Register, to_close: bool) !bytecode.Register {
         const debug_index = try self.proto.addLocal(.{ .name = name, .register = register, .start_pc = self.proto.pc() });
-        try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index });
+        self.proto.locals.items[debug_index].to_close = to_close;
+        try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close });
         return register;
     }
 
@@ -974,6 +994,14 @@ fn functionDeclDebugName(name: ast.FunctionName) []const u8 {
     if (name.method) |method| return method.name;
     if (name.fields.len != 0) return name.fields[name.fields.len - 1].name;
     return name.root.name;
+}
+
+fn assignmentTargetDebugName(target: *const ast.Expr) ?[]const u8 {
+    return switch (target.*) {
+        .identifier => |identifier| identifier.name,
+        .field => |field| field.name.name,
+        else => null,
+    };
 }
 
 fn callReleaseMark(dest: bytecode.Register, count: u16) bytecode.Register {

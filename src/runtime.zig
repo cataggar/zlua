@@ -127,22 +127,37 @@ const TableEntry = struct {
     value: Value,
 };
 
+const TableEntryIndex = std.HashMap(Value, usize, ValueHashContext, std.hash_map.default_max_load_percentage);
+
+const ValueHashContext = struct {
+    pub fn hash(_: ValueHashContext, key: Value) u64 {
+        return hashValue(key);
+    }
+
+    pub fn eql(_: ValueHashContext, lhs: Value, rhs: Value) bool {
+        return valuesEqual(lhs, rhs);
+    }
+};
+
 pub const Table = struct {
     array: std.ArrayList(Value) = .empty,
     entries: std.ArrayList(TableEntry) = .empty,
+    entry_index: TableEntryIndex,
     metatable: ?*Table = null,
     marked: bool = false,
     finalized: bool = false,
 
     fn init(allocator: std.mem.Allocator, array_hint: u32, hash_hint: u32) !Table {
-        var table = Table{};
+        var table = Table{ .entry_index = TableEntryIndex.init(allocator) };
         errdefer table.deinit(allocator);
         try table.array.ensureTotalCapacity(allocator, array_hint);
         try table.entries.ensureTotalCapacity(allocator, hash_hint);
+        try table.entry_index.ensureTotalCapacity(hash_hint);
         return table;
     }
 
     fn deinit(self: *Table, allocator: std.mem.Allocator) void {
+        self.entry_index.deinit();
         self.entries.deinit(allocator);
         self.array.deinit(allocator);
         self.* = undefined;
@@ -152,9 +167,7 @@ pub const Table = struct {
         if (arrayIndex(key)) |index| {
             if (index <= self.array.items.len) return self.array.items[index - 1];
         }
-        for (self.entries.items) |entry| {
-            if (valuesEqual(entry.key, key)) return entry.value;
-        }
+        if (self.entry_index.get(key)) |index| return self.entries.items[index].value;
         return .nil;
     }
 
@@ -173,17 +186,19 @@ pub const Table = struct {
                 return;
             }
         }
-        for (self.entries.items, 0..) |entry, index| {
-            if (valuesEqual(entry.key, key)) {
-                if (value == .nil) {
-                    _ = self.entries.swapRemove(index);
-                } else {
-                    self.entries.items[index].value = value;
-                }
-                return;
+        if (self.entry_index.get(key)) |index| {
+            if (value == .nil) {
+                self.removeEntryAt(index);
+            } else {
+                self.entries.items[index].value = value;
             }
+            return;
         }
-        if (value != .nil) try self.entries.append(allocator, .{ .key = key, .value = value });
+        if (value != .nil) {
+            try self.entries.append(allocator, .{ .key = key, .value = value });
+            errdefer self.entries.items.len -= 1;
+            try self.entry_index.put(key, self.entries.items.len - 1);
+        }
     }
 
     pub fn len(self: Table) i64 {
@@ -202,14 +217,12 @@ pub const Table = struct {
         if (arrayIndex(key)) |index| {
             if (index <= self.array.items.len) return self.firstEntryAfterArray(index);
         }
-        for (self.entries.items, 0..) |entry, index| {
-            if (valuesEqual(entry.key, key)) {
-                if (index + 1 < self.entries.items.len) {
-                    const next_entry = self.entries.items[index + 1];
-                    return .{ next_entry.key, next_entry.value };
-                }
-                return .{ .nil, .nil };
+        if (self.entry_index.get(key)) |index| {
+            if (index + 1 < self.entries.items.len) {
+                const next_entry = self.entries.items[index + 1];
+                return .{ next_entry.key, next_entry.value };
             }
+            return .{ .nil, .nil };
         }
         return error.RuntimeError;
     }
@@ -227,12 +240,19 @@ pub const Table = struct {
     }
 
     fn removeHashKey(self: *Table, key: Value) void {
-        for (self.entries.items, 0..) |entry, index| {
-            if (valuesEqual(entry.key, key)) {
-                _ = self.entries.swapRemove(index);
-                return;
-            }
+        if (self.entry_index.get(key)) |index| self.removeEntryAt(index);
+    }
+
+    fn removeEntryAt(self: *Table, index: usize) void {
+        const old_key = self.entries.items[index].key;
+        _ = self.entry_index.remove(old_key);
+        const last_index = self.entries.items.len - 1;
+        if (index != last_index) {
+            const moved_key = self.entries.items[last_index].key;
+            self.entries.items[index] = self.entries.items[last_index];
+            self.entry_index.getPtr(moved_key).?.* = index;
         }
+        self.entries.items.len -= 1;
     }
 };
 
@@ -459,6 +479,7 @@ pub const State = struct {
     gc_params: GcParams = .{},
     gc_next_total: usize = 0,
     mark_all_stack_registers: bool = false,
+    conservative_gc_depth: usize = 0,
     random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
 
     pub fn init(allocator: std.mem.Allocator) !State {
@@ -790,7 +811,7 @@ pub const State = struct {
                 .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
                 .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
                 .check_close => |register| try self.checkToBeClosedValue(self.get(thread, register)),
-                .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, .nil),
+                .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, null),
             }
 
             if (self.gc_running and (self.collect_after_instruction or self.shouldRunAutoGc())) try self.collectGarbageConservatively(thread);
@@ -1286,7 +1307,7 @@ pub const State = struct {
         if ((try self.getMetamethod(value, "__close")) == null) return self.fail("variable got a non-closable value");
     }
 
-    fn closeToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register, error_value: Value) anyerror!void {
+    fn closeToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register, error_value: ?Value) anyerror!void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const absolute_register = frame.base + register;
         const value = thread.stack.items[absolute_register];
@@ -1296,17 +1317,21 @@ pub const State = struct {
             thread.stack.items[absolute_register] = .nil;
             return self.fail("variable got a non-closable value");
         };
-        _ = self.callOneResult(thread, metamethod, &.{ value, error_value }) catch |err| {
+        _ = (if (error_value) |err_value|
+            self.callOneResult(thread, metamethod, &.{ value, err_value })
+        else
+            self.callOneResult(thread, metamethod, &.{value})) catch |err| {
             thread.stack.items[absolute_register] = .nil;
             return err;
         };
+        thread.stack.items[absolute_register] = .nil;
     }
 
     fn jumpThread(self: *State, thread: *Thread, offset: bytecode.JumpOffset, auto_gc: bool) !void {
         const frame_index = thread.frames.items.len - 1;
         const source_pc = thread.frames.items[frame_index].pc;
         const target_pc = jumpTarget(source_pc, offset);
-        try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, .nil);
+        try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, null);
         thread.frames.items[frame_index].pc = target_pc;
         if (auto_gc and self.gc_running and target_pc < source_pc and !self.is_collecting) try self.collectGarbageWithFinalizers(thread);
     }
@@ -1354,7 +1379,7 @@ pub const State = struct {
         if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) try self.jumpThread(thread, op.offset, false);
     }
 
-    fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: Value) !void {
+    fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: ?Value) !void {
         const frame = thread.frames.items[frame_index];
         var pending_error = error_value;
         var close_failed = false;
@@ -1374,10 +1399,10 @@ pub const State = struct {
             };
         }
 
-        if (close_failed) return self.throwValue(pending_error);
+        if (close_failed) return self.throwValue(pending_error.?);
     }
 
-    fn closeActiveToBeClosedInTopFrame(self: *State, thread: *Thread, error_value: Value) !void {
+    fn closeActiveToBeClosedInTopFrame(self: *State, thread: *Thread, error_value: ?Value) !void {
         const frame_index = thread.frames.items.len - 1;
         const frame = thread.frames.items[frame_index];
         const pc = frame.pc;
@@ -1398,10 +1423,10 @@ pub const State = struct {
             };
         }
 
-        if (close_failed) return self.throwValue(pending_error);
+        if (close_failed) return self.throwValue(pending_error.?);
     }
 
-    fn closeFramesTo(self: *State, thread: *Thread, frame_count: usize, error_value: Value) !void {
+    fn closeFramesTo(self: *State, thread: *Thread, frame_count: usize, error_value: ?Value) !void {
         var pending_error = error_value;
         var close_failed = false;
         while (thread.frames.items.len > frame_count) {
@@ -1415,7 +1440,7 @@ pub const State = struct {
             thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
             thread.frames.items.len -= 1;
         }
-        if (close_failed) return self.throwValue(pending_error);
+        if (close_failed) return self.throwValue(pending_error.?);
     }
 
     fn discardFramesTo(self: *State, thread: *Thread, frame_count: usize) void {
@@ -1864,7 +1889,7 @@ pub const State = struct {
         const callee = self.get(thread, resolved.base);
         switch (callee) {
             .closure => |closure| {
-                try self.closeActiveToBeClosedInTopFrame(thread, .nil);
+                try self.closeActiveToBeClosedInTopFrame(thread, null);
                 const frame = thread.frames.items[thread.frames.items.len - 1];
                 self.closeUpvalues(thread, frame.base);
                 const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
@@ -1893,9 +1918,14 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const source_start = frame.base + first;
         const source_count = try self.resolveResultCount(thread, source_start, count);
-        try self.closeActiveToBeClosedInTopFrame(thread, .nil);
+        const preserved = try self.allocator.alloc(Value, source_count);
+        defer self.allocator.free(preserved);
+        for (preserved, 0..) |*value, index| value.* = thread.stack.items[source_start + index];
+        try self.closeActiveToBeClosedInTopFrame(thread, null);
         self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
+            try thread.ensureStack(self.allocator, source_start + source_count);
+            for (preserved, 0..) |value, index| thread.stack.items[source_start + index] = value;
             thread.last_result_base = source_start;
             thread.last_result_count = source_count;
             thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
@@ -1910,7 +1940,7 @@ pub const State = struct {
 
         try thread.ensureStack(self.allocator, return_start + return_count);
         const copied = @min(return_count, source_count);
-        copyStackValues(thread, return_start, source_start, copied);
+        for (preserved[0..copied], 0..) |value, index| thread.stack.items[return_start + index] = value;
         for (copied..return_count) |index| thread.stack.items[return_start + index] = .nil;
         thread.last_result_base = return_start;
         thread.last_result_count = return_count;
@@ -2334,8 +2364,7 @@ pub const State = struct {
     fn ipairsIterValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
         const table = try self.expectTable(table_value);
         const current = toInteger(key_value) orelse return self.fail("invalid index to 'ipairs'");
-        if (current == std.math.maxInt(i64)) return .{ .nil, .nil };
-        const next_index = current + 1;
+        const next_index = current +% 1;
         const value = table.get(.{ .integer = next_index });
         if (value == .nil) return .{ .nil, .nil };
         return .{ .{ .integer = next_index }, value };
@@ -2382,7 +2411,7 @@ pub const State = struct {
         self.set(thread, op.base + 2, first_value);
         for (0..op.variable_count) |index| {
             const value = if (index < values.len) values[index] else Value.nil;
-            self.set(thread, op.base + 3 + @as(bytecode.Register, @intCast(index)), value);
+            self.set(thread, op.base + 4 + @as(bytecode.Register, @intCast(index)), value);
         }
         return first_value != .nil;
     }
@@ -2423,7 +2452,11 @@ pub const State = struct {
     fn collectGarbageValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const option = argValue(self, thread, op, 0);
         if (option == .nil or (option == .string and std.mem.eql(u8, option.string, "collect"))) {
-            try self.collectGarbageWithFinalizers(thread);
+            if (self.conservative_gc_depth != 0) {
+                try self.collectGarbageConservatively(thread);
+            } else {
+                try self.collectGarbageWithFinalizers(thread);
+            }
             try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
             return;
         }
@@ -2490,7 +2523,11 @@ pub const State = struct {
 
     fn collectGarbageStep(self: *State, thread: ?*Thread, budget: i64) !bool {
         _ = budget;
-        try self.collectGarbageWithFinalizers(thread);
+        if (self.conservative_gc_depth != 0) {
+            try self.collectGarbageConservatively(thread);
+        } else {
+            try self.collectGarbageWithFinalizers(thread);
+        }
         return false;
     }
 
@@ -2525,6 +2562,7 @@ pub const State = struct {
         self.sweepThreads();
         self.sweepClosures();
         self.sweepUpvalues();
+        self.sweepStrings();
         self.sweepTables();
         self.resetAutoGcThreshold();
     }
@@ -2733,7 +2771,7 @@ pub const State = struct {
         var index: usize = 0;
         while (index < table.entries.items.len) {
             if (self.valueIsWeaklyCleared(table.entries.items[index].value)) {
-                _ = table.entries.swapRemove(index);
+                table.removeEntryAt(index);
             } else {
                 index += 1;
             }
@@ -2744,7 +2782,7 @@ pub const State = struct {
         var index: usize = 0;
         while (index < table.entries.items.len) {
             if (self.valueIsWeaklyCleared(table.entries.items[index].key)) {
-                _ = table.entries.swapRemove(index);
+                table.removeEntryAt(index);
             } else {
                 index += 1;
             }
@@ -2792,7 +2830,9 @@ pub const State = struct {
                 index += 1;
                 continue;
             }
-            _ = self.strings.remove(allocation.bytes);
+            if (self.strings.get(allocation.bytes)) |interned| {
+                if (interned.ptr == allocation.bytes.ptr and interned.len == allocation.bytes.len) _ = self.strings.remove(allocation.bytes);
+            }
             self.allocator.free(allocation.bytes);
             _ = self.string_allocations.swapRemove(index);
         }
@@ -2852,7 +2892,7 @@ pub const State = struct {
 
     fn findStringAllocation(self: *State, bytes: []const u8) ?usize {
         for (self.string_allocations.items, 0..) |allocation, index| {
-            if (std.mem.eql(u8, allocation.bytes, bytes)) return index;
+            if (allocation.bytes.ptr == bytes.ptr and allocation.bytes.len == bytes.len) return index;
         }
         return null;
     }
@@ -3231,6 +3271,80 @@ pub fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_coroutine_wrap => rhs == .native_coroutine_wrap,
         .native => |native| rhs == .native and rhs.native == native,
     };
+}
+
+fn hashValue(value: Value) u64 {
+    return switch (value) {
+        .nil => hashTag(0),
+        .boolean => |payload| hashBool(1, payload),
+        .integer => |payload| hashInteger(payload),
+        .number => |payload| if (floatToInteger(payload)) |integer| hashInteger(integer) else hashFloat(payload),
+        .string => |payload| hashBytes(4, payload),
+        .table => |payload| hashPointer(5, payload),
+        .closure => |payload| hashPointer(6, payload),
+        .thread => |payload| hashPointer(7, payload),
+        .coroutine_wrapper => |payload| hashPointer(8, payload),
+        .native_print => hashTag(9),
+        .native_tostring => hashTag(10),
+        .native_getmetatable => hashTag(11),
+        .native_setmetatable => hashTag(12),
+        .native_rawequal => hashTag(13),
+        .native_rawget => hashTag(14),
+        .native_rawset => hashTag(15),
+        .native_rawlen => hashTag(16),
+        .native_next => hashTag(17),
+        .native_pairs => hashTag(18),
+        .native_ipairs => hashTag(19),
+        .native_ipairs_iter => hashTag(20),
+        .native_table_create => hashTag(21),
+        .native_select => hashTag(22),
+        .native_assert => hashTag(23),
+        .native_error => hashTag(24),
+        .native_pcall => hashTag(25),
+        .native_xpcall => hashTag(26),
+        .native_collectgarbage => hashTag(27),
+        .native_debug_traceback => hashTag(28),
+        .native_coroutine_create => hashTag(29),
+        .native_coroutine_resume => hashTag(30),
+        .native_coroutine_yield => hashTag(31),
+        .native_coroutine_status => hashTag(32),
+        .native_coroutine_running => hashTag(33),
+        .native_coroutine_wrap => hashTag(34),
+        .native => |payload| hashEnum(35, payload),
+    };
+}
+
+fn hashTag(tag: u8) u64 {
+    return std.hash.Wyhash.hash(0, &.{tag});
+}
+
+fn hashBytes(tag: u8, bytes: []const u8) u64 {
+    return std.hash.Wyhash.hash(hashTag(tag), bytes);
+}
+
+fn hashBool(tag: u8, value: bool) u64 {
+    const byte: u8 = if (value) 1 else 0;
+    return std.hash.Wyhash.hash(hashTag(tag), &.{byte});
+}
+
+fn hashInteger(value: i64) u64 {
+    const bits: u64 = @bitCast(value);
+    return std.hash.Wyhash.hash(hashTag(2), std.mem.asBytes(&bits));
+}
+
+fn hashFloat(value: f64) u64 {
+    const bits: u64 = @bitCast(value);
+    return std.hash.Wyhash.hash(hashTag(3), std.mem.asBytes(&bits));
+}
+
+fn hashPointer(tag: u8, pointer: anytype) u64 {
+    const address = @intFromPtr(pointer);
+    return std.hash.Wyhash.hash(hashTag(tag), std.mem.asBytes(&address));
+}
+
+fn hashEnum(tag: u8, value: anytype) u64 {
+    const integer = @intFromEnum(value);
+    return std.hash.Wyhash.hash(hashTag(tag), std.mem.asBytes(&integer));
 }
 
 fn isNativeCallable(value: Value) bool {
