@@ -220,7 +220,8 @@ fn runZluaForStage(
     return switch (stage) {
         .lex => runZluaLexStage(allocator, source),
         .parse => runZluaParseStage(allocator, source),
-        .resolve, .compile => runZluaResolveStage(allocator, source),
+        .resolve => runZluaResolveStage(allocator, source),
+        .compile => runZluaCompileStage(allocator, source),
         .runtime, .stdlib, .official => process.ownedResult(
             allocator,
             "",
@@ -263,6 +264,30 @@ fn runZluaResolveStage(allocator: std.mem.Allocator, source: []const u8) !proces
         defer allocator.free(message);
         return process.ownedResult(allocator, "", message, 1);
     };
+    return process.ownedResult(allocator, "", "", 0);
+}
+
+fn runZluaCompileStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
+    var tree = frontend.parse(allocator, source) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+    defer tree.deinit();
+
+    compile.resolver.resolve(allocator, &tree) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+
+    var proto = compile.compile(allocator, &tree) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua compiler rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+    defer proto.deinit();
+
     return process.ownedResult(allocator, "", "", 0);
 }
 
