@@ -5,10 +5,10 @@ const CliError = error{Usage};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const allocator = init.arena.allocator();
+    const arena_allocator = init.arena.allocator();
 
-    const raw_args = try init.minimal.args.toSlice(allocator);
-    const args = try allocator.alloc([]const u8, raw_args.len);
+    const raw_args = try init.minimal.args.toSlice(arena_allocator);
+    const args = try arena_allocator.alloc([]const u8, raw_args.len);
     for (raw_args, 0..) |arg, index| args[index] = arg;
 
     if (args.len == 1) {
@@ -23,17 +23,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, command, "test-diff")) {
-        const exit_code = try zlua.testing.diff_runner.runCli(allocator, io, init.environ_map, args[2..]);
+        const exit_code = try zlua.testing.diff_runner.runCli(init.gpa, io, init.environ_map, args[2..]);
         std.process.exit(exit_code);
     }
 
     if (std.mem.eql(u8, command, "test-official")) {
-        const exit_code = try zlua.testing.official_suite.runCli(allocator, io, init.environ_map, args[0], args[2..]);
+        const exit_code = try zlua.testing.official_suite.runCli(init.gpa, io, init.environ_map, args[0], args[2..]);
         std.process.exit(exit_code);
     }
 
     if (std.mem.eql(u8, command, "-e") or std.mem.startsWith(u8, command, "-e")) {
-        const exit_code = try runCliProgram(allocator, io, init.environ_map, args[1..]);
+        const exit_code = try runCliProgram(arena_allocator, io, init.environ_map, args[1..]);
         std.process.exit(exit_code);
     }
 
@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         return CliError.Usage;
     }
 
-    const exit_code = try runCliProgram(allocator, io, init.environ_map, args[1..]);
+    const exit_code = try runCliProgram(arena_allocator, io, init.environ_map, args[1..]);
     std.process.exit(exit_code);
 }
 

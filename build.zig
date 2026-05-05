@@ -48,13 +48,22 @@ pub fn build(b: *std.Build) void {
     diff_cmd.addArtifactArg(clua_exe);
     diff_step.dependOn(&diff_cmd.step);
 
-    const official_step = b.step("test-official", "Run official Lua 5.5 suite dashboard");
+    const official_step = b.step("test-official", "Run quick official Lua 5.5 suite subset");
     const official_cmd = b.addRunArtifact(exe);
     official_cmd.step.dependOn(b.getInstallStep());
     official_cmd.addArg("test-official");
     official_cmd.addArg("--clua");
     official_cmd.addArtifactArg(clua_exe);
+    official_cmd.addArg("--quick");
     official_step.dependOn(&official_cmd.step);
+
+    const official_heavy_step = b.step("test-official-heavy", "Run full official Lua 5.5 suite dashboard");
+    const official_heavy_cmd = b.addRunArtifact(exe);
+    official_heavy_cmd.step.dependOn(b.getInstallStep());
+    official_heavy_cmd.addArg("test-official");
+    official_heavy_cmd.addArg("--clua");
+    official_heavy_cmd.addArtifactArg(clua_exe);
+    official_heavy_step.dependOn(&official_heavy_cmd.step);
 
     const ci_step = b.step("ci", "Run CI checks");
     ci_step.dependOn(test_step);

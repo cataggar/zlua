@@ -1,7 +1,5 @@
 const std = @import("std");
 const clua = @import("clua.zig");
-const compile = @import("../compile.zig");
-const frontend = @import("../frontend.zig");
 const process = @import("process.zig");
 
 const expected_archive_sha256 = "5e47bbfad7db2965d69580e918ee64edeb8d8d32de404b8dae9ce5c6d76a1472";
@@ -71,11 +69,7 @@ pub fn runCli(
     };
 
     var counts: Counts = .{};
-    if (options.quick) {
-        try runQuickSubset(allocator, io, out, clua_exe, options, &counts);
-    } else {
-        try runIndividualSuite(allocator, io, out, clua_exe, options.zlua orelse zlua_exe, options, &counts);
-    }
+    try runIndividualSuite(allocator, io, out, clua_exe, options.zlua orelse zlua_exe, options, &counts);
 
     try printSummary(out, counts);
     try out.flush();
@@ -137,76 +131,6 @@ fn verifyArchive(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return allocator.dupe(u8, &hex);
 }
 
-fn runQuickSubset(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    out: anytype,
-    clua_exe: []const u8,
-    options: Options,
-    counts: *Counts,
-) !void {
-    try out.print("mode: quick official load/compile subset\n", .{});
-    const files = [_][]const u8{ "all.lua", "constructs.lua", "literals.lua", "vararg.lua" };
-    for (&files) |file| {
-        const path = try std.fs.path.join(allocator, &.{ options.suite_path, file });
-        defer allocator.free(path);
-
-        var clua_result = try clua.runLoadfile(allocator, io, clua_exe, path, options.timeout_ms);
-        defer clua_result.deinit(allocator);
-        var zlua_result = try runZluaLoad(allocator, io, path);
-        defer zlua_result.deinit(allocator);
-
-        if (clua_result.timed_out or zlua_result.timed_out) counts.timed_out += 1;
-        if (clua_result.success()) {
-            counts.clua_passed += 1;
-        } else {
-            counts.clua_failed += 1;
-            counts.unexpected_failed += 1;
-            try out.print("fail clua {s}\n", .{file});
-            try printProcess(out, "clua", clua_result, options.show_clua);
-            continue;
-        }
-
-        if (zlua_result.success()) {
-            counts.zlua_passed += 1;
-            try out.print("pass {s}\n", .{file});
-        } else {
-            counts.categorized_failed += 1;
-            const feature = classifyFailure(zlua_result);
-            try out.print("xfail {s} feature={s}\n", .{ file, feature });
-            try printProcess(out, "zlua", zlua_result, options.show_zlua);
-        }
-    }
-}
-
-fn runZluaLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !process.ProcessResult {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
-    defer allocator.free(source);
-    const chunk = stripInitialShebang(source);
-
-    var tree = frontend.parse(allocator, chunk) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected official file: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
-    };
-    defer tree.deinit();
-
-    compile.resolver.resolve(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected official file: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
-    };
-
-    var proto = compile.compile(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua compiler rejected official file: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
-    };
-    defer proto.deinit();
-
-    return process.ownedResult(allocator, "", "", 0);
-}
-
 fn runIndividualSuite(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -222,7 +146,11 @@ fn runIndividualSuite(
         return;
     }
 
-    try out.print("mode: {s} official files\n", .{@tagName(options.mode)});
+    if (options.quick) {
+        try out.print("mode: quick {s} official files (excluding heavy.lua)\n", .{@tagName(options.mode)});
+    } else {
+        try out.print("mode: {s} official files\n", .{@tagName(options.mode)});
+    }
     var files = std.ArrayList([]u8).empty;
     defer {
         for (files.items) |file| allocator.free(file);
@@ -233,6 +161,12 @@ fn runIndividualSuite(
     std.mem.sort([]u8, files.items, {}, lessThanString);
 
     for (files.items) |file| {
+        if (options.quick and std.mem.eql(u8, std.fs.path.basename(file), "heavy.lua")) {
+            counts.skipped += 1;
+            try out.print("skip heavy.lua (memory-stress test; run test-official-heavy)\n", .{});
+            continue;
+        }
+
         var clua_result = try runOfficialFile(allocator, io, clua_exe, file, options, .clua);
         defer clua_result.deinit(allocator);
         var zlua_result = try runOfficialFile(allocator, io, zlua_exe, file, options, .zlua);
@@ -315,12 +249,6 @@ fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
 
-fn stripInitialShebang(source: []const u8) []const u8 {
-    if (source.len == 0 or source[0] != '#') return source;
-    const newline = std.mem.indexOfScalar(u8, source, '\n') orelse return "";
-    return source[newline + 1 ..];
-}
-
 fn printProcess(out: anytype, label: []const u8, result: process.ProcessResult, show_output: bool) !void {
     try out.print("  {s} exit={?} timeout={} signal={?}\n", .{ label, result.exit_code, result.timed_out, result.signal });
     if (show_output) {
@@ -369,9 +297,4 @@ test "failure classifier maps frontend errors" {
     var result = try process.ownedResult(std.testing.allocator, "", "zlua parser rejected official file\n", 1);
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.eql(u8, classifyFailure(result), "frontend.parse"));
-}
-
-test "strips first-line shebang" {
-    try std.testing.expect(std.mem.eql(u8, stripInitialShebang("#!lua\nprint(1)"), "print(1)"));
-    try std.testing.expect(std.mem.eql(u8, stripInitialShebang("print(1)"), "print(1)"));
 }
