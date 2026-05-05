@@ -2,6 +2,7 @@ const std = @import("std");
 const compile = @import("compile.zig");
 const frontend = @import("frontend.zig");
 const process = @import("testing/process.zig");
+const stdlib_safe = @import("stdlib/safe.zig");
 
 const bytecode = compile.bytecode;
 const proto_mod = compile.proto;
@@ -52,7 +53,10 @@ pub const Value = union(enum) {
     native_coroutine_status,
     native_coroutine_running,
     native_coroutine_wrap,
+    native: NativeFn,
 };
+
+pub const NativeFn = stdlib_safe.NativeFn;
 
 const ProtectedCallResult = union(enum) {
     success: []Value,
@@ -84,7 +88,7 @@ const TableEntry = struct {
     value: Value,
 };
 
-const Table = struct {
+pub const Table = struct {
     array: std.ArrayList(Value) = .empty,
     entries: std.ArrayList(TableEntry) = .empty,
     metatable: ?*Table = null,
@@ -105,7 +109,7 @@ const Table = struct {
         self.* = undefined;
     }
 
-    fn get(self: Table, key: Value) Value {
+    pub fn get(self: Table, key: Value) Value {
         if (arrayIndex(key)) |index| {
             if (index <= self.array.items.len) return self.array.items[index - 1];
         }
@@ -115,7 +119,7 @@ const Table = struct {
         return .nil;
     }
 
-    fn set(self: *Table, allocator: std.mem.Allocator, key: Value, value: Value) !void {
+    pub fn set(self: *Table, allocator: std.mem.Allocator, key: Value, value: Value) !void {
         if (arrayIndex(key)) |index| {
             if (index <= self.array.items.len) {
                 self.array.items[index - 1] = value;
@@ -143,7 +147,7 @@ const Table = struct {
         if (value != .nil) try self.entries.append(allocator, .{ .key = key, .value = value });
     }
 
-    fn len(self: Table) i64 {
+    pub fn len(self: Table) i64 {
         var result = self.array.items.len;
         while (result > 0 and self.array.items[result - 1] == .nil) result -= 1;
         while (result < std.math.maxInt(i64)) {
@@ -368,6 +372,7 @@ pub const State = struct {
     gc_mode: GcMode = .generational,
     gc_params: GcParams = .{},
     mark_all_stack_registers: bool = false,
+    random_state: u64 = 0x123456789abcdef0,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var state = State{
@@ -393,10 +398,78 @@ pub const State = struct {
         try state.globals.put(try state.intern("pcall"), .native_pcall);
         try state.globals.put(try state.intern("xpcall"), .native_xpcall);
         try state.globals.put(try state.intern("collectgarbage"), .native_collectgarbage);
+        try state.globals.put(try state.intern("type"), .{ .native = .type });
+        try state.globals.put(try state.intern("tonumber"), .{ .native = .tonumber });
+        try state.globals.put(try state.intern("warn"), .{ .native = .warn });
+        try state.globals.put(try state.intern("_VERSION"), .{ .string = try state.intern("Lua 5.5") });
 
-        const table_lib = try state.newTableWithHints(0, 1);
+        const table_lib = try state.newTableWithHints(0, 8);
+        try state.setTable(table_lib, .{ .string = try state.intern("concat") }, .{ .native = .table_concat });
+        try state.setTable(table_lib, .{ .string = try state.intern("insert") }, .{ .native = .table_insert });
+        try state.setTable(table_lib, .{ .string = try state.intern("move") }, .{ .native = .table_move });
+        try state.setTable(table_lib, .{ .string = try state.intern("pack") }, .{ .native = .table_pack });
+        try state.setTable(table_lib, .{ .string = try state.intern("remove") }, .{ .native = .table_remove });
+        try state.setTable(table_lib, .{ .string = try state.intern("sort") }, .{ .native = .table_sort });
+        try state.setTable(table_lib, .{ .string = try state.intern("unpack") }, .{ .native = .table_unpack });
         try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
         try state.globals.put(try state.intern("table"), table_lib);
+
+        const string_lib = try state.newTableWithHints(0, 20);
+        try state.setTable(string_lib, .{ .string = try state.intern("byte") }, .{ .native = .string_byte });
+        try state.setTable(string_lib, .{ .string = try state.intern("char") }, .{ .native = .string_char });
+        try state.setTable(string_lib, .{ .string = try state.intern("dump") }, .{ .native = .string_dump });
+        try state.setTable(string_lib, .{ .string = try state.intern("find") }, .{ .native = .string_find });
+        try state.setTable(string_lib, .{ .string = try state.intern("format") }, .{ .native = .string_format });
+        try state.setTable(string_lib, .{ .string = try state.intern("gmatch") }, .{ .native = .string_gmatch });
+        try state.setTable(string_lib, .{ .string = try state.intern("gsub") }, .{ .native = .string_gsub });
+        try state.setTable(string_lib, .{ .string = try state.intern("len") }, .{ .native = .string_len });
+        try state.setTable(string_lib, .{ .string = try state.intern("lower") }, .{ .native = .string_lower });
+        try state.setTable(string_lib, .{ .string = try state.intern("match") }, .{ .native = .string_match });
+        try state.setTable(string_lib, .{ .string = try state.intern("pack") }, .{ .native = .string_pack });
+        try state.setTable(string_lib, .{ .string = try state.intern("packsize") }, .{ .native = .string_packsize });
+        try state.setTable(string_lib, .{ .string = try state.intern("rep") }, .{ .native = .string_rep });
+        try state.setTable(string_lib, .{ .string = try state.intern("reverse") }, .{ .native = .string_reverse });
+        try state.setTable(string_lib, .{ .string = try state.intern("sub") }, .{ .native = .string_sub });
+        try state.setTable(string_lib, .{ .string = try state.intern("unpack") }, .{ .native = .string_unpack });
+        try state.setTable(string_lib, .{ .string = try state.intern("upper") }, .{ .native = .string_upper });
+        try state.globals.put(try state.intern("string"), string_lib);
+
+        const math_lib = try state.newTableWithHints(0, 32);
+        try state.setTable(math_lib, .{ .string = try state.intern("abs") }, .{ .native = .math_abs });
+        try state.setTable(math_lib, .{ .string = try state.intern("acos") }, .{ .native = .math_acos });
+        try state.setTable(math_lib, .{ .string = try state.intern("asin") }, .{ .native = .math_asin });
+        try state.setTable(math_lib, .{ .string = try state.intern("atan") }, .{ .native = .math_atan });
+        try state.setTable(math_lib, .{ .string = try state.intern("ceil") }, .{ .native = .math_ceil });
+        try state.setTable(math_lib, .{ .string = try state.intern("cos") }, .{ .native = .math_cos });
+        try state.setTable(math_lib, .{ .string = try state.intern("deg") }, .{ .native = .math_deg });
+        try state.setTable(math_lib, .{ .string = try state.intern("exp") }, .{ .native = .math_exp });
+        try state.setTable(math_lib, .{ .string = try state.intern("floor") }, .{ .native = .math_floor });
+        try state.setTable(math_lib, .{ .string = try state.intern("fmod") }, .{ .native = .math_fmod });
+        try state.setTable(math_lib, .{ .string = try state.intern("huge") }, .{ .number = std.math.inf(f64) });
+        try state.setTable(math_lib, .{ .string = try state.intern("log") }, .{ .native = .math_log });
+        try state.setTable(math_lib, .{ .string = try state.intern("max") }, .{ .native = .math_max });
+        try state.setTable(math_lib, .{ .string = try state.intern("min") }, .{ .native = .math_min });
+        try state.setTable(math_lib, .{ .string = try state.intern("modf") }, .{ .native = .math_modf });
+        try state.setTable(math_lib, .{ .string = try state.intern("pi") }, .{ .number = std.math.pi });
+        try state.setTable(math_lib, .{ .string = try state.intern("rad") }, .{ .native = .math_rad });
+        try state.setTable(math_lib, .{ .string = try state.intern("random") }, .{ .native = .math_random });
+        try state.setTable(math_lib, .{ .string = try state.intern("randomseed") }, .{ .native = .math_randomseed });
+        try state.setTable(math_lib, .{ .string = try state.intern("sin") }, .{ .native = .math_sin });
+        try state.setTable(math_lib, .{ .string = try state.intern("sqrt") }, .{ .native = .math_sqrt });
+        try state.setTable(math_lib, .{ .string = try state.intern("tan") }, .{ .native = .math_tan });
+        try state.setTable(math_lib, .{ .string = try state.intern("tointeger") }, .{ .native = .math_tointeger });
+        try state.setTable(math_lib, .{ .string = try state.intern("type") }, .{ .native = .math_type });
+        try state.setTable(math_lib, .{ .string = try state.intern("ult") }, .{ .native = .math_ult });
+        try state.globals.put(try state.intern("math"), math_lib);
+
+        const utf8_lib = try state.newTableWithHints(0, 6);
+        try state.setTable(utf8_lib, .{ .string = try state.intern("char") }, .{ .native = .utf8_char });
+        try state.setTable(utf8_lib, .{ .string = try state.intern("charpattern") }, .{ .string = try state.intern("[\x00-\x7F\xC2-\xFD][\x80-\xBF]*") });
+        try state.setTable(utf8_lib, .{ .string = try state.intern("codepoint") }, .{ .native = .utf8_codepoint });
+        try state.setTable(utf8_lib, .{ .string = try state.intern("codes") }, .{ .native = .utf8_codes });
+        try state.setTable(utf8_lib, .{ .string = try state.intern("len") }, .{ .native = .utf8_len });
+        try state.setTable(utf8_lib, .{ .string = try state.intern("offset") }, .{ .native = .utf8_offset });
+        try state.globals.put(try state.intern("utf8"), utf8_lib);
 
         const debug_lib = try state.newTableWithHints(0, 1);
         try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
@@ -543,7 +616,7 @@ pub const State = struct {
         };
     }
 
-    fn intern(self: *State, bytes: []const u8) ![]const u8 {
+    pub fn intern(self: *State, bytes: []const u8) ![]const u8 {
         if (self.strings.get(bytes)) |interned| return interned;
         const interned = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(interned);
@@ -642,7 +715,7 @@ pub const State = struct {
         return self.intern(content);
     }
 
-    fn newTableWithHints(self: *State, array_hint: u32, hash_hint: u32) !Value {
+    pub fn newTableWithHints(self: *State, array_hint: u32, hash_hint: u32) !Value {
         const table = try self.allocator.create(Table);
         errdefer self.allocator.destroy(table);
         table.* = try Table.init(self.allocator, array_hint, hash_hint);
@@ -1029,6 +1102,7 @@ pub const State = struct {
             .native_coroutine_status => try self.coroutineStatus(thread, resolved),
             .native_coroutine_running => try self.coroutineRunning(thread, resolved),
             .native_coroutine_wrap => try self.coroutineWrap(thread, resolved),
+            .native => |native| try self.callNative(native, thread, resolved),
             else => {
                 const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
@@ -1050,7 +1124,7 @@ pub const State = struct {
         thread.stack.items[base + 1] = receiver;
     }
 
-    fn callOneResult(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!Value {
+    pub fn callOneResult(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!Value {
         const frame_count = thread.frames.items.len;
         const frame = thread.frames.items[frame_count - 1];
         const relative_base: bytecode.Register = frame.proto.max_registers;
@@ -1211,7 +1285,7 @@ pub const State = struct {
         return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
     }
 
-    fn compareValues(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: CompareOp) !bool {
+    pub fn compareValues(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: CompareOp) !bool {
         if (rawCompare(lhs, rhs, op)) |result| return result;
         switch (op) {
             .lt => {
@@ -1295,7 +1369,7 @@ pub const State = struct {
         thread.last_result_count = return_count;
     }
 
-    fn returnValues(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value) !void {
+    pub fn returnValues(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value) !void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const actual_count = try self.resolveReturnCount(return_count, values.len);
         const absolute_base = frame.base + base;
@@ -1724,9 +1798,27 @@ pub const State = struct {
         const iterator = self.get(thread, op.base);
         const state = self.get(thread, op.base + 1);
         const control = self.get(thread, op.base + 2);
-        const values = switch (iterator) {
-            .native_next => try self.nextValues(state, control),
-            .native_ipairs_iter => try self.ipairsIterValues(state, control),
+        var fixed: [2]Value = undefined;
+        const values: []const Value = switch (iterator) {
+            .native_next => blk: {
+                fixed = try self.nextValues(state, control);
+                break :blk fixed[0..2];
+            },
+            .native_ipairs_iter => blk: {
+                fixed = try self.ipairsIterValues(state, control);
+                break :blk fixed[0..2];
+            },
+            .native => |native| switch (native) {
+                .string_gmatch_iter => blk: {
+                    fixed = try stdlib_safe.stringGmatchNext(self, state);
+                    break :blk fixed[0..2];
+                },
+                .utf8_codes_iter => blk: {
+                    fixed = try stdlib_safe.utf8CodesNext(self, state, control);
+                    break :blk fixed[0..2];
+                },
+                else => return self.fail("attempt to call a non-function value"),
+            },
             else => return self.fail("attempt to call a non-function value"),
         };
         self.set(thread, op.base + 2, values[0]);
@@ -1737,10 +1829,17 @@ pub const State = struct {
         return values[0] != .nil;
     }
 
-    fn expectTable(self: *State, value: Value) !*Table {
+    pub fn expectTable(self: *State, value: Value) !*Table {
         return switch (value) {
             .table => |table| table,
             else => self.fail("table expected"),
+        };
+    }
+
+    pub fn expectString(self: *State, value: Value) ![]const u8 {
+        return switch (value) {
+            .string => |string| string,
+            else => self.fail("string expected"),
         };
     }
 
@@ -1755,6 +1854,10 @@ pub const State = struct {
         const integer = toInteger(value) orelse return self.fail("number expected");
         if (integer < 0) return self.fail("negative size");
         return std.math.cast(u32, integer) orelse self.fail("size too large");
+    }
+
+    fn callNative(self: *State, native: NativeFn, thread: *Thread, op: bytecode.Call) !void {
+        try stdlib_safe.callNative(self, native, thread, op);
     }
 
     fn collectGarbageValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -2237,7 +2340,7 @@ pub const State = struct {
         return allocator.dupe(u8, out.items);
     }
 
-    fn fail(self: *State, message: []const u8) RuntimeError {
+    pub fn fail(self: *State, message: []const u8) RuntimeError {
         self.last_error = message;
         self.last_error_value = .{ .string = message };
         return error.RuntimeError;
@@ -2305,7 +2408,7 @@ pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8
 
 const BinaryOp = enum { add, sub, mul, div, idiv, mod, pow, band, bor, bxor, shl, shr, concat };
 const UnaryMetamethodOp = enum { unm, bnot };
-const CompareOp = enum { lt, le };
+pub const CompareOp = enum { lt, le };
 
 fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
     switch (op) {
@@ -2466,6 +2569,7 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_coroutine_status => rhs == .native_coroutine_status,
         .native_coroutine_running => rhs == .native_coroutine_running,
         .native_coroutine_wrap => rhs == .native_coroutine_wrap,
+        .native => |native| rhs == .native and rhs.native == native,
     };
 }
 
@@ -2497,6 +2601,7 @@ fn isNativeCallable(value: Value) bool {
         .native_coroutine_status,
         .native_coroutine_running,
         .native_coroutine_wrap,
+        .native,
         => true,
         else => false,
     };
@@ -2526,7 +2631,7 @@ fn lessEqual(lhs: Value, rhs: Value) !bool {
     return valuesEqual(lhs, rhs) or try lessThan(lhs, rhs);
 }
 
-fn truthy(value: Value) bool {
+pub fn truthy(value: Value) bool {
     return switch (value) {
         .nil => false,
         .boolean => |boolean| boolean,
@@ -2534,7 +2639,7 @@ fn truthy(value: Value) bool {
     };
 }
 
-fn toInteger(value: Value) ?i64 {
+pub fn toInteger(value: Value) ?i64 {
     return switch (value) {
         .integer => |integer| integer,
         .string => |string| parseIntegerStrict(string),
@@ -2542,7 +2647,7 @@ fn toInteger(value: Value) ?i64 {
     };
 }
 
-fn toNumber(value: Value) !f64 {
+pub fn toNumber(value: Value) !f64 {
     return switch (value) {
         .integer => |integer| @floatFromInt(integer),
         .number => |number| number,
@@ -2562,7 +2667,7 @@ fn luaStringLike(value: Value) bool {
     };
 }
 
-fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
+pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
     switch (value) {
         .integer, .number, .string => try appendValue(allocator, out, value),
         else => return error.RuntimeError,
@@ -2628,7 +2733,7 @@ fn parseIntegerLiteral(lexeme: []const u8) !Value {
     }
 }
 
-fn parseIntegerStrict(text: []const u8) ?i64 {
+pub fn parseIntegerStrict(text: []const u8) ?i64 {
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return null;
     if (isHex(trimmed)) {
@@ -2643,7 +2748,7 @@ fn parseIntegerStrict(text: []const u8) ?i64 {
     return std.fmt.parseInt(i64, trimmed, 10) catch null;
 }
 
-fn parseLuaNumber(text: []const u8) !f64 {
+pub fn parseLuaNumber(text: []const u8) !f64 {
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return error.RuntimeError;
     if (isHex(trimmed)) return parseHexNumber(trimmed);
@@ -2688,7 +2793,7 @@ fn parseHexNumber(text: []const u8) !f64 {
     return value * std.math.pow(f64, 2.0, @floatFromInt(exponent));
 }
 
-fn floatToInteger(number: f64) ?i64 {
+pub fn floatToInteger(number: f64) ?i64 {
     if (!std.math.isFinite(number) or @floor(number) != number) return null;
     const min = @as(f64, @floatFromInt(std.math.minInt(i64)));
     const max = @as(f64, @floatFromInt(std.math.maxInt(i64)));
@@ -2700,7 +2805,7 @@ fn isHex(text: []const u8) bool {
     return text.len >= 3 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X');
 }
 
-fn trimAscii(text: []const u8) []const u8 {
+pub fn trimAscii(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
 }
 
@@ -2713,12 +2818,12 @@ fn arrayIndex(value: Value) ?usize {
     return std.math.cast(usize, integer);
 }
 
-fn argValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {
+pub fn argValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {
     if (index >= op.arg_count) return .nil;
     return state.get(thread, op.base + 1 + index);
 }
 
-fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
+pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
     switch (value) {
         .nil => try out.appendSlice(allocator, "nil"),
         .boolean => |boolean| try out.appendSlice(allocator, if (boolean) "true" else "false"),
@@ -2755,6 +2860,10 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .native_coroutine_status => try out.appendSlice(allocator, "function: coroutine.status"),
         .native_coroutine_running => try out.appendSlice(allocator, "function: coroutine.running"),
         .native_coroutine_wrap => try out.appendSlice(allocator, "function: coroutine.wrap"),
+        .native => |native| {
+            try out.appendSlice(allocator, "function: ");
+            try out.appendSlice(allocator, native.name());
+        },
     }
 }
 
@@ -2772,14 +2881,14 @@ fn freeCoroutineResumeResult(allocator: std.mem.Allocator, result: CoroutineResu
     }
 }
 
-fn appendNumber(allocator: std.mem.Allocator, out: *std.ArrayList(u8), number: f64) !void {
+pub fn appendNumber(allocator: std.mem.Allocator, out: *std.ArrayList(u8), number: f64) !void {
     try appendFmt(allocator, out, "{d}", .{number});
     if (@floor(number) == number and std.math.isFinite(number)) {
         try out.appendSlice(allocator, ".0");
     }
 }
 
-fn appendFmt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+pub fn appendFmt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
     const text = try std.fmt.allocPrint(allocator, fmt, args);
     defer allocator.free(text);
     try out.appendSlice(allocator, text);
@@ -2981,4 +3090,15 @@ test "collectgarbage runs table finalizers before sweeping" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "gc-final\tdead\ndone\n"));
+}
+
+test "string.dump is explicitly unsupported" {
+    var result = try executeSource(std.testing.allocator,
+        \\local ok, message = pcall(string.dump, function() end)
+        \\print(ok, message ~= nil)
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "false\ttrue\n"));
 }
