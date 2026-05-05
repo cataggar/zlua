@@ -410,6 +410,7 @@ pub const State = struct {
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
     current_thread: ?*Thread = null,
+    string_metatable: ?*Table = null,
     is_collecting: bool = false,
     collect_after_instruction: bool = false,
     gc_running: bool = true,
@@ -468,6 +469,7 @@ pub const State = struct {
         try state.globals.put(try state.intern("pcall"), .native_pcall);
         try state.globals.put(try state.intern("xpcall"), .native_xpcall);
         try state.globals.put(try state.intern("collectgarbage"), .native_collectgarbage);
+        try state.globals.put(try state.intern("load"), .{ .native = .load });
         try state.globals.put(try state.intern("type"), .{ .native = .type });
         try state.globals.put(try state.intern("tonumber"), .{ .native = .tonumber });
         try state.globals.put(try state.intern("warn"), .{ .native = .warn });
@@ -505,6 +507,10 @@ pub const State = struct {
         try state.setTable(string_lib, .{ .string = try state.intern("unpack") }, .{ .native = .string_unpack });
         try state.setTable(string_lib, .{ .string = try state.intern("upper") }, .{ .native = .string_upper });
         try state.globals.put(try state.intern("string"), string_lib);
+
+        const string_metatable = try state.newTableWithHints(0, 1);
+        try state.setTable(string_metatable, .{ .string = try state.intern("__index") }, string_lib);
+        state.string_metatable = string_metatable.table;
 
         const math_lib = try state.newTableWithHints(0, 32);
         try state.setTable(math_lib, .{ .string = try state.intern("abs") }, .{ .native = .math_abs });
@@ -1503,9 +1509,9 @@ pub const State = struct {
     }
 
     fn getMetatableValue(self: *State, value: Value) !Value {
-        _ = self;
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return .nil,
+            .string => self.string_metatable orelse return .nil,
             else => return .nil,
         };
         const locked = metatable.get(.{ .string = "__metatable" });
@@ -1527,9 +1533,9 @@ pub const State = struct {
     }
 
     fn getMetamethod(self: *State, value: Value, name: []const u8) !?Value {
-        _ = self;
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return null,
+            .string => self.string_metatable orelse return null,
             else => return null,
         };
         const metamethod = metatable.get(.{ .string = name });
@@ -2273,6 +2279,7 @@ pub const State = struct {
         if (self.last_error) |message| self.markString(message);
         self.markValue(self.last_error_value);
         if (self.current_thread) |thread| self.markThread(thread);
+        if (self.string_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
     }
 
     fn markValue(self: *State, value: Value) void {
@@ -2712,8 +2719,8 @@ fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
             }
         },
         .band, .bor, .bxor, .shl, .shr => {
-            if (toInteger(lhs)) |left| {
-                if (toInteger(rhs)) |right| {
+            if (toBitwiseInteger(lhs)) |left| {
+                if (toBitwiseInteger(rhs)) |right| {
                     return .{ .integer = rawBitwise(left, right, op) };
                 }
             }
@@ -2743,7 +2750,16 @@ fn rawUnaryOp(value: Value, op: UnaryMetamethodOp) ?Value {
             .number => |number| .{ .number = -number },
             else => if (toNumberMaybe(value)) |number| .{ .number = -number } else null,
         },
-        .bnot => if (toInteger(value)) |integer| .{ .integer = ~integer } else null,
+        .bnot => if (toBitwiseInteger(value)) |integer| .{ .integer = ~integer } else null,
+    };
+}
+
+fn toBitwiseInteger(value: Value) ?i64 {
+    return switch (value) {
+        .integer => |integer| integer,
+        .number => |number| floatToInteger(number),
+        .string => |string| parseIntegerStrict(string) orelse if (parseLuaNumber(string)) |number| floatToInteger(number) else |_| null,
+        else => null,
     };
 }
 
@@ -2753,7 +2769,7 @@ fn rawBitwise(left: i64, right: i64, op: BinaryOp) i64 {
         .bor => left | right,
         .bxor => left ^ right,
         .shl => shiftInteger(left, right),
-        .shr => shiftInteger(left, -right),
+        .shr => if (right == std.math.minInt(i64)) 0 else shiftInteger(left, -right),
         else => unreachable,
     };
 }
@@ -3039,10 +3055,14 @@ fn parseIntegerLiteral(lexeme: []const u8) !Value {
 pub fn parseIntegerStrict(text: []const u8) ?i64 {
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return null;
-    if (isHex(trimmed)) {
-        for (trimmed[2..]) |byte| if (!std.ascii.isHex(byte)) return null;
-        const unsigned = std.fmt.parseInt(u64, trimmed[2..], 16) catch return null;
-        return @as(i64, @bitCast(unsigned));
+    const negative = trimmed[0] == '-';
+    const unsigned_text = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
+    if (unsigned_text.len == 0) return null;
+    if (isHex(unsigned_text)) {
+        for (unsigned_text[2..]) |byte| if (!std.ascii.isHex(byte)) return null;
+        const unsigned = std.fmt.parseInt(u64, unsigned_text[2..], 16) catch return null;
+        const integer: i64 = @bitCast(unsigned);
+        return if (negative) -%integer else integer;
     }
     for (trimmed, 0..) |byte, index| {
         if (index == 0 and (byte == '+' or byte == '-')) continue;
@@ -3054,7 +3074,13 @@ pub fn parseIntegerStrict(text: []const u8) ?i64 {
 pub fn parseLuaNumber(text: []const u8) !f64 {
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return error.RuntimeError;
-    if (isHex(trimmed)) return parseHexNumber(trimmed);
+    const negative = trimmed[0] == '-';
+    const unsigned_text = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
+    if (unsigned_text.len == 0) return error.RuntimeError;
+    if (isHex(unsigned_text)) {
+        const number = try parseHexNumber(unsigned_text);
+        return if (negative) -number else number;
+    }
     return std.fmt.parseFloat(f64, trimmed);
 }
 

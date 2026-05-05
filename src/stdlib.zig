@@ -17,6 +17,7 @@ const State = runtime.State;
 const Thread = runtime.Thread;
 
 pub const NativeFn = enum {
+    load,
     type,
     tonumber,
     warn,
@@ -95,6 +96,7 @@ pub const NativeFn = enum {
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
+            .load => "load",
             .type => "type",
             .tonumber => "tonumber",
             .warn => "warn",
@@ -176,6 +178,7 @@ pub const NativeFn = enum {
 
 pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode.Call) !void {
     switch (native) {
+        .load => try base.load(state, thread, op),
         .type => try base.typeValue(state, thread, op),
         .tonumber => try base.tonumber(state, thread, op),
         .warn => try base.warn(state, thread, op),

@@ -7,6 +7,16 @@ const State = runtime.State;
 const Thread = runtime.Thread;
 const Value = runtime.Value;
 
+pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const closure = state.loadSourceAsClosure(source) catch {
+        const message = state.last_error orelse "cannot load source";
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
+        return;
+    };
+    try state.returnValues(thread, op.base, op.return_count, &.{closure});
+}
+
 pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(typeName(runtime.argValue(state, thread, op, 0))) }});
 }

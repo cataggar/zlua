@@ -95,3 +95,6 @@ print(rawequal(raw, raw), rawequal(raw, setmetatable({}, getmetatable(raw))))
 
 local locked = setmetatable({}, {__metatable = "locked"})
 print(getmetatable(locked))
+
+local string_mt = getmetatable("")
+print(type(string_mt), string_mt.__index == string, ("abc"):sub(2))
