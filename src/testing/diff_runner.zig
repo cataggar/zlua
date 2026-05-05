@@ -217,8 +217,9 @@ fn runZluaForStage(
     stage: metadata.Stage,
 ) !process.ProcessResult {
     return switch (stage) {
-        .lex, .parse => runZluaLexStage(allocator, source),
-        .resolve, .compile => runZluaLexStage(allocator, source),
+        .lex => runZluaLexStage(allocator, source),
+        .parse => runZluaParseStage(allocator, source),
+        .resolve, .compile => runZluaParseStage(allocator, source),
         .runtime, .stdlib, .official => process.ownedResult(
             allocator,
             "",
@@ -235,6 +236,16 @@ fn runZluaLexStage(allocator: std.mem.Allocator, source: []const u8) !process.Pr
         return process.ownedResult(allocator, "", message, 1);
     };
     allocator.free(tokens);
+    return process.ownedResult(allocator, "", "", 0);
+}
+
+fn runZluaParseStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
+    var tree = frontend.parse(allocator, source) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+    tree.deinit();
     return process.ownedResult(allocator, "", "", 0);
 }
 
