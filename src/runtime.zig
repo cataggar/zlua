@@ -275,6 +275,63 @@ const StringAllocation = struct {
     marked: bool = false,
 };
 
+const GcMode = enum {
+    incremental,
+    generational,
+
+    fn name(self: GcMode) []const u8 {
+        return switch (self) {
+            .incremental => "incremental",
+            .generational => "generational",
+        };
+    }
+};
+
+const GcParam = enum {
+    minormul,
+    majorminor,
+    minormajor,
+    pause,
+    stepmul,
+    stepsize,
+};
+
+const GcParams = struct {
+    minormul: i64 = 20,
+    majorminor: i64 = 50,
+    minormajor: i64 = 70,
+    pause: i64 = 250,
+    stepmul: i64 = 200,
+    stepsize: i64 = 200,
+
+    fn get(self: GcParams, param: GcParam) i64 {
+        return switch (param) {
+            .minormul => self.minormul,
+            .majorminor => self.majorminor,
+            .minormajor => self.minormajor,
+            .pause => self.pause,
+            .stepmul => self.stepmul,
+            .stepsize => self.stepsize,
+        };
+    }
+
+    fn set(self: *GcParams, param: GcParam, value: i64) void {
+        switch (param) {
+            .minormul => self.minormul = value,
+            .majorminor => self.majorminor = value,
+            .minormajor => self.minormajor = value,
+            .pause => self.pause = value,
+            .stepmul => self.stepmul = value,
+            .stepsize => self.stepsize = value,
+        }
+    }
+};
+
+const WeakMode = struct {
+    keys: bool = false,
+    values: bool = false,
+};
+
 const RuntimeAllocationStats = struct {
     strings: usize,
     tables: usize,
@@ -307,6 +364,10 @@ pub const State = struct {
     current_thread: ?*Thread = null,
     is_collecting: bool = false,
     collect_after_instruction: bool = false,
+    gc_running: bool = true,
+    gc_mode: GcMode = .generational,
+    gc_params: GcParams = .{},
+    mark_all_stack_registers: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var state = State{
@@ -452,7 +513,7 @@ pub const State = struct {
                 .for_prep, .for_loop => return self.fail("unsupported runtime opcode"),
             }
 
-            if (self.collect_after_instruction) try self.collectGarbageWithFinalizers(thread);
+            if (self.collect_after_instruction and self.gc_running) try self.collectGarbageConservatively(thread);
         }
     }
 
@@ -469,6 +530,7 @@ pub const State = struct {
     fn setGlobal(self: *State, name: []const u8, value: Value) !void {
         const key = if (self.globals.contains(name)) name else try self.intern(name);
         try self.globals.put(key, value);
+        self.markValue(value);
     }
 
     fn loadConstant(self: *State, constant: bytecode.Constant) !Value {
@@ -637,13 +699,13 @@ pub const State = struct {
     }
 
     fn writeUpvalue(self: *State, thread: *Thread, index: bytecode.UpvalueIndex, value: Value) void {
-        _ = self;
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const upvalue = frame.closure.upvalues[index];
         if (upvalue.is_open) {
             upvalue.owner.stack.items[upvalue.stack_index] = value;
         } else {
             upvalue.closed = value;
+            self.writeBarrier(upvalue.marked, value);
         }
     }
 
@@ -824,6 +886,7 @@ pub const State = struct {
             const table = table_value.table;
             if (table.get(key) != .nil) {
                 try table.set(self.allocator, key, value);
+                self.writeTableBarrier(table, key, value);
                 return;
             }
         }
@@ -831,6 +894,7 @@ pub const State = struct {
         const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
             if (table_value == .table) {
                 try table_value.table.set(self.allocator, key, value);
+                self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
             return self.fail("attempt to index a non-table value");
@@ -1100,6 +1164,7 @@ pub const State = struct {
             .table => |metatable| metatable,
             else => return self.fail("nil or table expected"),
         };
+        if (table.metatable) |metatable| self.writeBarrier(table.marked, .{ .table = metatable });
     }
 
     fn getMetamethod(self: *State, value: Value, name: []const u8) !?Value {
@@ -1634,7 +1699,9 @@ pub const State = struct {
 
     fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
         const table = try self.expectTable(table_value);
-        try table.set(self.allocator, try self.writableTableKey(key_value), value);
+        const key = try self.writableTableKey(key_value);
+        try table.set(self.allocator, key, value);
+        self.writeTableBarrier(table, key, value);
     }
 
     fn nextValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
@@ -1698,8 +1765,9 @@ pub const State = struct {
             return;
         }
         if (option == .string and std.mem.eql(u8, option.string, "step")) {
-            try self.collectGarbageWithFinalizers(thread);
-            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            const budget = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse return self.fail("number expected") else 0;
+            const complete = try self.collectGarbageStep(thread, budget);
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = complete }});
             return;
         }
         if (option == .string and std.mem.eql(u8, option.string, "count")) {
@@ -1707,28 +1775,90 @@ pub const State = struct {
             return;
         }
         if (option == .string and std.mem.eql(u8, option.string, "isrunning")) {
-            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = self.gc_running }});
             return;
         }
-        if (option == .string and (std.mem.eql(u8, option.string, "stop") or std.mem.eql(u8, option.string, "restart"))) {
+        if (option == .string and std.mem.eql(u8, option.string, "stop")) {
+            self.gc_running = false;
             try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
             return;
         }
+        if (option == .string and std.mem.eql(u8, option.string, "restart")) {
+            self.gc_running = true;
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "incremental")) {
+            const old = self.gc_mode;
+            self.gc_mode = .incremental;
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(old.name()) }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "generational")) {
+            const old = self.gc_mode;
+            self.gc_mode = .generational;
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(old.name()) }});
+            return;
+        }
+        if (option == .string and std.mem.eql(u8, option.string, "param")) {
+            const param_value = argValue(self, thread, op, 1);
+            const param = try self.collectGarbageParam(param_value);
+            const old = self.gc_params.get(param);
+            if (op.arg_count >= 3) {
+                const new_value = toInteger(argValue(self, thread, op, 2)) orelse return self.fail("number expected");
+                self.gc_params.set(param, new_value);
+            }
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = old }});
+            return;
+        }
         return self.fail("bad argument #1 to 'collectgarbage'");
+    }
+
+    fn collectGarbageParam(self: *State, value: Value) !GcParam {
+        if (value != .string) return self.fail("bad argument #2 to 'collectgarbage'");
+        if (std.mem.eql(u8, value.string, "minormul")) return .minormul;
+        if (std.mem.eql(u8, value.string, "majorminor")) return .majorminor;
+        if (std.mem.eql(u8, value.string, "minormajor")) return .minormajor;
+        if (std.mem.eql(u8, value.string, "pause")) return .pause;
+        if (std.mem.eql(u8, value.string, "stepmul")) return .stepmul;
+        if (std.mem.eql(u8, value.string, "stepsize")) return .stepsize;
+        return self.fail("bad argument #2 to 'collectgarbage'");
+    }
+
+    fn collectGarbageStep(self: *State, thread: ?*Thread, budget: i64) !bool {
+        _ = budget;
+        try self.collectGarbageWithFinalizers(thread);
+        return false;
     }
 
     pub fn collectGarbage(self: *State) !void {
         try self.collectGarbageWithFinalizers(self.current_thread);
     }
 
+    fn collectGarbageConservatively(self: *State, thread: ?*Thread) !void {
+        try self.collectGarbageWithFinalizersMode(thread, true);
+    }
+
     fn collectGarbageWithFinalizers(self: *State, thread: ?*Thread) !void {
+        try self.collectGarbageWithFinalizersMode(thread, false);
+    }
+
+    fn collectGarbageWithFinalizersMode(self: *State, thread: ?*Thread, mark_all_stack_registers: bool) !void {
         if (self.is_collecting) return;
         self.is_collecting = true;
-        defer self.is_collecting = false;
+        const previous_mark_all = self.mark_all_stack_registers;
+        self.mark_all_stack_registers = mark_all_stack_registers;
+        defer {
+            self.mark_all_stack_registers = previous_mark_all;
+            self.is_collecting = false;
+        }
 
         self.resetMarks();
         self.markRoots();
+        self.convergeEphemerons();
+        self.clearWeakValues();
         try self.runPendingFinalizers(thread);
+        self.clearWeakTables();
         self.sweepThreads();
         self.sweepClosures();
         self.sweepUpvalues();
@@ -1775,6 +1905,17 @@ pub const State = struct {
         if (table.marked) return;
         table.marked = true;
         if (table.metatable) |metatable| self.markTable(metatable);
+        const weak = self.weakMode(table);
+        if (weak.keys and weak.values) return;
+        if (weak.values) {
+            for (table.entries.items) |entry| self.markValue(entry.key);
+            return;
+        }
+        if (weak.keys) {
+            for (table.array.items) |value| self.markValue(value);
+            _ = self.markEphemeronValues(table);
+            return;
+        }
         for (table.array.items) |value| self.markValue(value);
         for (table.entries.items) |entry| {
             self.markValue(entry.key);
@@ -1815,8 +1956,15 @@ pub const State = struct {
 
     fn markThreadStack(self: *State, thread: *Thread) void {
         for (thread.frames.items) |frame| {
-            const register_count = @max(frame.proto.max_registers, 1);
-            self.markStackRange(thread, frame.base, register_count);
+            if (self.mark_all_stack_registers) {
+                const register_count = @max(frame.proto.max_registers, 1);
+                self.markStackRange(thread, frame.base, register_count);
+            } else {
+                for (frame.proto.locals.items) |local| {
+                    if (!localActiveAt(local, frame.pc)) continue;
+                    self.markStackRange(thread, frame.base + local.register, 1);
+                }
+            }
         }
         self.markStackRange(thread, thread.last_result_base, thread.last_result_count);
         self.markStackRange(thread, thread.yield_result_base, thread.yield_result_count);
@@ -1826,6 +1974,119 @@ pub const State = struct {
         if (base >= thread.stack.items.len) return;
         const end = @min(thread.stack.items.len, base + count);
         for (thread.stack.items[base..end]) |value| self.markValue(value);
+    }
+
+    fn weakMode(self: *State, table: *Table) WeakMode {
+        _ = self;
+        const metatable = table.metatable orelse return .{};
+        const mode = metatable.get(.{ .string = "__mode" });
+        if (mode != .string) return .{};
+        return .{
+            .keys = std.mem.indexOfScalar(u8, mode.string, 'k') != null,
+            .values = std.mem.indexOfScalar(u8, mode.string, 'v') != null,
+        };
+    }
+
+    fn markEphemeronValues(self: *State, table: *Table) bool {
+        var changed = false;
+        for (table.entries.items) |entry| {
+            if (self.valueIsWeaklyCleared(entry.key)) continue;
+            self.markValue(entry.key);
+            if (self.markValueChanged(entry.value)) changed = true;
+        }
+        return changed;
+    }
+
+    fn convergeEphemerons(self: *State) void {
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.table_allocations.items) |table| {
+                if (!table.marked) continue;
+                const weak = self.weakMode(table);
+                if (!weak.keys or weak.values) continue;
+                if (self.markEphemeronValues(table)) changed = true;
+            }
+        }
+    }
+
+    fn markValueChanged(self: *State, value: Value) bool {
+        const was_marked = self.valueIsMarked(value);
+        self.markValue(value);
+        return !was_marked and self.valueIsMarked(value);
+    }
+
+    fn valueIsMarked(self: *State, value: Value) bool {
+        return switch (value) {
+            .string => |string| if (self.findStringAllocation(string)) |index| self.string_allocations.items[index].marked else true,
+            .table => |table| !self.isTrackedTable(table) or table.marked,
+            .closure => |closure| !self.isTrackedClosure(closure) or closure.marked,
+            .thread, .coroutine_wrapper => |thread| !self.isTrackedThread(thread) or thread.marked,
+            else => true,
+        };
+    }
+
+    fn valueIsWeaklyCleared(self: *State, value: Value) bool {
+        return switch (value) {
+            .table => |table| self.isTrackedTable(table) and !table.marked,
+            .closure => |closure| self.isTrackedClosure(closure) and !closure.marked,
+            .thread, .coroutine_wrapper => |thread| self.isTrackedThread(thread) and !thread.marked,
+            else => false,
+        };
+    }
+
+    fn clearWeakValues(self: *State) void {
+        for (self.table_allocations.items) |table| {
+            if (!table.marked) continue;
+            if (!self.weakMode(table).values) continue;
+            self.clearWeakTableValues(table);
+        }
+    }
+
+    fn clearWeakTables(self: *State) void {
+        for (self.table_allocations.items) |table| {
+            if (!table.marked) continue;
+            const weak = self.weakMode(table);
+            if (weak.values) self.clearWeakTableValues(table);
+            if (weak.keys) self.clearWeakTableKeys(table);
+        }
+    }
+
+    fn clearWeakTableValues(self: *State, table: *Table) void {
+        for (table.array.items) |*value| {
+            if (self.valueIsWeaklyCleared(value.*)) value.* = .nil;
+        }
+        var index: usize = 0;
+        while (index < table.entries.items.len) {
+            if (self.valueIsWeaklyCleared(table.entries.items[index].value)) {
+                _ = table.entries.swapRemove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn clearWeakTableKeys(self: *State, table: *Table) void {
+        var index: usize = 0;
+        while (index < table.entries.items.len) {
+            if (self.valueIsWeaklyCleared(table.entries.items[index].key)) {
+                _ = table.entries.swapRemove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn writeTableBarrier(self: *State, table: *Table, key: Value, value: Value) void {
+        if (!self.is_collecting or !table.marked) return;
+        const weak = self.weakMode(table);
+        if (!weak.keys) self.markValue(key);
+        if (!weak.values and (!weak.keys or !self.valueIsWeaklyCleared(key))) self.markValue(value);
+    }
+
+    fn writeBarrier(self: *State, parent_marked: bool, child: Value) void {
+        if (!self.is_collecting or !parent_marked) return;
+        self.markValue(child);
     }
 
     fn runPendingFinalizers(self: *State, thread: ?*Thread) !void {
@@ -1845,6 +2106,8 @@ pub const State = struct {
         if (!ran_finalizer) return;
         self.resetMarks();
         self.markRoots();
+        self.convergeEphemerons();
+        self.clearWeakValues();
     }
 
     fn sweepStrings(self: *State) void {
@@ -2621,6 +2884,65 @@ test "keeps global table graph alive during collection" {
     const kept_child = kept_root.table.get(.{ .string = key });
     try std.testing.expect(kept_child == .table);
     try std.testing.expect(valuesEqual(kept_child.table.get(.{ .string = "answer" }), .{ .integer = 42 }));
+}
+
+test "weak value tables clear unreachable values" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const weak = try state.newTableWithHints(0, 1);
+    const metatable = try state.newTableWithHints(0, 1);
+    try state.setTable(metatable, .{ .string = try state.intern("__mode") }, .{ .string = try state.intern("v") });
+    try state.setMetatableValue(weak, metatable);
+    try state.globals.put(try state.intern("weak_values"), weak);
+
+    const dead = try state.newTableWithHints(0, 0);
+    try state.setTable(weak, .{ .string = try state.intern("item") }, dead);
+
+    try state.collectGarbage();
+
+    try std.testing.expect(weak.table.get(.{ .string = "item" }) == .nil);
+}
+
+test "weak key tables clear unreachable keys" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const weak = try state.newTableWithHints(0, 1);
+    const metatable = try state.newTableWithHints(0, 1);
+    try state.setTable(metatable, .{ .string = try state.intern("__mode") }, .{ .string = try state.intern("k") });
+    try state.setMetatableValue(weak, metatable);
+    try state.globals.put(try state.intern("weak_keys"), weak);
+
+    const dead_key = try state.newTableWithHints(0, 0);
+    try state.setTable(weak, dead_key, .{ .integer = 1 });
+
+    try state.collectGarbage();
+
+    try std.testing.expectEqual(@as(usize, 0), weak.table.entries.items.len);
+}
+
+test "ephemeron table marks value when key is reachable" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const ephemeron = try state.newTableWithHints(0, 1);
+    const metatable = try state.newTableWithHints(0, 1);
+    try state.setTable(metatable, .{ .string = try state.intern("__mode") }, .{ .string = try state.intern("k") });
+    try state.setMetatableValue(ephemeron, metatable);
+    try state.globals.put(try state.intern("ephemeron"), ephemeron);
+
+    const key = try state.newTableWithHints(0, 0);
+    const value = try state.newTableWithHints(0, 1);
+    try state.setTable(value, .{ .string = try state.intern("answer") }, .{ .integer = 42 });
+    try state.setTable(ephemeron, key, value);
+    try state.globals.put(try state.intern("live_key"), key);
+
+    try state.collectGarbage();
+
+    const kept_value = ephemeron.table.get(key);
+    try std.testing.expect(kept_value == .table);
+    try std.testing.expect(valuesEqual(kept_value.table.get(.{ .string = "answer" }), .{ .integer = 42 }));
 }
 
 test "GC stress preserves live locals during execution" {
