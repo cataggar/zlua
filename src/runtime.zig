@@ -15,7 +15,7 @@ pub const RuntimeError = error{
 
 const max_stack_values: usize = 8192;
 const max_call_frames: usize = 256;
-const max_metamethod_depth: usize = 64;
+const max_metamethod_depth: usize = 15;
 
 pub const Value = union(enum) {
     nil,
@@ -58,7 +58,7 @@ pub const Value = union(enum) {
 
 pub const NativeFn = stdlib.NativeFn;
 
-const ProtectedCallResult = union(enum) {
+pub const ProtectedCallResult = union(enum) {
     success: []Value,
     failure: Value,
 };
@@ -788,6 +788,15 @@ pub const State = struct {
         return frame.proto.line_info.items[@min(pc, frame.proto.line_info.items.len - 1)].line;
     }
 
+    pub fn currentExtraArgs(self: *State, thread: *Thread, level: i64) ?usize {
+        _ = self;
+        if (level < 1) return null;
+        const depth: usize = @intCast(level);
+        if (depth > thread.frames.items.len) return null;
+        const frame = thread.frames.items[thread.frames.items.len - depth];
+        return frame.varargs.len;
+    }
+
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
         try self.setGlobal(name, value);
     }
@@ -857,6 +866,10 @@ pub const State = struct {
     }
 
     pub fn loadSourceAsClosure(self: *State, source: []const u8) !Value {
+        return self.loadSourceAsClosureNamed(source, null);
+    }
+
+    pub fn loadSourceAsClosureNamed(self: *State, source: []const u8, source_name: ?[]const u8) !Value {
         var tree = frontend.parse(self.allocator, source) catch return self.fail("cannot load source");
         defer tree.deinit();
 
@@ -864,6 +877,7 @@ pub const State = struct {
         const proto = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(proto);
         proto.* = compile.compile(self.allocator, &tree) catch return self.fail("cannot compile source");
+        if (source_name) |name| proto.source_name = try proto.arena.allocator().dupe(u8, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);
         errdefer _ = self.proto_allocations.pop();
@@ -1500,7 +1514,7 @@ pub const State = struct {
         return thread.stack.items[base];
     }
 
-    fn protectedCall(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
+    pub fn protectedCall(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
         const frame_count = thread.frames.items.len;
         const frame = thread.frames.items[frame_count - 1];
         const relative_base: bytecode.Register = frame.proto.max_registers;
@@ -1675,8 +1689,24 @@ pub const State = struct {
     }
 
     fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) anyerror!void {
-        const callee = self.get(thread, op.base);
-        const resolved = try self.resolveCall(thread, op);
+        var resolved = try self.resolveCall(thread, op);
+        var depth: usize = 0;
+        while (true) {
+            const callee = self.get(thread, resolved.base);
+            switch (callee) {
+                .closure => break,
+                .coroutine_wrapper => break,
+                else => if (isNativeCallable(callee)) break,
+            }
+
+            if (depth > max_metamethod_depth) return self.fail("'__call' chain too long");
+            const metamethod = try self.getMetamethod(callee, "__call") orelse break;
+            try self.prependCallArgument(thread, resolved, metamethod, callee);
+            resolved.arg_count += 1;
+            depth += 1;
+        }
+
+        const callee = self.get(thread, resolved.base);
         switch (callee) {
             .closure => |closure| {
                 try self.closeActiveToBeClosedInTopFrame(thread, .nil);

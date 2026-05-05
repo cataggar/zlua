@@ -8,8 +8,20 @@ const Thread = runtime.Thread;
 const Value = runtime.Value;
 
 pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const closure = state.loadSourceAsClosure(source) catch {
+    const loaded_source = loadSource(state, thread, op) catch |err| switch (err) {
+        error.LoadReturned => return,
+        else => return err,
+    };
+    defer if (loaded_source.owned) state.allocator.free(loaded_source.source);
+
+    const source = loaded_source.source;
+    if (loadModeError(state, thread, op, source)) |message| {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
+        return;
+    }
+
+    const source_name = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string) runtime.argValue(state, thread, op, 1).string else null;
+    const closure = state.loadSourceAsClosureNamed(source, source_name) catch {
         const unquoted = try removeSyntaxQuotes(state.allocator, source);
         defer state.allocator.free(unquoted);
         const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
@@ -21,7 +33,62 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{closure});
 }
 
+const LoadSource = struct {
+    source: []const u8,
+    owned: bool = false,
+};
+
+fn loadSource(state: *State, thread: *Thread, op: bytecode.Call) !LoadSource {
+    const source_value = runtime.argValue(state, thread, op, 0);
+    if (source_value == .string) return .{ .source = source_value.string };
+    if (!isReaderFunction(source_value)) return .{ .source = try state.expectString(source_value) };
+
+    var source = std.ArrayList(u8).empty;
+    errdefer source.deinit(state.allocator);
+    while (true) {
+        const result = try state.protectedCall(thread, source_value, &.{});
+        const values = switch (result) {
+            .success => |values| values,
+            .failure => |failure| {
+                const message = if (failure == .string) failure.string else "reader function failed";
+                try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
+                return error.LoadReturned;
+            },
+        };
+        defer state.allocator.free(values);
+
+        const chunk = if (values.len == 0) Value.nil else values[0];
+        switch (chunk) {
+            .nil => return .{ .source = try source.toOwnedSlice(state.allocator), .owned = true },
+            .string => |bytes| {
+                if (bytes.len == 0) return .{ .source = try source.toOwnedSlice(state.allocator), .owned = true };
+                try source.appendSlice(state.allocator, bytes);
+            },
+            else => {
+                try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("reader function must return a string") } });
+                return error.LoadReturned;
+            },
+        }
+    }
+}
+
+fn loadModeError(state: *State, thread: *Thread, op: bytecode.Call, source: []const u8) ?[]const u8 {
+    const mode = if (op.arg_count >= 3 and runtime.argValue(state, thread, op, 2) == .string) runtime.argValue(state, thread, op, 2).string else "bt";
+    const binary = std.mem.startsWith(u8, source, "\x1bLua");
+    if (binary and std.mem.indexOfScalar(u8, mode, 'b') == null) return "attempt to load a binary chunk";
+    if (!binary and std.mem.indexOfScalar(u8, mode, 't') == null) return "attempt to load a text chunk";
+    return null;
+}
+
+fn isReaderFunction(value: Value) bool {
+    return switch (value) {
+        .closure, .coroutine_wrapper, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => true,
+        else => false,
+    };
+}
+
 pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    if (op.arg_count == 0) return state.fail("bad argument #1 to 'type' (value expected)");
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(typeName(runtime.argValue(state, thread, op, 0))) }});
 }
 

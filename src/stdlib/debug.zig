@@ -10,8 +10,9 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const target = runtime.argValue(state, thread, op, 0);
     const value = try state.newTableWithHints(0, 8);
     const table = value.table;
-    try table.set(state.allocator, .{ .string = try state.intern("source") }, .{ .string = try state.intern("zlua") });
-    try table.set(state.allocator, .{ .string = try state.intern("short_src") }, .{ .string = try state.intern("zlua") });
+    const source_name = if (target == .closure) target.closure.proto.source_name else "zlua";
+    try table.set(state.allocator, .{ .string = try state.intern("source") }, .{ .string = try state.intern(source_name) });
+    try table.set(state.allocator, .{ .string = try state.intern("short_src") }, .{ .string = try state.intern(source_name) });
     try table.set(state.allocator, .{ .string = try state.intern("linedefined") }, .{ .integer = 0 });
     try table.set(state.allocator, .{ .string = try state.intern("lastlinedefined") }, .{ .integer = 0 });
     try table.set(state.allocator, .{ .string = try state.intern("nups") }, .{ .integer = 0 });
@@ -26,5 +27,7 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try table.set(state.allocator, .{ .string = try state.intern("what") }, .{ .string = try state.intern(what) });
     const currentline: i64 = if (if (target == .integer) state.currentLine(thread, target.integer) else null) |line| @intCast(line) else -1;
     try table.set(state.allocator, .{ .string = try state.intern("currentline") }, .{ .integer = currentline });
+    const extraargs: i64 = if (if (target == .integer) state.currentExtraArgs(thread, target.integer) else null) |count| @intCast(count) else 0;
+    try table.set(state.allocator, .{ .string = try state.intern("extraargs") }, .{ .integer = extraargs });
     try state.returnValues(thread, op.base, op.return_count, &.{value});
 }

@@ -162,6 +162,19 @@ const Parser = struct {
     fn parseGlobalDeclaration(self: *Parser) anyerror!ast.Stmt {
         const attribute = try self.parseOptionalAttribute();
 
+        if (self.match(.keyword_function)) |_| {
+            const name = try self.expectIdentifier();
+            const body = try self.parseFunctionBody();
+            const binding = ast.Binding{ .name = name, .attribute = attribute };
+            const value = try self.newExpr(.{ .function_literal = body });
+            return .{ .global_decl = .{
+                .attribute = attribute,
+                .all = false,
+                .names = try self.singleBindingSlice(binding),
+                .values = try self.singleExprSlice(value),
+            } };
+        }
+
         if (self.match(.star)) |_| {
             return .{ .global_decl = .{ .attribute = attribute, .all = true, .names = &.{}, .values = &.{} } };
         }
@@ -343,6 +356,12 @@ const Parser = struct {
         return slice;
     }
 
+    fn singleBindingSlice(self: *Parser, binding: ast.Binding) anyerror![]const ast.Binding {
+        const slice = try self.allocator.alloc(ast.Binding, 1);
+        slice[0] = binding;
+        return slice;
+    }
+
     fn newExpr(self: *Parser, expr: ast.Expr) anyerror!*ast.Expr {
         const node = try self.allocator.create(ast.Expr);
         node.* = expr;
@@ -481,6 +500,7 @@ test "parses milestone statement families" {
     var tree = try expectParse(
         \\global<const> *
         \\global x, y<const> = 1, 2
+        \\global function gf() return 1 end
         \\local a<const>, b<close> = 1, 2
         \\function t.u:v(a, b, ... rest)
         \\  if a then b = b + 1 elseif b then b = 2 else b = 3 end
@@ -494,10 +514,11 @@ test "parses milestone statement families" {
         \\local function f() return end
     );
     defer tree.deinit();
-    try std.testing.expectEqual(@as(usize, 5), tree.statements.len);
+    try std.testing.expectEqual(@as(usize, 6), tree.statements.len);
     try std.testing.expect(tree.statements[0] == .global_decl);
-    try std.testing.expect(tree.statements[2] == .local_decl);
-    try std.testing.expect(tree.statements[3] == .function_decl);
+    try std.testing.expect(tree.statements[2] == .global_decl);
+    try std.testing.expect(tree.statements[3] == .local_decl);
+    try std.testing.expect(tree.statements[4] == .function_decl);
 }
 
 test "parses expression and table syntax" {

@@ -31,6 +31,7 @@ pub const Proto = struct {
     max_registers: u16 = 0,
     param_count: u16 = 0,
     is_vararg: bool = false,
+    source_name: []const u8 = "zlua",
 
     pub fn init(allocator: std.mem.Allocator) Proto {
         return .{
