@@ -38,6 +38,16 @@ pub const Value = union(enum) {
     native_ipairs_iter,
     native_table_create,
     native_select,
+    native_assert,
+    native_error,
+    native_pcall,
+    native_xpcall,
+    native_debug_traceback,
+};
+
+const ProtectedCallResult = union(enum) {
+    success: []Value,
+    failure: Value,
 };
 
 const Closure = struct {
@@ -213,6 +223,7 @@ pub const State = struct {
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     last_error: ?[]const u8 = null,
+    last_error_value: Value = .nil,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var state = State{
@@ -234,10 +245,18 @@ pub const State = struct {
         try state.globals.put(try state.intern("pairs"), .native_pairs);
         try state.globals.put(try state.intern("ipairs"), .native_ipairs);
         try state.globals.put(try state.intern("select"), .native_select);
+        try state.globals.put(try state.intern("assert"), .native_assert);
+        try state.globals.put(try state.intern("error"), .native_error);
+        try state.globals.put(try state.intern("pcall"), .native_pcall);
+        try state.globals.put(try state.intern("xpcall"), .native_xpcall);
 
         const table_lib = try state.newTableWithHints(0, 1);
         try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
         try state.globals.put(try state.intern("table"), table_lib);
+
+        const debug_lib = try state.newTableWithHints(0, 1);
+        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
+        try state.globals.put(try state.intern("debug"), debug_lib);
         return state;
     }
 
@@ -695,6 +714,11 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
             },
             .native_select => try self.selectValues(thread, resolved),
+            .native_assert => try self.assertValues(thread, resolved),
+            .native_error => try self.errorValue(thread, resolved),
+            .native_pcall => try self.pcallValues(thread, resolved),
+            .native_xpcall => try self.xpcallValues(thread, resolved),
+            .native_debug_traceback => try self.tracebackValue(thread, resolved),
             else => {
                 const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
@@ -728,6 +752,68 @@ pub const State = struct {
         try self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = 1 }, 0);
         try self.runThreadUntil(thread, frame_count);
         return thread.stack.items[base];
+    }
+
+    fn protectedCall(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
+        const frame_count = thread.frames.items.len;
+        const frame = thread.frames.items[frame_count - 1];
+        const relative_base: bytecode.Register = frame.proto.max_registers;
+        const base = frame.base + @as(usize, relative_base);
+        const old_stack_len = thread.stack.items.len;
+        const old_last_result_base = thread.last_result_base;
+        const old_last_result_count = thread.last_result_count;
+        const old_last_error = self.last_error;
+        const old_last_error_value = self.last_error_value;
+
+        try thread.ensureStack(self.allocator, base + 1 + args.len);
+        thread.stack.items[base] = callable;
+        for (args, 0..) |arg, index| thread.stack.items[base + 1 + index] = arg;
+
+        self.last_error = null;
+        self.last_error_value = .nil;
+        self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                const error_value = self.currentErrorValue();
+                self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
+                return .{ .failure = error_value };
+            },
+            else => return err,
+        };
+        self.runThreadUntil(thread, frame_count) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                const error_value = self.currentErrorValue();
+                self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
+                return .{ .failure = error_value };
+            },
+            else => return err,
+        };
+
+        const values = try self.allocator.alloc(Value, thread.last_result_count);
+        for (values, 0..) |*value, index| value.* = thread.stack.items[thread.last_result_base + index];
+        self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value);
+        return .{ .success = values };
+    }
+
+    fn restoreProtectedCall(
+        self: *State,
+        thread: *Thread,
+        frame_count: usize,
+        stack_len: usize,
+        last_result_base: usize,
+        last_result_count: usize,
+        last_error: ?[]const u8,
+        last_error_value: Value,
+    ) void {
+        while (thread.frames.items.len > frame_count) {
+            const frame = thread.frames.items[thread.frames.items.len - 1];
+            self.closeUpvalues(thread, frame.base);
+            thread.frames.items.len -= 1;
+        }
+        thread.stack.items.len = stack_len;
+        thread.last_result_base = last_result_base;
+        thread.last_result_count = last_result_count;
+        self.last_error = last_error;
+        self.last_error_value = last_error_value;
     }
 
     fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
@@ -1009,6 +1095,114 @@ pub const State = struct {
         try self.returnValues(thread, op.base, op.return_count, values.items);
     }
 
+    fn assertValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const condition = argValue(self, thread, op, 0);
+        if (!truthy(condition)) {
+            const message = if (op.arg_count >= 2) argValue(self, thread, op, 1) else Value{ .string = try self.intern("assertion failed!") };
+            return self.throwValue(message);
+        }
+
+        const values = try self.allocator.alloc(Value, op.arg_count);
+        defer self.allocator.free(values);
+        for (values, 0..) |*value, index| value.* = argValue(self, thread, op, @intCast(index));
+        try self.returnValues(thread, op.base, op.return_count, values);
+    }
+
+    fn errorValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const value = argValue(self, thread, op, 0);
+        const level = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse 1 else 1;
+        if (level <= 0 or value != .string) return self.throwValue(value);
+
+        const level_index = std.math.cast(usize, level) orelse return self.throwValue(value);
+        const line = self.lineForErrorLevel(thread, level_index) orelse return self.throwValue(value);
+        const message = try std.fmt.allocPrint(self.allocator, "zlua:{d}: {s}", .{ line, value.string });
+        defer self.allocator.free(message);
+        return self.throwValue(.{ .string = try self.intern(message) });
+    }
+
+    fn pcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (op.arg_count == 0) return self.fail("bad argument #1 to 'pcall'");
+        const args = try self.collectArgs(thread, op, 1);
+        defer self.allocator.free(args);
+
+        const result = try self.protectedCall(thread, argValue(self, thread, op, 0), args);
+        defer freeProtectedResult(self.allocator, result);
+        try self.returnProtectedResult(thread, op.base, op.return_count, result);
+    }
+
+    fn xpcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (op.arg_count < 2) return self.fail("bad argument #2 to 'xpcall'");
+        const args = try self.collectArgs(thread, op, 2);
+        defer self.allocator.free(args);
+
+        const result = try self.protectedCall(thread, argValue(self, thread, op, 0), args);
+        defer freeProtectedResult(self.allocator, result);
+        switch (result) {
+            .success => try self.returnProtectedResult(thread, op.base, op.return_count, result),
+            .failure => |error_value| {
+                const handler_result = try self.protectedCall(thread, argValue(self, thread, op, 1), &.{error_value});
+                defer freeProtectedResult(self.allocator, handler_result);
+                const handled = switch (handler_result) {
+                    .success => |values| if (values.len == 0) Value.nil else values[0],
+                    .failure => Value{ .string = try self.intern("error in error handling") },
+                };
+                try self.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = false }, handled });
+            },
+        }
+    }
+
+    fn tracebackValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+
+        const message = argValue(self, thread, op, 0);
+        if (message != .nil) {
+            try appendValue(self.allocator, &out, message);
+            try out.append(self.allocator, '\n');
+        }
+        try out.appendSlice(self.allocator, "stack traceback:");
+        const level = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse 1 else 1;
+        const skip = if (level <= 0) thread.frames.items.len else std.math.cast(usize, level - 1) orelse thread.frames.items.len;
+        var index = if (skip >= thread.frames.items.len) @as(usize, 0) else thread.frames.items.len - skip;
+        while (index > 0) {
+            index -= 1;
+            const frame = thread.frames.items[index];
+            const line = lineForFrame(frame) orelse 0;
+            try out.appendSlice(self.allocator, "\n\tzlua:");
+            try appendFmt(self.allocator, &out, "{d}", .{line});
+            try out.appendSlice(self.allocator, ": in function");
+        }
+
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(out.items) }});
+    }
+
+    fn lineForErrorLevel(self: *State, thread: *Thread, level: usize) ?usize {
+        _ = self;
+        if (level == 0 or level > thread.frames.items.len) return null;
+        const frame = thread.frames.items[thread.frames.items.len - level];
+        return lineForFrame(frame);
+    }
+
+    fn collectArgs(self: *State, thread: *Thread, op: bytecode.Call, first: u16) ![]Value {
+        if (op.arg_count <= first) return self.allocator.alloc(Value, 0);
+        const args = try self.allocator.alloc(Value, op.arg_count - first);
+        for (args, 0..) |*arg, index| arg.* = argValue(self, thread, op, first + @as(u16, @intCast(index)));
+        return args;
+    }
+
+    fn returnProtectedResult(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, result: ProtectedCallResult) !void {
+        switch (result) {
+            .success => |values| {
+                var returns = std.ArrayList(Value).empty;
+                defer returns.deinit(self.allocator);
+                try returns.append(self.allocator, .{ .boolean = true });
+                try returns.appendSlice(self.allocator, values);
+                try self.returnValues(thread, base, return_count, returns.items);
+            },
+            .failure => |error_value| try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, error_value }),
+        }
+    }
+
     fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
         const table = try self.expectTable(table_value);
         try table.set(self.arena.allocator(), try self.writableTableKey(key_value), value);
@@ -1060,9 +1254,29 @@ pub const State = struct {
         return std.math.cast(u32, integer) orelse self.fail("size too large");
     }
 
+    fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
+        if (self.last_error_value == .nil) return allocator.dupe(u8, @errorName(err));
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(allocator);
+        try appendValue(allocator, &out, self.last_error_value);
+        return allocator.dupe(u8, out.items);
+    }
+
     fn fail(self: *State, message: []const u8) RuntimeError {
         self.last_error = message;
+        self.last_error_value = .{ .string = message };
         return error.RuntimeError;
+    }
+
+    fn throwValue(self: *State, value: Value) RuntimeError {
+        self.last_error = null;
+        self.last_error_value = value;
+        return error.RuntimeError;
+    }
+
+    fn currentErrorValue(self: *State) Value {
+        if (self.last_error != null and self.last_error_value == .nil) return .{ .string = self.last_error.? };
+        return self.last_error_value;
     }
 };
 
@@ -1090,7 +1304,11 @@ pub fn executeSource(allocator: std.mem.Allocator, source: []const u8) !process.
     var state = try State.init(allocator);
     defer state.deinit();
     state.execute(&proto) catch |err| {
-        const detail = state.last_error orelse @errorName(err);
+        const detail = if (state.last_error) |message|
+            message
+        else
+            try state.errorDetailAlloc(allocator, err);
+        defer if (state.last_error == null) allocator.free(detail);
         const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
         defer allocator.free(message);
         return process.ownedResult(allocator, "", message, 1);
@@ -1254,6 +1472,11 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_ipairs_iter => rhs == .native_ipairs_iter,
         .native_table_create => rhs == .native_table_create,
         .native_select => rhs == .native_select,
+        .native_assert => rhs == .native_assert,
+        .native_error => rhs == .native_error,
+        .native_pcall => rhs == .native_pcall,
+        .native_xpcall => rhs == .native_xpcall,
+        .native_debug_traceback => rhs == .native_debug_traceback,
     };
 }
 
@@ -1329,6 +1552,13 @@ fn jump(frame: *CallFrame, offset: bytecode.JumpOffset) void {
     } else {
         frame.pc -= @intCast(-offset);
     }
+}
+
+fn lineForFrame(frame: CallFrame) ?usize {
+    if (frame.proto.line_info.items.len == 0) return null;
+    const pc = if (frame.pc == 0) 0 else frame.pc - 1;
+    if (pc >= frame.proto.line_info.items.len) return null;
+    return frame.proto.line_info.items[pc].line;
 }
 
 fn copyStackValues(thread: *Thread, dest: usize, source: usize, count: usize) void {
@@ -1473,6 +1703,18 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .native_ipairs_iter => try out.appendSlice(allocator, "function: ipairs iterator"),
         .native_table_create => try out.appendSlice(allocator, "function: table.create"),
         .native_select => try out.appendSlice(allocator, "function: select"),
+        .native_assert => try out.appendSlice(allocator, "function: assert"),
+        .native_error => try out.appendSlice(allocator, "function: error"),
+        .native_pcall => try out.appendSlice(allocator, "function: pcall"),
+        .native_xpcall => try out.appendSlice(allocator, "function: xpcall"),
+        .native_debug_traceback => try out.appendSlice(allocator, "function: debug.traceback"),
+    }
+}
+
+fn freeProtectedResult(allocator: std.mem.Allocator, result: ProtectedCallResult) void {
+    switch (result) {
+        .success => |values| allocator.free(values),
+        .failure => {},
     }
 }
 
