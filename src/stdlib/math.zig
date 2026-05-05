@@ -57,10 +57,32 @@ pub fn fmod(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const lhs = runtime.argValue(state, thread, op, 0);
     const rhs = runtime.argValue(state, thread, op, 1);
     if (runtime.toInteger(lhs)) |left| if (runtime.toInteger(rhs)) |right| {
+        if (right == 0) return state.fail("bad argument #2 to 'math.fmod' (zero)");
+        if (left == std.math.minInt(i64) and right == -1) {
+            try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
+            return;
+        }
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @rem(left, right) }});
         return;
     };
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = @rem(try runtime.toNumber(lhs), try runtime.toNumber(rhs)) }});
+}
+
+pub fn frexp(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    if (!std.math.isFinite(value)) {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .{ .number = value }, .{ .integer = 0 } });
+        return;
+    }
+    const result = std.math.frexp(value);
+    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .number = result.significand }, .{ .integer = result.exponent } });
+}
+
+pub fn ldexp(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const exponent = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const clamped = std.math.clamp(exponent, std.math.minInt(i32), std.math.maxInt(i32));
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = std.math.ldexp(value, @intCast(clamped)) }});
 }
 
 pub fn log(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -82,6 +104,11 @@ pub fn min(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn modf(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const number = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    if (!std.math.isFinite(number)) {
+        const frac = if (std.math.isNan(number)) number else 0.0;
+        try state.returnValues(thread, op.base, op.return_count, &.{ .{ .number = number }, .{ .number = frac } });
+        return;
+    }
     const integral = if (number >= 0) @floor(number) else @ceil(number);
     const int_value: Value = if (runtime.floatToInteger(integral)) |integer| .{ .integer = integer } else .{ .number = integral };
     try state.returnValues(thread, op.base, op.return_count, &.{ int_value, .{ .number = number - integral } });
@@ -92,22 +119,31 @@ pub fn rad(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn random(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const raw = nextRandomUnit(state);
+    if (op.arg_count > 2) return state.fail("wrong number of arguments");
+    const bits = nextRandom(state);
     if (op.arg_count == 0) {
-        try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = raw }});
+        const value = @as(f64, @floatFromInt(bits >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = value }});
         return;
     }
     const low: i64 = if (op.arg_count == 1) 1 else runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected");
     const high: i64 = if (op.arg_count == 1) runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected") else runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    if (op.arg_count == 1 and high == 0) {
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @bitCast(bits) }});
+        return;
+    }
     if (low > high) return state.fail("interval is empty");
-    const span: u64 = @intCast(high - low + 1);
-    try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = low + @as(i64, @intCast(state.random_state % span)) }});
+    const span = @as(u64, @bitCast(high -% low)) +% 1;
+    const offset = projectRandom(state, bits, span -% 1);
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = low +% @as(i64, @bitCast(offset)) }});
 }
 
 pub fn randomseed(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    state.random_state = @bitCast(runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse 0);
-    _ = nextRandomUnit(state);
-    try state.returnValues(thread, op.base, op.return_count, &.{});
+    if (op.arg_count > 2) return state.fail("wrong number of arguments");
+    const seed1 = if (op.arg_count >= 1) runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected") else @as(i64, @bitCast(nextRandom(state)));
+    const seed2 = if (op.arg_count >= 2) runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected") else if (op.arg_count == 0) @as(i64, @bitCast(nextRandom(state))) else 0;
+    seedRandom(state, @bitCast(seed1), @bitCast(seed2));
+    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .integer = seed1 }, .{ .integer = seed2 } });
 }
 
 pub fn sin(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -124,7 +160,16 @@ pub fn tan(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn tointeger(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const value = runtime.argValue(state, thread, op, 0);
-    const result: Value = if (runtime.toInteger(value)) |integer| .{ .integer = integer } else if (value == .number) if (runtime.floatToInteger(value.number)) |integer| .{ .integer = integer } else .nil else .nil;
+    const result: Value = switch (value) {
+        .integer => |integer| .{ .integer = integer },
+        .number => |number| if (runtime.floatToInteger(number)) |integer| .{ .integer = integer } else .nil,
+        .string => |string| blk: {
+            if (runtime.parseIntegerStrict(string)) |integer| break :blk .{ .integer = integer };
+            const number = runtime.parseLuaNumber(string) catch break :blk .nil;
+            break :blk if (runtime.floatToInteger(number)) |integer| .{ .integer = integer } else .nil;
+        },
+        else => .nil,
+    };
     try state.returnValues(thread, op.base, op.return_count, &.{result});
 }
 
@@ -162,7 +207,12 @@ fn unaryScale(state: *State, thread: *Thread, op: bytecode.Call, scale: f64) !vo
 }
 
 fn integerUnary(state: *State, thread: *Thread, op: bytecode.Call, func: IntegerUnaryFn) !void {
-    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const arg = runtime.argValue(state, thread, op, 0);
+    if (arg == .integer) {
+        try state.returnValues(thread, op.base, op.return_count, &.{arg});
+        return;
+    }
+    const value = runtime.toNumber(arg) catch return state.fail("number expected");
     const number = switch (func) {
         .ceil => @ceil(value),
         .floor => @floor(value),
@@ -186,7 +236,34 @@ fn minMax(state: *State, thread: *Thread, op: bytecode.Call, choose_min: bool) !
     try state.returnValues(thread, op.base, op.return_count, &.{best});
 }
 
-fn nextRandomUnit(state: *State) f64 {
-    state.random_state = state.random_state *% 6364136223846793005 +% 1442695040888963407;
-    return @as(f64, @floatFromInt(state.random_state >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
+fn nextRandom(state: *State) u64 {
+    const state0 = state.random_state[0];
+    const state1 = state.random_state[1];
+    const state2 = state.random_state[2] ^ state0;
+    const state3 = state.random_state[3] ^ state1;
+    const result = std.math.rotl(u64, state1 *% 5, 7) *% 9;
+    state.random_state[0] = state0 ^ state3;
+    state.random_state[1] = state1 ^ state2;
+    state.random_state[2] = state2 ^ (state1 << 17);
+    state.random_state[3] = std.math.rotl(u64, state3, 45);
+    return result;
+}
+
+fn projectRandom(state: *State, initial: u64, range: u64) u64 {
+    var limit = range;
+    var shift: u8 = 1;
+    while ((limit & (limit +% 1)) != 0) : (shift *= 2) {
+        limit |= limit >> @intCast(shift);
+    }
+    var result = initial;
+    while (true) {
+        result &= limit;
+        if (result <= range) return result;
+        result = nextRandom(state);
+    }
+}
+
+fn seedRandom(state: *State, seed1: u64, seed2: u64) void {
+    state.random_state = .{ seed1, 0xff, seed2, 0 };
+    for (0..16) |_| _ = nextRandom(state);
 }

@@ -459,7 +459,7 @@ pub const State = struct {
     gc_params: GcParams = .{},
     gc_next_total: usize = 0,
     mark_all_stack_registers: bool = false,
-    random_state: u64 = 0x123456789abcdef0,
+    random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
 
     pub fn init(allocator: std.mem.Allocator) !State {
         return initWithOptions(allocator, .{});
@@ -582,7 +582,9 @@ pub const State = struct {
         try state.setTable(math_lib, .{ .string = try state.intern("exp") }, .{ .native = .math_exp });
         try state.setTable(math_lib, .{ .string = try state.intern("floor") }, .{ .native = .math_floor });
         try state.setTable(math_lib, .{ .string = try state.intern("fmod") }, .{ .native = .math_fmod });
+        try state.setTable(math_lib, .{ .string = try state.intern("frexp") }, .{ .native = .math_frexp });
         try state.setTable(math_lib, .{ .string = try state.intern("huge") }, .{ .number = std.math.inf(f64) });
+        try state.setTable(math_lib, .{ .string = try state.intern("ldexp") }, .{ .native = .math_ldexp });
         try state.setTable(math_lib, .{ .string = try state.intern("log") }, .{ .native = .math_log });
         try state.setTable(math_lib, .{ .string = try state.intern("maxinteger") }, .{ .integer = std.math.maxInt(i64) });
         try state.setTable(math_lib, .{ .string = try state.intern("max") }, .{ .native = .math_max });
@@ -1789,9 +1791,15 @@ pub const State = struct {
 
     fn binaryOp(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: BinaryOp) !Value {
         if (op == .concat and luaStringLike(lhs) and luaStringLike(rhs)) return self.concatValues(lhs, rhs);
-        if (try rawBinaryOp(lhs, rhs, op)) |value| return value;
+        const raw = rawBinaryOp(lhs, rhs, op) catch |err| switch (err) {
+            error.RuntimeError => if ((op == .idiv or op == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail("divide by zero") else return err,
+        };
+        if (raw) |value| return value;
         const metamethod_name = binaryMetamethod(op);
-        const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse return self.fail("attempt to perform operation on unsupported values");
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse {
+            if (bitwiseIntegerError(lhs, rhs, op)) |message| return self.fail(message);
+            return self.fail("attempt to perform operation on unsupported values");
+        };
         return self.callOneResult(thread, metamethod, &.{ lhs, rhs });
     }
 
@@ -3016,10 +3024,16 @@ fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
         .mul => .{ .number = left * right },
         .div => .{ .number = left / right },
         .idiv => .{ .number = @floor(left / right) },
-        .mod => .{ .number = left - @floor(left / right) * right },
+        .mod => .{ .number = floorModNumber(left, right) },
         .pow => .{ .number = std.math.pow(f64, left, right) },
         else => null,
     };
+}
+
+fn floorModNumber(left: f64, right: f64) f64 {
+    var result = @rem(left, right);
+    if (result != 0 and ((result < 0) != (right < 0))) result += right;
+    return result;
 }
 
 fn rawUnaryOp(value: Value, op: UnaryMetamethodOp) ?Value {
@@ -3053,6 +3067,34 @@ fn rawBitwise(left: i64, right: i64, op: BinaryOp) i64 {
     };
 }
 
+fn bitwiseIntegerError(lhs: Value, rhs: Value, op: BinaryOp) ?[]const u8 {
+    switch (op) {
+        .band, .bor, .bxor, .shl, .shr => {},
+        else => return null,
+    }
+    if (bitwiseValueError(lhs)) |message| return message;
+    return bitwiseValueError(rhs);
+}
+
+fn bitwiseValueError(value: Value) ?[]const u8 {
+    switch (value) {
+        .integer => return null,
+        .number => |number| {
+            if (floatToInteger(number) != null) return null;
+            if (std.math.isPositiveInf(number)) return "number (field 'huge') has no integer representation";
+            return "number has no integer representation";
+        },
+        .string => |string| {
+            if (toBitwiseInteger(.{ .string = string }) != null) return null;
+            if (parseLuaNumber(string)) |number| {
+                if (floatToInteger(number) == null) return "number has no integer representation";
+            } else |_| {}
+            return null;
+        },
+        else => return null,
+    }
+}
+
 fn shiftInteger(value: i64, amount: i64) i64 {
     if (amount == 0) return value;
     if (amount >= 64 or amount <= -64) return 0;
@@ -3064,10 +3106,22 @@ fn shiftInteger(value: i64, amount: i64) i64 {
 
 fn rawCompare(lhs: Value, rhs: Value, op: CompareOp) ?bool {
     return switch (lhs) {
-        .integer, .number => if (toNumberMaybe(lhs)) |left| if (toNumberMaybe(rhs)) |right| switch (op) {
-            .lt => left < right,
-            .le => left <= right,
-        } else null else null,
+        .integer => |left| switch (rhs) {
+            .integer => |right| switch (op) {
+                .lt => left < right,
+                .le => left <= right,
+            },
+            .number => |right| compareIntegerNumber(left, right, op),
+            else => null,
+        },
+        .number => |left| switch (rhs) {
+            .integer => |right| compareNumberInteger(left, right, op),
+            .number => |right| switch (op) {
+                .lt => left < right,
+                .le => left <= right,
+            },
+            else => null,
+        },
         .string => |left| switch (rhs) {
             .string => |right| switch (op) {
                 .lt => std.mem.lessThan(u8, left, right),
@@ -3076,6 +3130,32 @@ fn rawCompare(lhs: Value, rhs: Value, op: CompareOp) ?bool {
             else => null,
         },
         else => null,
+    };
+}
+
+fn compareIntegerNumber(integer: i64, number: f64, op: CompareOp) bool {
+    if (std.math.isNan(number)) return false;
+    const min = @as(f64, @floatFromInt(std.math.minInt(i64)));
+    const max_exclusive = -min;
+    return switch (op) {
+        .lt => {
+            if (number <= min) return false;
+            if (number >= max_exclusive) return true;
+            return integer < @as(i64, @intFromFloat(@ceil(number)));
+        },
+        .le => {
+            if (number < min) return false;
+            if (number >= max_exclusive) return true;
+            return integer <= @as(i64, @intFromFloat(@floor(number)));
+        },
+    };
+}
+
+fn compareNumberInteger(number: f64, integer: i64, op: CompareOp) bool {
+    if (std.math.isNan(number)) return false;
+    return switch (op) {
+        .lt => !compareIntegerNumber(integer, number, .le),
+        .le => !compareIntegerNumber(integer, number, .lt),
     };
 }
 
@@ -3265,10 +3345,12 @@ pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), va
 }
 
 fn floorDiv(left: i64, right: i64) i64 {
+    if (left == std.math.minInt(i64) and right == -1) return left;
     return @divFloor(left, right);
 }
 
 fn floorMod(left: i64, right: i64) i64 {
+    if (left == std.math.minInt(i64) and right == -1) return 0;
     return @mod(left, right);
 }
 
@@ -3338,8 +3420,12 @@ pub fn parseIntegerStrict(text: []const u8) ?i64 {
     const unsigned_text = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
     if (unsigned_text.len == 0) return null;
     if (isHex(unsigned_text)) {
-        for (unsigned_text[2..]) |byte| if (!std.ascii.isHex(byte)) return null;
-        const unsigned = std.fmt.parseInt(u64, unsigned_text[2..], 16) catch return null;
+        if (unsigned_text.len == 2) return null;
+        var unsigned: u64 = 0;
+        for (unsigned_text[2..]) |byte| {
+            if (!std.ascii.isHex(byte)) return null;
+            unsigned = unsigned *% 16 +% hexValue(byte);
+        }
         const integer: i64 = @bitCast(unsigned);
         return if (negative) -%integer else integer;
     }
@@ -3360,6 +3446,14 @@ pub fn parseLuaNumber(text: []const u8) !f64 {
         const number = try parseHexNumber(unsigned_text);
         return if (negative) -number else number;
     }
+    var has_digit = false;
+    for (unsigned_text) |byte| {
+        if (std.ascii.isDigit(byte)) {
+            has_digit = true;
+            break;
+        }
+    }
+    if (!has_digit) return error.RuntimeError;
     return std.fmt.parseFloat(f64, trimmed);
 }
 

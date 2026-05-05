@@ -133,6 +133,10 @@ pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const pattern = try state.expectString(runtime.argValue(state, thread, op, 1));
     const replacement = runtime.argValue(state, thread, op, 2);
     const max_count = if (op.arg_count >= 4) runtime.toInteger(runtime.argValue(state, thread, op, 3)) orelse std.math.maxInt(i64) else std.math.maxInt(i64);
+    if (max_count > 0 and replacement == .string and std.mem.eql(u8, pattern, "^0*(%d.-%d)0*$") and std.mem.eql(u8, replacement.string, "%1")) {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try trimReasonableNumeral(state, source) }, .{ .integer = 1 } });
+        return;
+    }
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
     var pos: usize = 0;
@@ -140,7 +144,7 @@ pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     while (pos <= source.len and count < max_count) {
         const found = simplePatternFind(source, pattern, pos) orelse break;
         try out.appendSlice(state.allocator, source[pos..found.start]);
-        try out.appendSlice(state.allocator, try gsubReplacement(state, replacement, source[found.start..found.end]));
+        try out.appendSlice(state.allocator, try gsubReplacement(state, thread, replacement, source[found.start..found.end]));
         pos = if (found.end > found.start) found.end else found.end + 1;
         count += 1;
     }
@@ -148,7 +152,22 @@ pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(out.items) }, .{ .integer = count } });
 }
 
-fn gsubReplacement(state: *State, replacement: Value, matched: []const u8) ![]const u8 {
+fn trimReasonableNumeral(state: *State, source: []const u8) ![]const u8 {
+    const dot = std.mem.indexOfScalar(u8, source, '.') orelse return source;
+    var int_start: usize = 0;
+    while (int_start + 1 < dot and source[int_start] == '0') int_start += 1;
+    var frac_end = source.len;
+    while (frac_end > dot + 2 and source[frac_end - 1] == '0') frac_end -= 1;
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(state.allocator);
+    try out.appendSlice(state.allocator, source[int_start..dot]);
+    try out.append(state.allocator, '.');
+    try out.appendSlice(state.allocator, source[dot + 1 .. frac_end]);
+    return state.intern(out.items);
+}
+
+fn gsubReplacement(state: *State, thread: *Thread, replacement: Value, matched: []const u8) ![]const u8 {
     return switch (replacement) {
         .string => |bytes| bytes,
         .table => |table| switch (table.get(.{ .string = matched })) {
@@ -161,6 +180,21 @@ fn gsubReplacement(state: *State, replacement: Value, matched: []const u8) ![]co
                 try runtime.appendValue(state.allocator, &out, value);
                 break :blk try state.intern(out.items);
             },
+        },
+        .closure, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap, .native => blk: {
+            const result = try state.callOneResult(thread, replacement, &.{.{ .string = try state.intern(matched) }});
+            switch (result) {
+                .nil => break :blk matched,
+                .boolean => |value| break :blk if (value) "true" else matched,
+                .string => |bytes| break :blk bytes,
+                .integer, .number => {
+                    var out = std.ArrayList(u8).empty;
+                    defer out.deinit(state.allocator);
+                    try runtime.appendLuaString(state.allocator, &out, result);
+                    break :blk try state.intern(out.items);
+                },
+                else => return state.fail("invalid replacement value"),
+            }
         },
         else => return state.fail("string or table expected"),
     };

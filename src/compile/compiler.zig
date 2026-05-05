@@ -42,17 +42,20 @@ const PreparedTarget = union(enum) {
 
 const Scope = struct {
     local_start: usize,
+    label_start: usize,
     next_register: bytecode.Register,
 };
 
 const Label = struct {
     name: []const u8,
     pc: usize,
+    scope_depth: usize,
 };
 
 const PendingGoto = struct {
     name: []const u8,
     pc: usize,
+    scope_depth: usize,
 };
 
 const Loop = struct {
@@ -387,14 +390,24 @@ const FunctionCompiler = struct {
     fn compileGoto(self: *FunctionCompiler, name: ast.Identifier) !void {
         _ = try self.emit(.{ .close = 0 });
         const pc = try self.emit(.{ .jmp = 0 });
-        try self.gotos.append(self.allocator, .{ .name = name.name, .pc = pc });
+        var label_index = self.labels.items.len;
+        while (label_index > 0) {
+            label_index -= 1;
+            const label = self.labels.items[label_index];
+            if (label.scope_depth <= self.scopes.items.len and std.mem.eql(u8, label.name, name.name)) {
+                try self.proto.patchJump(pc, label.pc);
+                return;
+            }
+        }
+        try self.gotos.append(self.allocator, .{ .name = name.name, .pc = pc, .scope_depth = self.scopes.items.len });
     }
 
     fn compileLabel(self: *FunctionCompiler, name: ast.Identifier) !void {
-        try self.labels.append(self.allocator, .{ .name = name.name, .pc = self.proto.pc() });
+        const label: Label = .{ .name = name.name, .pc = self.proto.pc(), .scope_depth = self.scopes.items.len };
+        try self.labels.append(self.allocator, label);
         var index: usize = 0;
         while (index < self.gotos.items.len) {
-            if (std.mem.eql(u8, self.gotos.items[index].name, name.name)) {
+            if (self.gotos.items[index].scope_depth >= label.scope_depth and std.mem.eql(u8, self.gotos.items[index].name, name.name)) {
                 try self.proto.patchJump(self.gotos.items[index].pc, self.proto.pc());
                 _ = self.gotos.swapRemove(index);
             } else {
@@ -819,7 +832,7 @@ const FunctionCompiler = struct {
     }
 
     fn enterScope(self: *FunctionCompiler) !void {
-        try self.scopes.append(self.allocator, .{ .local_start = self.locals.items.len, .next_register = self.next_register });
+        try self.scopes.append(self.allocator, .{ .local_start = self.locals.items.len, .label_start = self.labels.items.len, .next_register = self.next_register });
     }
 
     fn leaveScope(self: *FunctionCompiler) !void {
@@ -837,6 +850,7 @@ const FunctionCompiler = struct {
         }
         if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
         self.locals.items.len = scope.local_start;
+        self.labels.items.len = scope.label_start;
         self.next_register = scope.next_register;
         self.scopes.items.len -= 1;
     }
