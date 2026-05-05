@@ -18,7 +18,39 @@ pub const Value = union(enum) {
     integer: i64,
     number: f64,
     string: []const u8,
+    table: *Table,
     native_print,
+    native_tostring,
+};
+
+const TableEntry = struct {
+    key: Value,
+    value: Value,
+};
+
+const Table = struct {
+    entries: std.ArrayList(TableEntry) = .empty,
+
+    fn get(self: Table, key: Value) Value {
+        for (self.entries.items) |entry| {
+            if (valuesEqual(entry.key, key)) return entry.value;
+        }
+        return .nil;
+    }
+
+    fn set(self: *Table, allocator: std.mem.Allocator, key: Value, value: Value) !void {
+        for (self.entries.items, 0..) |entry, index| {
+            if (valuesEqual(entry.key, key)) {
+                if (value == .nil) {
+                    _ = self.entries.swapRemove(index);
+                } else {
+                    self.entries.items[index].value = value;
+                }
+                return;
+            }
+        }
+        if (value != .nil) try self.entries.append(allocator, .{ .key = key, .value = value });
+    }
 };
 
 pub const Thread = struct {
@@ -50,6 +82,7 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     globals: std.StringHashMap(Value),
+    strings: std.StringHashMap([]const u8),
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     last_error: ?[]const u8 = null,
@@ -59,15 +92,18 @@ pub const State = struct {
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .globals = std.StringHashMap(Value).init(allocator),
+            .strings = std.StringHashMap([]const u8).init(allocator),
         };
         errdefer state.deinit();
-        try state.globals.put(try state.arena.allocator().dupe(u8, "print"), .native_print);
+        try state.globals.put(try state.intern("print"), .native_print);
+        try state.globals.put(try state.intern("tostring"), .native_tostring);
         return state;
     }
 
     pub fn deinit(self: *State) void {
         self.stdout.deinit(self.allocator);
         self.stderr.deinit(self.allocator);
+        self.strings.deinit();
         self.globals.deinit();
         self.arena.deinit();
         self.* = undefined;
@@ -100,10 +136,17 @@ pub const State = struct {
                 .mod => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .mod)),
                 .pow => |op| self.set(thread, op.dest, try numericBinary(self.get(thread, op.left), self.get(thread, op.right), .pow)),
                 .unm => |op| self.set(thread, op.dest, try numericUnary(self.get(thread, op.source), .negate)),
+                .concat => |op| self.set(thread, op.dest, try self.concatValues(self.get(thread, op.left), self.get(thread, op.right))),
                 .eq => |op| self.set(thread, op.dest, .{ .boolean = valuesEqual(self.get(thread, op.left), self.get(thread, op.right)) }),
                 .lt => |op| self.set(thread, op.dest, .{ .boolean = try lessThan(self.get(thread, op.left), self.get(thread, op.right)) }),
                 .le => |op| self.set(thread, op.dest, .{ .boolean = try lessEqual(self.get(thread, op.left), self.get(thread, op.right)) }),
                 .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
+                .len => |op| self.set(thread, op.dest, try self.lengthOf(self.get(thread, op.source))),
+                .new_table => |op| self.set(thread, op.dest, try self.newTable()),
+                .get_table => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), self.get(thread, op.key))),
+                .set_table => |op| try self.setTable(self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
+                .get_field => |op| self.set(thread, op.dest, try self.getTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) })),
+                .set_field => |op| try self.setTable(self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
                 .jmp => |offset| jump(frame, offset),
                 .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) jump(frame, op.offset),
                 .test_set => |op| {
@@ -113,7 +156,7 @@ pub const State = struct {
                 },
                 .call => |op| try self.callNative(thread, op),
                 .ret => return,
-                .band, .bor, .bxor, .bnot, .shl, .shr, .len, .concat, .get_upvalue, .set_upvalue, .get_table, .set_table, .get_field, .set_field, .new_table, .set_list, .tail_call, .vararg, .closure, .close, .for_prep, .for_loop, .tfor_prep, .tfor_call, .tfor_loop => return self.fail("unsupported runtime opcode"),
+                .band, .bor, .bxor, .bnot, .shl, .shr, .get_upvalue, .set_upvalue, .set_list, .tail_call, .vararg, .closure, .close, .for_prep, .for_loop, .tfor_prep, .tfor_call, .tfor_loop => return self.fail("unsupported runtime opcode"),
             }
         }
     }
@@ -127,7 +170,7 @@ pub const State = struct {
     }
 
     fn setGlobal(self: *State, name: []const u8, value: Value) !void {
-        const key = if (self.globals.contains(name)) name else try self.arena.allocator().dupe(u8, name);
+        const key = if (self.globals.contains(name)) name else try self.intern(name);
         try self.globals.put(key, value);
     }
 
@@ -135,10 +178,17 @@ pub const State = struct {
         return switch (constant) {
             .nil => .nil,
             .boolean => |value| .{ .boolean = value },
-            .integer => |lexeme| .{ .integer = try parseInteger(lexeme) },
-            .number => |lexeme| .{ .number = try std.fmt.parseFloat(f64, lexeme) },
+            .integer => |lexeme| try parseIntegerLiteral(lexeme),
+            .number => |lexeme| .{ .number = try parseLuaNumber(lexeme) },
             .string => |lexeme| .{ .string = try self.decodeStringLiteral(lexeme) },
         };
+    }
+
+    fn intern(self: *State, bytes: []const u8) ![]const u8 {
+        if (self.strings.get(bytes)) |interned| return interned;
+        const interned = try self.arena.allocator().dupe(u8, bytes);
+        try self.strings.put(interned, interned);
+        return interned;
     }
 
     fn decodeStringLiteral(self: *State, lexeme: []const u8) ![]const u8 {
@@ -188,6 +238,21 @@ pub const State = struct {
                     try out.append(self.allocator, @intCast(value));
                 },
                 'z' => while (index < lexeme.len - 1 and std.ascii.isWhitespace(lexeme[index])) : (index += 1) {},
+                'u' => {
+                    if (index >= lexeme.len - 1 or lexeme[index] != '{') return self.fail("invalid unicode escape");
+                    index += 1;
+                    var value: u32 = 0;
+                    var count: usize = 0;
+                    while (index < lexeme.len - 1 and lexeme[index] != '}') : (index += 1) {
+                        value = value * 16 + hexValue(lexeme[index]);
+                        count += 1;
+                    }
+                    if (count == 0 or index >= lexeme.len - 1 or lexeme[index] != '}' or value > 0x10ffff) return self.fail("invalid unicode escape");
+                    index += 1;
+                    var encoded: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(@intCast(value), &encoded) catch return self.fail("invalid unicode escape");
+                    try out.appendSlice(self.allocator, encoded[0..len]);
+                },
                 '\n' => {},
                 '\r' => {
                     if (index < lexeme.len - 1 and lexeme[index] == '\n') index += 1;
@@ -196,7 +261,7 @@ pub const State = struct {
             }
         }
 
-        const bytes = try self.arena.allocator().dupe(u8, out.items);
+        const bytes = try self.intern(out.items);
         out.deinit(self.allocator);
         return bytes;
     }
@@ -212,7 +277,52 @@ pub const State = struct {
         } else if (std.mem.startsWith(u8, content, "\n") or std.mem.startsWith(u8, content, "\r")) {
             content = content[1..];
         }
-        return self.arena.allocator().dupe(u8, content);
+        return self.intern(content);
+    }
+
+    fn newTable(self: *State) !Value {
+        const table = try self.arena.allocator().create(Table);
+        table.* = .{};
+        return .{ .table = table };
+    }
+
+    fn getTable(self: *State, table_value: Value, key_value: Value) !Value {
+        const table = switch (table_value) {
+            .table => |table| table,
+            else => return self.fail("attempt to index a non-table value"),
+        };
+        return table.get(try self.tableKey(key_value));
+    }
+
+    fn setTable(self: *State, table_value: Value, key_value: Value, value: Value) !void {
+        const table = switch (table_value) {
+            .table => |table| table,
+            else => return self.fail("attempt to index a non-table value"),
+        };
+        try table.set(self.arena.allocator(), try self.tableKey(key_value), value);
+    }
+
+    fn tableKey(self: *State, value: Value) !Value {
+        return switch (value) {
+            .nil => self.fail("table index is nil"),
+            .number => |number| if (std.math.isNan(number)) self.fail("table index is NaN") else if (floatToInteger(number)) |integer| .{ .integer = integer } else value,
+            else => value,
+        };
+    }
+
+    fn lengthOf(self: *State, value: Value) !Value {
+        return switch (value) {
+            .string => |string| .{ .integer = @intCast(string.len) },
+            else => self.fail("attempt to get length of a non-string value"),
+        };
+    }
+
+    fn concatValues(self: *State, lhs: Value, rhs: Value) !Value {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try appendLuaString(self.allocator, &out, lhs);
+        try appendLuaString(self.allocator, &out, rhs);
+        return .{ .string = try self.intern(out.items) };
     }
 
     fn callNative(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -225,6 +335,14 @@ pub const State = struct {
                 }
                 try self.stdout.append(self.allocator, '\n');
                 for (0..op.return_count) |index| self.set(thread, op.base + @as(bytecode.Register, @intCast(index)), .nil);
+            },
+            .native_tostring => {
+                var out = std.ArrayList(u8).empty;
+                defer out.deinit(self.allocator);
+                const value = if (op.arg_count == 0) Value.nil else self.get(thread, op.base + 1);
+                try appendValue(self.allocator, &out, value);
+                if (op.return_count > 0) self.set(thread, op.base, .{ .string = try self.intern(out.items) });
+                for (1..op.return_count) |index| self.set(thread, op.base + @as(bytecode.Register, @intCast(index)), .nil);
             },
             else => return self.fail("attempt to call a non-function value"),
         }
@@ -332,7 +450,9 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
             else => false,
         },
         .string => |value| rhs == .string and std.mem.eql(u8, value, rhs.string),
+        .table => |value| rhs == .table and value == rhs.table,
         .native_print => rhs == .native_print,
+        .native_tostring => rhs == .native_tostring,
     };
 }
 
@@ -362,6 +482,7 @@ fn truthy(value: Value) bool {
 fn toInteger(value: Value) ?i64 {
     return switch (value) {
         .integer => |integer| integer,
+        .string => |string| parseIntegerStrict(string),
         else => null,
     };
 }
@@ -370,8 +491,16 @@ fn toNumber(value: Value) !f64 {
     return switch (value) {
         .integer => |integer| @floatFromInt(integer),
         .number => |number| number,
+        .string => |string| parseLuaNumber(string),
         else => error.RuntimeError,
     };
+}
+
+fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
+    switch (value) {
+        .integer, .number, .string => try appendValue(allocator, out, value),
+        else => return error.RuntimeError,
+    }
 }
 
 fn floorDiv(left: i64, right: i64) i64 {
@@ -394,11 +523,92 @@ fn constantString(proto: *const proto_mod.Proto, index: bytecode.ConstantIndex) 
     return proto.constants.items[index].string;
 }
 
-fn parseInteger(lexeme: []const u8) !i64 {
-    if (std.mem.startsWith(u8, lexeme, "0x") or std.mem.startsWith(u8, lexeme, "0X")) {
-        return std.fmt.parseInt(i64, lexeme[2..], 16);
+fn parseIntegerLiteral(lexeme: []const u8) !Value {
+    if (isHex(lexeme)) {
+        const unsigned = try std.fmt.parseInt(u64, lexeme[2..], 16);
+        return .{ .integer = @as(i64, @bitCast(unsigned)) };
     }
-    return std.fmt.parseInt(i64, lexeme, 10);
+    if (std.fmt.parseInt(i64, lexeme, 10)) |integer| {
+        return .{ .integer = integer };
+    } else |_| {
+        return .{ .number = try std.fmt.parseFloat(f64, lexeme) };
+    }
+}
+
+fn parseIntegerStrict(text: []const u8) ?i64 {
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return null;
+    if (isHex(trimmed)) {
+        for (trimmed[2..]) |byte| if (!std.ascii.isHex(byte)) return null;
+        const unsigned = std.fmt.parseInt(u64, trimmed[2..], 16) catch return null;
+        return @as(i64, @bitCast(unsigned));
+    }
+    for (trimmed, 0..) |byte, index| {
+        if (index == 0 and (byte == '+' or byte == '-')) continue;
+        if (!std.ascii.isDigit(byte)) return null;
+    }
+    return std.fmt.parseInt(i64, trimmed, 10) catch null;
+}
+
+fn parseLuaNumber(text: []const u8) !f64 {
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return error.RuntimeError;
+    if (isHex(trimmed)) return parseHexNumber(trimmed);
+    return std.fmt.parseFloat(f64, trimmed);
+}
+
+fn parseHexNumber(text: []const u8) !f64 {
+    var index: usize = 2;
+    var value: f64 = 0;
+    var digits: usize = 0;
+    while (index < text.len and std.ascii.isHex(text[index])) : (index += 1) {
+        value = value * 16 + @as(f64, @floatFromInt(hexValue(text[index])));
+        digits += 1;
+    }
+    if (index < text.len and text[index] == '.') {
+        index += 1;
+        var place: f64 = 1.0 / 16.0;
+        while (index < text.len and std.ascii.isHex(text[index])) : (index += 1) {
+            value += @as(f64, @floatFromInt(hexValue(text[index]))) * place;
+            place /= 16.0;
+            digits += 1;
+        }
+    }
+    if (digits == 0) return error.RuntimeError;
+
+    var exponent: i32 = 0;
+    if (index < text.len and (text[index] == 'p' or text[index] == 'P')) {
+        index += 1;
+        var sign: i32 = 1;
+        if (index < text.len and (text[index] == '+' or text[index] == '-')) {
+            sign = if (text[index] == '-') -1 else 1;
+            index += 1;
+        }
+        const exponent_start = index;
+        while (index < text.len and std.ascii.isDigit(text[index])) : (index += 1) {
+            exponent = exponent * 10 + @as(i32, @intCast(text[index] - '0'));
+        }
+        if (index == exponent_start) return error.RuntimeError;
+        exponent *= sign;
+    }
+    if (index != text.len) return error.RuntimeError;
+    return value * std.math.pow(f64, 2.0, @floatFromInt(exponent));
+}
+
+fn floatToInteger(number: f64) ?i64 {
+    if (!std.math.isFinite(number) or @floor(number) != number) return null;
+    const min = @as(f64, @floatFromInt(std.math.minInt(i64)));
+    const max = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+    if (number < min or number > max) return null;
+    return @intFromFloat(number);
+}
+
+fn isHex(text: []const u8) bool {
+    return text.len >= 3 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X');
+}
+
+fn trimAscii(text: []const u8) []const u8 {
+    return std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
 }
 
 fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
@@ -408,7 +618,9 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .integer => |integer| try appendFmt(allocator, out, "{d}", .{integer}),
         .number => |number| try appendNumber(allocator, out, number),
         .string => |string| try out.appendSlice(allocator, string),
+        .table => try out.appendSlice(allocator, "table"),
         .native_print => try out.appendSlice(allocator, "function: print"),
+        .native_tostring => try out.appendSlice(allocator, "function: tostring"),
     }
 }
 
