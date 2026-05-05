@@ -24,6 +24,8 @@ pub const Value = union(enum) {
     string: []const u8,
     table: *Table,
     closure: *Closure,
+    thread: *Thread,
+    coroutine_wrapper: *Thread,
     native_print,
     native_tostring,
     native_getmetatable,
@@ -43,9 +45,20 @@ pub const Value = union(enum) {
     native_pcall,
     native_xpcall,
     native_debug_traceback,
+    native_coroutine_create,
+    native_coroutine_resume,
+    native_coroutine_yield,
+    native_coroutine_status,
+    native_coroutine_running,
+    native_coroutine_wrap,
 };
 
 const ProtectedCallResult = union(enum) {
+    success: []Value,
+    failure: Value,
+};
+
+const CoroutineResumeResult = union(enum) {
     success: []Value,
     failure: Value,
 };
@@ -56,6 +69,7 @@ const Closure = struct {
 };
 
 const Upvalue = struct {
+    owner: *Thread,
     stack_index: usize,
     closed: Value = .nil,
     is_open: bool = true,
@@ -177,12 +191,27 @@ const Table = struct {
 pub const Thread = struct {
     stack: std.ArrayList(Value) = .empty,
     frames: std.ArrayList(CallFrame) = .empty,
+    yield_values: std.ArrayList(Value) = .empty,
     open_upvalues: ?*Upvalue = null,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
+    yield_result_base: usize = 0,
+    yield_result_count: u16 = 0,
+    yield_tail_return: bool = false,
+    yield_tail_base: bytecode.Register = 0,
+    yield_tail_count: u16 = 0,
+    native_call_depth: usize = 0,
+    entry: ?*Closure = null,
+    started: bool = false,
+    is_main: bool = false,
+    status: ThreadStatus = .suspended,
 
-    pub fn init(allocator: std.mem.Allocator, closure: *Closure) !Thread {
+    pub fn initRoot(allocator: std.mem.Allocator, closure: *Closure) !Thread {
         var thread = Thread{};
+        thread.entry = closure;
+        thread.started = true;
+        thread.is_main = true;
+        thread.status = .running;
         errdefer thread.deinit(allocator);
         const proto = closure.proto;
         try thread.ensureStack(allocator, @max(proto.max_registers, 1));
@@ -190,7 +219,12 @@ pub const Thread = struct {
         return thread;
     }
 
+    pub fn initCoroutine(closure: *Closure) Thread {
+        return .{ .entry = closure, .status = .suspended };
+    }
+
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
+        self.yield_values.deinit(allocator);
         self.frames.deinit(allocator);
         self.stack.deinit(allocator);
         self.* = undefined;
@@ -203,6 +237,13 @@ pub const Thread = struct {
         try self.stack.resize(allocator, size);
         @memset(self.stack.items[old_len..], .nil);
     }
+};
+
+const ThreadStatus = enum {
+    suspended,
+    running,
+    normal,
+    dead,
 };
 
 const CallFrame = struct {
@@ -220,10 +261,12 @@ pub const State = struct {
     arena: std.heap.ArenaAllocator,
     globals: std.StringHashMap(Value),
     strings: std.StringHashMap([]const u8),
+    coroutine_threads: std.ArrayList(*Thread) = .empty,
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
+    current_thread: ?*Thread = null,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         var state = State{
@@ -257,10 +300,21 @@ pub const State = struct {
         const debug_lib = try state.newTableWithHints(0, 1);
         try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
         try state.globals.put(try state.intern("debug"), debug_lib);
+
+        const coroutine_lib = try state.newTableWithHints(0, 6);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("create") }, .native_coroutine_create);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("resume") }, .native_coroutine_resume);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("yield") }, .native_coroutine_yield);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("status") }, .native_coroutine_status);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("running") }, .native_coroutine_running);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("wrap") }, .native_coroutine_wrap);
+        try state.globals.put(try state.intern("coroutine"), coroutine_lib);
         return state;
     }
 
     pub fn deinit(self: *State) void {
+        for (self.coroutine_threads.items) |thread| thread.deinit(self.allocator);
+        self.coroutine_threads.deinit(self.allocator);
         self.stdout.deinit(self.allocator);
         self.stderr.deinit(self.allocator);
         self.strings.deinit();
@@ -271,12 +325,17 @@ pub const State = struct {
 
     pub fn execute(self: *State, proto: *const proto_mod.Proto) !void {
         const root = try self.newRootClosure(proto);
-        var thread = try Thread.init(self.allocator, root);
+        var thread = try Thread.initRoot(self.allocator, root);
         defer thread.deinit(self.allocator);
+        const previous_thread = self.current_thread;
+        self.current_thread = &thread;
+        defer self.current_thread = previous_thread;
         self.runThreadUntil(&thread, 0) catch |err| {
             self.closeFramesTo(&thread, 0, self.currentErrorValue()) catch |close_err| return close_err;
+            thread.status = .dead;
             return err;
         };
+        thread.status = .dead;
     }
 
     fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
@@ -503,7 +562,7 @@ pub const State = struct {
         }
 
         const upvalue = try self.arena.allocator().create(Upvalue);
-        upvalue.* = .{ .stack_index = stack_index, .next = thread.open_upvalues };
+        upvalue.* = .{ .owner = thread, .stack_index = stack_index, .next = thread.open_upvalues };
         thread.open_upvalues = upvalue;
         return upvalue;
     }
@@ -512,7 +571,7 @@ pub const State = struct {
         _ = self;
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const upvalue = frame.closure.upvalues[index];
-        return if (upvalue.is_open) thread.stack.items[upvalue.stack_index] else upvalue.closed;
+        return if (upvalue.is_open) upvalue.owner.stack.items[upvalue.stack_index] else upvalue.closed;
     }
 
     fn writeUpvalue(self: *State, thread: *Thread, index: bytecode.UpvalueIndex, value: Value) void {
@@ -520,7 +579,7 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const upvalue = frame.closure.upvalues[index];
         if (upvalue.is_open) {
-            thread.stack.items[upvalue.stack_index] = value;
+            upvalue.owner.stack.items[upvalue.stack_index] = value;
         } else {
             upvalue.closed = value;
         }
@@ -767,6 +826,16 @@ pub const State = struct {
     fn invokeValue(self: *State, thread: *Thread, resolved: bytecode.Call, depth: usize) anyerror!void {
         if (depth > max_metamethod_depth) return self.fail("'__call' chain too long");
         const callee = self.get(thread, resolved.base);
+        if (callee == .coroutine_wrapper) {
+            try self.callCoroutineWrapper(thread, resolved, callee.coroutine_wrapper);
+            return;
+        }
+
+        const entering_native = isNativeCallable(callee);
+        if (entering_native) thread.native_call_depth += 1;
+        defer {
+            if (entering_native) thread.native_call_depth -= 1;
+        }
         switch (callee) {
             .closure => |closure| try self.callClosure(thread, resolved, closure),
             .native_print => {
@@ -825,6 +894,12 @@ pub const State = struct {
             .native_pcall => try self.pcallValues(thread, resolved),
             .native_xpcall => try self.xpcallValues(thread, resolved),
             .native_debug_traceback => try self.tracebackValue(thread, resolved),
+            .native_coroutine_create => try self.coroutineCreate(thread, resolved),
+            .native_coroutine_resume => try self.coroutineResume(thread, resolved),
+            .native_coroutine_yield => try self.coroutineYield(thread, resolved),
+            .native_coroutine_status => try self.coroutineStatus(thread, resolved),
+            .native_coroutine_running => try self.coroutineRunning(thread, resolved),
+            .native_coroutine_wrap => try self.coroutineWrap(thread, resolved),
             else => {
                 const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
@@ -1055,7 +1130,15 @@ pub const State = struct {
             else => {
                 const frame = thread.frames.items[thread.frames.items.len - 1];
                 const frame_count = thread.frames.items.len;
-                try self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count });
+                self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count }) catch |err| switch (err) {
+                    error.CoroutineYield => {
+                        thread.yield_tail_return = true;
+                        thread.yield_tail_base = resolved.base;
+                        thread.yield_tail_count = frame.return_count;
+                        return err;
+                    },
+                    else => return err,
+                };
                 try self.runThreadUntil(thread, frame_count);
                 try self.returnFromFrame(thread, resolved.base, frame.return_count);
             },
@@ -1069,6 +1152,8 @@ pub const State = struct {
         try self.closeActiveToBeClosedInTopFrame(thread, .nil);
         self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
+            thread.last_result_base = source_start;
+            thread.last_result_count = source_count;
             thread.frames.items.len = 0;
             return;
         }
@@ -1287,6 +1372,175 @@ pub const State = struct {
         try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(out.items) }});
     }
 
+    fn coroutineCreate(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const closure = switch (argValue(self, thread, op, 0)) {
+            .closure => |closure| closure,
+            else => return self.fail("function expected"),
+        };
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .thread = try self.newCoroutineThread(closure) }});
+    }
+
+    fn coroutineResume(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const target = try self.expectThread(argValue(self, thread, op, 0));
+        const args = try self.collectArgs(thread, op, 1);
+        defer self.allocator.free(args);
+
+        const result = try self.resumeCoroutine(target, args);
+        defer freeCoroutineResumeResult(self.allocator, result);
+        try self.returnCoroutineResumeResult(thread, op.base, op.return_count, result);
+    }
+
+    fn coroutineYield(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (thread.is_main) return self.fail("attempt to yield from outside a coroutine");
+        if (thread.native_call_depth > 1) return self.fail("attempt to yield across a native-call boundary");
+
+        thread.yield_values.clearRetainingCapacity();
+        for (0..op.arg_count) |index| {
+            try thread.yield_values.append(self.allocator, argValue(self, thread, op, @intCast(index)));
+        }
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        thread.yield_result_base = frame.base + op.base;
+        thread.yield_result_count = op.return_count;
+        thread.status = .suspended;
+        return error.CoroutineYield;
+    }
+
+    fn coroutineStatus(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const target = try self.expectThread(argValue(self, thread, op, 0));
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(threadStatusName(target.status)) }});
+    }
+
+    fn coroutineRunning(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        try self.returnValues(thread, op.base, op.return_count, &.{ .{ .thread = thread }, .{ .boolean = thread.is_main } });
+    }
+
+    fn coroutineWrap(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const closure = switch (argValue(self, thread, op, 0)) {
+            .closure => |closure| closure,
+            else => return self.fail("function expected"),
+        };
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .coroutine_wrapper = try self.newCoroutineThread(closure) }});
+    }
+
+    fn callCoroutineWrapper(self: *State, thread: *Thread, op: bytecode.Call, target: *Thread) !void {
+        const args = try self.collectArgs(thread, op, 0);
+        defer self.allocator.free(args);
+        try self.callCoroutineWrapperWithArgs(thread, op.base, op.return_count, target, args);
+    }
+
+    fn callCoroutineWrapperWithArgs(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, target: *Thread, args: []const Value) !void {
+        const result = try self.resumeCoroutine(target, args);
+        defer freeCoroutineResumeResult(self.allocator, result);
+        switch (result) {
+            .success => |values| try self.returnValues(thread, base, return_count, values),
+            .failure => |error_value| return self.throwValue(error_value),
+        }
+    }
+
+    fn newCoroutineThread(self: *State, closure: *Closure) !*Thread {
+        const thread = try self.arena.allocator().create(Thread);
+        thread.* = Thread.initCoroutine(closure);
+        errdefer thread.deinit(self.allocator);
+        try self.coroutine_threads.append(self.allocator, thread);
+        return thread;
+    }
+
+    fn resumeCoroutine(self: *State, target: *Thread, args: []const Value) !CoroutineResumeResult {
+        if (target.is_main) return .{ .failure = .{ .string = try self.intern("cannot resume main coroutine") } };
+        if (target.status == .dead) return .{ .failure = .{ .string = try self.intern("cannot resume dead coroutine") } };
+        if (target.status != .suspended) return .{ .failure = .{ .string = try self.intern("cannot resume non-suspended coroutine") } };
+
+        const parent = self.current_thread;
+        if (parent == target) return .{ .failure = .{ .string = try self.intern("cannot resume running coroutine") } };
+
+        if (parent) |parent_thread| {
+            if (parent_thread.status == .running) parent_thread.status = .normal;
+        }
+        const previous_thread = self.current_thread;
+        self.current_thread = target;
+        target.status = .running;
+        defer {
+            self.current_thread = previous_thread;
+            if (parent) |parent_thread| {
+                if (parent_thread.status == .normal) parent_thread.status = .running;
+            }
+        }
+
+        if (!target.started) {
+            try self.startCoroutine(target, args);
+        } else {
+            try self.setCoroutineResumeValues(target, args);
+        }
+
+        self.runThreadUntil(target, 0) catch |err| switch (err) {
+            error.CoroutineYield => return .{ .success = try self.copyValues(target.yield_values.items) },
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                var error_value = self.currentErrorValue();
+                self.closeFramesTo(target, 0, error_value) catch |close_err| switch (close_err) {
+                    error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => error_value = self.currentErrorValue(),
+                    else => return close_err,
+                };
+                target.status = .dead;
+                return .{ .failure = error_value };
+            },
+            else => return err,
+        };
+
+        target.status = .dead;
+        return .{ .success = try self.copyStackSlice(target, target.last_result_base, target.last_result_count) };
+    }
+
+    fn startCoroutine(self: *State, target: *Thread, args: []const Value) !void {
+        const closure = target.entry orelse return self.fail("coroutine has no entry function");
+        try target.ensureStack(self.allocator, 1 + args.len);
+        target.stack.items[0] = .{ .closure = closure };
+        for (args, 0..) |arg, index| target.stack.items[1 + index] = arg;
+        const frame = try self.prepareClosureFrame(target, closure, 0, 0, args.len, 0, bytecode.multret_count);
+        try target.frames.append(self.allocator, frame);
+        target.started = true;
+    }
+
+    fn setCoroutineResumeValues(self: *State, target: *Thread, args: []const Value) !void {
+        const actual_count = try self.resolveReturnCount(target.yield_result_count, args.len);
+        try target.ensureStack(self.allocator, target.yield_result_base + actual_count);
+        for (0..actual_count) |index| {
+            target.stack.items[target.yield_result_base + index] = if (index < args.len) args[index] else .nil;
+        }
+        target.last_result_base = target.yield_result_base;
+        target.last_result_count = actual_count;
+        if (target.yield_tail_return) {
+            const tail_base = target.yield_tail_base;
+            const tail_count = target.yield_tail_count;
+            target.yield_tail_return = false;
+            try self.returnFromFrame(target, tail_base, tail_count);
+        }
+    }
+
+    fn returnCoroutineResumeResult(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, result: CoroutineResumeResult) !void {
+        switch (result) {
+            .success => |values| {
+                var returns = std.ArrayList(Value).empty;
+                defer returns.deinit(self.allocator);
+                try returns.append(self.allocator, .{ .boolean = true });
+                try returns.appendSlice(self.allocator, values);
+                try self.returnValues(thread, base, return_count, returns.items);
+            },
+            .failure => |error_value| try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, error_value }),
+        }
+    }
+
+    fn copyValues(self: *State, values: []const Value) ![]Value {
+        const copied = try self.allocator.alloc(Value, values.len);
+        @memcpy(copied, values);
+        return copied;
+    }
+
+    fn copyStackSlice(self: *State, thread: *Thread, base: usize, count: usize) ![]Value {
+        const values = try self.allocator.alloc(Value, count);
+        for (values, 0..) |*value, index| value.* = thread.stack.items[base + index];
+        return values;
+    }
+
     fn lineForErrorLevel(self: *State, thread: *Thread, level: usize) ?usize {
         _ = self;
         if (level == 0 or level > thread.frames.items.len) return null;
@@ -1356,6 +1610,13 @@ pub const State = struct {
         return switch (value) {
             .table => |table| table,
             else => self.fail("table expected"),
+        };
+    }
+
+    fn expectThread(self: *State, value: Value) !*Thread {
+        return switch (value) {
+            .thread => |thread| thread,
+            else => self.fail("thread expected"),
         };
     }
 
@@ -1569,6 +1830,8 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .string => |value| rhs == .string and std.mem.eql(u8, value, rhs.string),
         .table => |value| rhs == .table and value == rhs.table,
         .closure => |value| rhs == .closure and value == rhs.closure,
+        .thread => |value| rhs == .thread and value == rhs.thread,
+        .coroutine_wrapper => |value| rhs == .coroutine_wrapper and value == rhs.coroutine_wrapper,
         .native_print => rhs == .native_print,
         .native_tostring => rhs == .native_tostring,
         .native_getmetatable => rhs == .native_getmetatable,
@@ -1588,6 +1851,53 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_pcall => rhs == .native_pcall,
         .native_xpcall => rhs == .native_xpcall,
         .native_debug_traceback => rhs == .native_debug_traceback,
+        .native_coroutine_create => rhs == .native_coroutine_create,
+        .native_coroutine_resume => rhs == .native_coroutine_resume,
+        .native_coroutine_yield => rhs == .native_coroutine_yield,
+        .native_coroutine_status => rhs == .native_coroutine_status,
+        .native_coroutine_running => rhs == .native_coroutine_running,
+        .native_coroutine_wrap => rhs == .native_coroutine_wrap,
+    };
+}
+
+fn isNativeCallable(value: Value) bool {
+    return switch (value) {
+        .native_print,
+        .native_tostring,
+        .native_getmetatable,
+        .native_setmetatable,
+        .native_rawequal,
+        .native_rawget,
+        .native_rawset,
+        .native_rawlen,
+        .native_next,
+        .native_pairs,
+        .native_ipairs,
+        .native_ipairs_iter,
+        .native_table_create,
+        .native_select,
+        .native_assert,
+        .native_error,
+        .native_pcall,
+        .native_xpcall,
+        .native_debug_traceback,
+        .native_coroutine_create,
+        .native_coroutine_resume,
+        .native_coroutine_yield,
+        .native_coroutine_status,
+        .native_coroutine_running,
+        .native_coroutine_wrap,
+        => true,
+        else => false,
+    };
+}
+
+fn threadStatusName(status: ThreadStatus) []const u8 {
+    return switch (status) {
+        .suspended => "suspended",
+        .running => "running",
+        .normal => "normal",
+        .dead => "dead",
     };
 }
 
@@ -1807,6 +2117,8 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .string => |string| try out.appendSlice(allocator, string),
         .table => try out.appendSlice(allocator, "table"),
         .closure => try out.appendSlice(allocator, "function"),
+        .thread => try out.appendSlice(allocator, "thread"),
+        .coroutine_wrapper => try out.appendSlice(allocator, "function"),
         .native_print => try out.appendSlice(allocator, "function: print"),
         .native_tostring => try out.appendSlice(allocator, "function: tostring"),
         .native_getmetatable => try out.appendSlice(allocator, "function: getmetatable"),
@@ -1826,10 +2138,23 @@ fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Val
         .native_pcall => try out.appendSlice(allocator, "function: pcall"),
         .native_xpcall => try out.appendSlice(allocator, "function: xpcall"),
         .native_debug_traceback => try out.appendSlice(allocator, "function: debug.traceback"),
+        .native_coroutine_create => try out.appendSlice(allocator, "function: coroutine.create"),
+        .native_coroutine_resume => try out.appendSlice(allocator, "function: coroutine.resume"),
+        .native_coroutine_yield => try out.appendSlice(allocator, "function: coroutine.yield"),
+        .native_coroutine_status => try out.appendSlice(allocator, "function: coroutine.status"),
+        .native_coroutine_running => try out.appendSlice(allocator, "function: coroutine.running"),
+        .native_coroutine_wrap => try out.appendSlice(allocator, "function: coroutine.wrap"),
     }
 }
 
 fn freeProtectedResult(allocator: std.mem.Allocator, result: ProtectedCallResult) void {
+    switch (result) {
+        .success => |values| allocator.free(values),
+        .failure => {},
+    }
+}
+
+fn freeCoroutineResumeResult(allocator: std.mem.Allocator, result: CoroutineResumeResult) void {
     switch (result) {
         .success => |values| allocator.free(values),
         .failure => {},
