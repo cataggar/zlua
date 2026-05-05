@@ -526,7 +526,7 @@ fn parsePackSize(pack_format: []const u8, index: *usize) ?usize {
         index.* += 1;
         size = size * 10 + pack_format[index.*] - '0';
     }
-    if (size == 0) size = @sizeOf(isize);
+    if (size == 0) size = @sizeOf(c_int);
     if (size != 1 and size != 2 and size != 4 and size != 8) return null;
     return size;
 }

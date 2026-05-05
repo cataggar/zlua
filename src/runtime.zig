@@ -70,8 +70,8 @@ pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList
     try out.append(allocator, 0x55);
     try out.append(allocator, 0);
     try out.appendSlice(allocator, "\x19\x93\r\n\x1a\n");
-    try out.append(allocator, @sizeOf(isize));
-    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(isize));
+    try out.append(allocator, @sizeOf(c_int));
+    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(c_int));
     try out.append(allocator, 4);
     try appendHeaderInt(allocator, out, 0x12345678, 4);
     try out.append(allocator, @sizeOf(i64));
@@ -381,9 +381,10 @@ const RuntimeAllocationStats = struct {
     closures: usize,
     upvalues: usize,
     threads: usize,
+    bytes: usize,
 
     fn total(self: RuntimeAllocationStats) usize {
-        return self.strings + self.tables + self.closures + self.upvalues + self.threads;
+        return self.bytes;
     }
 };
 
@@ -633,6 +634,7 @@ pub const State = struct {
 
         const os_lib = try state.newTableWithHints(0, 4);
         try state.setTable(os_lib, .{ .string = try state.intern("time") }, .{ .native = .os_time });
+        try state.setTable(os_lib, .{ .string = try state.intern("clock") }, .{ .native = .os_clock });
         try state.setTable(os_lib, .{ .string = try state.intern("date") }, .{ .native = .os_date });
         try state.setTable(os_lib, .{ .string = try state.intern("getenv") }, .{ .native = .os_getenv });
         try state.setTable(os_lib, .{ .string = try state.intern("setlocale") }, .{ .native = .os_setlocale });
@@ -1427,6 +1429,10 @@ pub const State = struct {
         return self.getTableDepth(null, table_value, key_value, 0);
     }
 
+    pub fn getTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value) !Value {
+        return self.getTableDepth(thread, table_value, key_value, 0);
+    }
+
     fn getTableDepth(self: *State, thread: ?*Thread, table_value: Value, key_value: Value, depth: usize) !Value {
         if (depth > max_metamethod_depth) return self.fail("'__index' chain too long");
         const key = try self.readableTableKey(key_value) orelse return .nil;
@@ -1463,7 +1469,7 @@ pub const State = struct {
         try self.setTableDepth(null, table_value, key_value, value, 0);
     }
 
-    fn setTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
+    pub fn setTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
         try self.setTableDepth(thread, table_value, key_value, value, 0);
     }
 
@@ -1516,7 +1522,7 @@ pub const State = struct {
         };
     }
 
-    fn lengthOf(self: *State, thread: *Thread, value: Value) !Value {
+    pub fn lengthOf(self: *State, thread: *Thread, value: Value) !Value {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
             .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod|
@@ -1601,8 +1607,9 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &values);
             },
             .native_table_create => {
-                const array_hint = try self.tableCreateHint(argValue(self, thread, resolved, 0));
-                const hash_hint = if (resolved.arg_count >= 2) try self.tableCreateHint(argValue(self, thread, resolved, 1)) else 0;
+                const array_hint = try self.tableCreateHint(argValue(self, thread, resolved, 0), 1);
+                const hash_hint = if (resolved.arg_count >= 2) try self.tableCreateHint(argValue(self, thread, resolved, 1), 2) else 0;
+                if (hash_hint == std.math.maxInt(i32)) return self.fail("table overflow");
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.newTableWithHints(array_hint, hash_hint)});
             },
             .native_select => try self.selectValues(thread, resolved),
@@ -2393,10 +2400,12 @@ pub const State = struct {
         };
     }
 
-    fn tableCreateHint(self: *State, value: Value) !u32 {
+    fn tableCreateHint(self: *State, value: Value, arg_index: u8) !u32 {
         const integer = toInteger(value) orelse return self.fail("number expected");
-        if (integer < 0) return self.fail("negative size");
-        return std.math.cast(u32, integer) orelse self.fail("size too large");
+        if (integer < 0 or integer > std.math.maxInt(i32)) {
+            return self.fail(if (arg_index == 1) "bad argument #1 to 'table.create' (out of range)" else "bad argument #2 to 'table.create' (out of range)");
+        }
+        return @intCast(integer);
     }
 
     fn callNative(self: *State, native: NativeFn, thread: *Thread, op: bytecode.Call) !void {
@@ -2877,12 +2886,20 @@ pub const State = struct {
     }
 
     fn allocationStats(self: State) RuntimeAllocationStats {
+        var bytes: usize = 0;
+        for (self.string_allocations.items) |allocation| bytes += @sizeOf(StringAllocation) + allocation.bytes.len;
+        for (self.table_allocations.items) |table| bytes += @sizeOf(Table) + table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
+        bytes += self.closure_allocations.items.len * @sizeOf(Closure);
+        bytes += self.upvalue_allocations.items.len * @sizeOf(Upvalue);
+        bytes += self.thread_allocations.items.len * @sizeOf(Thread);
+
         return .{
             .strings = self.string_allocations.items.len,
             .tables = self.table_allocations.items.len,
             .closures = self.closure_allocations.items.len,
             .upvalues = self.upvalue_allocations.items.len,
             .threads = self.thread_allocations.items.len,
+            .bytes = bytes,
         };
     }
 
@@ -3087,7 +3104,7 @@ fn unaryMetamethod(op: UnaryMetamethodOp) []const u8 {
     };
 }
 
-fn valuesEqual(lhs: Value, rhs: Value) bool {
+pub fn valuesEqual(lhs: Value, rhs: Value) bool {
     return switch (lhs) {
         .nil => rhs == .nil,
         .boolean => |value| rhs == .boolean and rhs.boolean == value,

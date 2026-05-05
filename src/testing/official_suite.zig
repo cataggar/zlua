@@ -13,7 +13,7 @@ const Options = struct {
     quick: bool = false,
     show_clua: bool = false,
     show_zlua: bool = false,
-    timeout_ms: u64 = 600_000,
+    timeout_ms: u64 = 0,
 };
 
 const Mode = enum { basic, complete, internal };
@@ -83,7 +83,6 @@ fn parseArgs(args: []const []const u8) !Options {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--quick")) {
             options.quick = true;
-            options.timeout_ms = @min(options.timeout_ms, 5000);
         } else if (std.mem.eql(u8, arg, "--show-clua")) {
             options.show_clua = true;
         } else if (std.mem.eql(u8, arg, "--show-zlua")) {
@@ -250,7 +249,11 @@ fn contains(haystack: []const u8, needle: []const u8) bool {
 }
 
 fn printProcess(out: anytype, label: []const u8, result: process.ProcessResult, show_output: bool) !void {
-    try out.print("  {s} exit={?} timeout={} signal={?}\n", .{ label, result.exit_code, result.timed_out, result.signal });
+    if (result.timed_out) {
+        try out.print("  {s} exit={?} timeout=true signal={?}\n", .{ label, result.exit_code, result.signal });
+    } else {
+        try out.print("  {s} exit={?} signal={?}\n", .{ label, result.exit_code, result.signal });
+    }
     if (show_output) {
         try out.print("[{s} stdout]\n{s}\n[{s} stderr]\n{s}\n", .{ label, result.stdout, label, result.stderr });
     }

@@ -12,6 +12,10 @@ pub fn time(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = try state.currentTime() }});
 }
 
+pub fn clock(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = 0 }});
+}
+
 pub fn date(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var format = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil)
         try state.expectString(runtime.argValue(state, thread, op, 0))

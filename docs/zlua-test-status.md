@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=16`, `categorized_failed=16`, `skipped=1`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=17`, `categorized_failed=15`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused `calls.lua` work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,15 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, and `just official-file utf8`.
+Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, `just official-file calls`, and `just official-file sort`.
+
+Latest focused `sort.lua` work:
+
+- The official harness no longer applies a per-file timeout by default; quick mode still skips memory-stress `heavy.lua`.
+- `table.create` accounts reserved array/hash capacity in `collectgarbage("count")`, uses CLua-compatible 32-bit C `int` bounds, and reports official range/overflow errors.
+- `string.packsize("i")` and zlua binary chunk headers now use 4-byte C `int` fields, so official binary header checks pass.
+- `table.insert`, `table.unpack`, `table.move`, and `table.sort` cover the official table-library edge cases, including metamethod-aware moves and a non-quadratic sort path.
+- `os.clock` is available for official progress timing checks.
 
 Latest focused `utf8.lua` work:
 
@@ -97,7 +105,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `memerr.lua` | Pass | Pass |  |
 | `nextvar.lua` | Pass | XFail | `runtime` |
 | `pm.lua` | Pass | XFail | `runtime` |
-| `sort.lua` | Pass | XFail | `runtime` |
+| `sort.lua` | Pass | Pass |  |
 | `strings.lua` | Pass | XFail | `runtime` |
 | `tpack.lua` | Pass | XFail | `runtime` |
 | `tracegc.lua` | Pass | Pass |  |
@@ -115,7 +123,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 16 |
-| Categorized zlua failures | 16 |
+| zlua passes | 17 |
+| Categorized zlua failures | 15 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |
