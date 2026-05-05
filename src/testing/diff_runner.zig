@@ -1,6 +1,7 @@
 const std = @import("std");
 const clua = @import("clua.zig");
 const expected_failures = @import("expected_failures.zig");
+const frontend = @import("../frontend.zig");
 const metadata = @import("metadata.zig");
 const normalizer = @import("normalizer.zig");
 const process = @import("process.zig");
@@ -175,7 +176,7 @@ fn runOne(
 
     if (clua_result.timed_out or zlua_result.timed_out) counts.timed_out += 1;
 
-    const same = try resultsEqual(allocator, clua_result, zlua_result, meta.normalize, cwd);
+    const same = try resultsEqual(allocator, clua_result, zlua_result, meta.stage, meta.normalize, cwd);
     if (same and !expected_failure) {
         counts.passed += 1;
         try out.print("pass {s}\n", .{path});
@@ -216,12 +217,8 @@ fn runZluaForStage(
     stage: metadata.Stage,
 ) !process.ProcessResult {
     return switch (stage) {
-        .lex, .parse, .resolve, .compile => blk: {
-            if (std.mem.indexOf(u8, source, "-- zlua-parse-error") != null) {
-                break :blk process.ownedResult(allocator, "", "zlua parser rejected fixture\n", 1);
-            }
-            break :blk process.ownedResult(allocator, "", "", 0);
-        },
+        .lex, .parse => runZluaLexStage(allocator, source),
+        .resolve, .compile => runZluaLexStage(allocator, source),
         .runtime, .stdlib, .official => process.ownedResult(
             allocator,
             "",
@@ -231,13 +228,30 @@ fn runZluaForStage(
     };
 }
 
+fn runZluaLexStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
+    const tokens = frontend.lex(allocator, source) catch |err| {
+        const message = try std.fmt.allocPrint(allocator, "zlua lexer rejected fixture: {s}\n", .{@errorName(err)});
+        defer allocator.free(message);
+        return process.ownedResult(allocator, "", message, 1);
+    };
+    allocator.free(tokens);
+    return process.ownedResult(allocator, "", "", 0);
+}
+
 fn resultsEqual(
     allocator: std.mem.Allocator,
     clua_result: process.ProcessResult,
     zlua_result: process.ProcessResult,
+    stage: metadata.Stage,
     normalize: metadata.Normalize,
     cwd: []const u8,
 ) !bool {
+    if (stage == .lex or stage == .parse or stage == .resolve or stage == .compile) {
+        return clua_result.exit_code == zlua_result.exit_code and
+            clua_result.signal == zlua_result.signal and
+            clua_result.timed_out == zlua_result.timed_out;
+    }
+
     const clua_stdout = try normalizer.normalizeText(allocator, clua_result.stdout, normalize, cwd);
     defer allocator.free(clua_stdout);
     const zlua_stdout = try normalizer.normalizeText(allocator, zlua_result.stdout, normalize, cwd);
