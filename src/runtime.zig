@@ -159,9 +159,10 @@ const CoroutineResumeResult = union(enum) {
     failure: Value,
 };
 
-const Closure = struct {
+pub const Closure = struct {
     proto: *const proto_mod.Proto,
     upvalues: []*Upvalue,
+    stripped_debug: bool = false,
     marked: bool = false,
 };
 
@@ -321,6 +322,8 @@ pub const Thread = struct {
     hook_call: bool = false,
     hook_line: bool = false,
     hook_return: bool = false,
+    hook_count: u32 = 0,
+    hook_count_remaining: u32 = 0,
     hook_running: bool = false,
     pending_yield_hook_return: bool = false,
     last_result_base: usize = 0,
@@ -746,6 +749,7 @@ pub const State = struct {
         try state.setTable(debug_lib, .{ .string = try state.intern("upvalueid") }, .{ .native = .debug_upvalueid });
         try state.setTable(debug_lib, .{ .string = try state.intern("upvaluejoin") }, .{ .native = .debug_upvaluejoin });
         try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
+        try state.setTable(debug_lib, .{ .string = try state.intern("gethook") }, .{ .native = .debug_gethook });
         try state.globals.put(try state.intern("debug"), debug_lib);
 
         const package_lib = try state.newTableWithHints(0, 8);
@@ -857,6 +861,7 @@ pub const State = struct {
             const instruction = proto.instructions.items[frame.pc];
             frame.pc += 1;
             try self.callLineHook(thread);
+            try self.callCountHook(thread);
 
             switch (instruction) {
                 .load_nil => |dest| self.set(thread, dest, .nil),
@@ -983,27 +988,66 @@ pub const State = struct {
         if (level < 1) return null;
         const depth: usize = @intCast(level);
         if (depth > thread.frames.items.len) return null;
-        return thread.frames.items[thread.frames.items.len - depth].proto.debug_name;
+        const frame = thread.frames.items[thread.frames.items.len - depth];
+        const pc = if (frame.pc == 0) 0 else frame.pc - 1;
+        for (frame.proto.locals.items) |local| {
+            if (!std.mem.eql(u8, local.name, "name")) continue;
+            if (pc < local.start_pc or (local.end_pc != 0 and pc > local.end_pc)) continue;
+            const value = thread.stack.items[frame.base + local.register];
+            if (value == .string) return value.string;
+        }
+        return frame.proto.debug_name;
     }
 
-    pub fn setThreadHook(self: *State, target: *Thread, hook: Value, mask: []const u8) void {
+    pub fn setThreadHook(self: *State, target: *Thread, hook: Value, mask: []const u8, count: u32) void {
         _ = self;
         target.hook = hook;
         target.hook_call = false;
         target.hook_line = false;
         target.hook_return = false;
+        target.hook_count = 0;
+        target.hook_count_remaining = 0;
         target.pending_yield_hook_return = false;
         if (hook == .nil) return;
         target.hook_call = std.mem.indexOfScalar(u8, mask, 'c') != null;
         target.hook_line = std.mem.indexOfScalar(u8, mask, 'l') != null;
         target.hook_return = std.mem.indexOfScalar(u8, mask, 'r') != null;
+        target.hook_count = count;
+        target.hook_count_remaining = count;
+        if (target.hook_line and target.frames.items.len != 0) {
+            const frame_index = target.frames.items.len - 1;
+            target.frames.items[frame_index].last_hook_line = lineForFrame(target.frames.items[frame_index]);
+        }
+    }
+
+    pub fn threadHookMask(self: *State, thread: *Thread) ![]const u8 {
+        var bytes: [3]u8 = undefined;
+        var len: usize = 0;
+        if (thread.hook_call) {
+            bytes[len] = 'c';
+            len += 1;
+        }
+        if (thread.hook_return) {
+            bytes[len] = 'r';
+            len += 1;
+        }
+        if (thread.hook_line) {
+            bytes[len] = 'l';
+            len += 1;
+        }
+        return self.intern(bytes[0..len]);
     }
 
     fn callHook(self: *State, thread: *Thread, event: []const u8) !void {
+        const args = [_]Value{.{ .string = try self.intern(event) }};
+        try self.callHookWithArgs(thread, &args);
+    }
+
+    fn callHookWithArgs(self: *State, thread: *Thread, args: []const Value) !void {
         if (thread.hook == .nil or thread.hook_running) return;
         thread.hook_running = true;
         defer thread.hook_running = false;
-        _ = try self.callOneResult(thread, thread.hook, &.{.{ .string = try self.intern(event) }});
+        _ = try self.callOneResult(thread, thread.hook, args);
     }
 
     fn callLineHook(self: *State, thread: *Thread) !void {
@@ -1013,7 +1057,18 @@ pub const State = struct {
         const line = lineForFrame(thread.frames.items[frame_index]) orelse return;
         if (thread.frames.items[frame_index].last_hook_line == line) return;
         thread.frames.items[frame_index].last_hook_line = line;
-        try self.callHook(thread, "line");
+        const args = [_]Value{ .{ .string = try self.intern("line") }, .{ .integer = @intCast(line) } };
+        try self.callHookWithArgs(thread, &args);
+    }
+
+    fn callCountHook(self: *State, thread: *Thread) !void {
+        if (thread.hook_count == 0 or thread.hook == .nil or thread.hook_running) return;
+        if (thread.hook_count_remaining > 1) {
+            thread.hook_count_remaining -= 1;
+            return;
+        }
+        thread.hook_count_remaining = thread.hook_count;
+        try self.callHook(thread, "count");
     }
 
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -1103,7 +1158,7 @@ pub const State = struct {
             error.TooManyReturns => return self.fail("too many returns"),
             else => return self.fail("cannot compile source"),
         };
-        if (source_name) |name| proto.source_name = try proto.arena.allocator().dupe(u8, name);
+        if (source_name) |name| try setProtoSourceName(proto, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);
         errdefer _ = self.proto_allocations.pop();
@@ -1131,7 +1186,7 @@ pub const State = struct {
         if (source.len < pos + debug_len) return self.fail("truncated binary chunk");
 
         const proto: *const proto_mod.Proto = @ptrFromInt(@as(usize, @intCast(proto_addr)));
-        return self.newDumpedClosure(proto, environment);
+        return self.newDumpedClosure(proto, environment, debug_len == 0);
     }
 
     pub fn loadFileAsClosure(self: *State, path: []const u8) !Value {
@@ -1342,7 +1397,7 @@ pub const State = struct {
         return if (self.global_table) |table| .{ .table = table } else self.getGlobalValue("_G");
     }
 
-    fn newDumpedClosure(self: *State, proto: *const proto_mod.Proto, environment: Value) !Value {
+    fn newDumpedClosure(self: *State, proto: *const proto_mod.Proto, environment: Value, stripped_debug: bool) !Value {
         var upvalues: []*Upvalue = if (proto.upvalues.items.len == 0)
             &.{}
         else
@@ -1364,7 +1419,7 @@ pub const State = struct {
         }
 
         const closure = try self.allocator.create(Closure);
-        closure.* = .{ .proto = proto, .upvalues = upvalues };
+        closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
         return .{ .closure = closure };
@@ -4225,6 +4280,11 @@ fn lineForFrame(frame: CallFrame) ?usize {
     const pc = if (frame.pc == 0) 0 else frame.pc - 1;
     if (pc >= frame.proto.line_info.items.len) return null;
     return frame.proto.line_info.items[pc].line;
+}
+
+fn setProtoSourceName(proto: *proto_mod.Proto, name: []const u8) !void {
+    proto.source_name = try proto.arena.allocator().dupe(u8, name);
+    for (proto.children.items) |child| try setProtoSourceName(child, name);
 }
 
 fn copyStackValues(thread: *Thread, dest: usize, source: usize, count: usize) void {

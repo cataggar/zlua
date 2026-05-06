@@ -20,7 +20,12 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
         return;
     }
 
-    const source_name = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string) runtime.argValue(state, thread, op, 1).string else null;
+    const source_name = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string)
+        runtime.argValue(state, thread, op, 1).string
+    else if (runtime.argValue(state, thread, op, 0) == .string)
+        runtime.argValue(state, thread, op, 0).string
+    else
+        null;
     if (looksLikeBinaryChunk(source)) {
         const environment = loadEnvironment(state, thread, op);
         const closure = state.loadBinaryDump(source, environment) catch {

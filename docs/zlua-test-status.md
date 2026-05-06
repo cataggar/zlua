@@ -25,7 +25,15 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `gc.lua` work verified with `just official-file gc`, `just official-file utf8`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused `db.lua` work verified with `just official-file db`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+Latest focused `db.lua` work:
+
+- Generic `for` variables are now assignable while numeric `for` variables remain const, matching Lua 5.5 and allowing `db.lua` to compile past its active-line helper.
+- `debug.gethook` is available, hook masks/counts are introspectable, line hooks receive the line argument, and count hooks have basic instruction-count dispatch.
+- `debug.getinfo` now handles invalid options, out-of-range stack levels, C-function source names, `func`, active-line tables, stripped dumped chunks, and the early official source-name/namewhat checks.
+- `load` string chunks propagate source names to child closures, and short source formatting now covers string, `@`, and `=` chunk names used by `db.lua`.
+- `db.lua` still xfails later in official line-hook trace sequencing; the quick official dashboard counts are unchanged.
 
 Latest focused `gc.lua` work:
 

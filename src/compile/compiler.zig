@@ -205,7 +205,9 @@ const FunctionCompiler = struct {
             try pending.append(self.allocator, .{ .name = binding.name.name, .register = register, .debug_index = debug_index, .to_close = isCloseAttribute(binding.attribute) });
         }
 
-        if (pending.items.len > 0) try self.compileExprListAdjusted(decl.values, pending.items[0].register, @intCast(pending.items.len));
+        if (pending.items.len == 1 and decl.values.len == 1 and decl.values[0].* == .function_literal) {
+            try self.compileFunctionLiteral(decl.values[0].function_literal, pending.items[0].register, pending.items[0].name);
+        } else if (pending.items.len > 0) try self.compileExprListAdjusted(decl.values, pending.items[0].register, @intCast(pending.items.len));
         if (pending.items.len == 0) try self.compileExprListAdjusted(decl.values, self.registerMark(), 0);
 
         for (pending.items) |local| try self.locals.append(self.allocator, .{
@@ -523,7 +525,11 @@ const FunctionCompiler = struct {
                 },
                 .named => |named| {
                     const value = try self.allocReg();
-                    try self.compileExpr(named.value, value);
+                    if (named.value.* == .function_literal) {
+                        try self.compileFunctionLiteral(named.value.function_literal, value, named.name.name);
+                    } else {
+                        try self.compileExpr(named.value, value);
+                    }
                     _ = try self.emit(.{ .set_field = .{ .table = dest, .name = try self.nameConstant(named.name.name), .value = value } });
                 },
             }
