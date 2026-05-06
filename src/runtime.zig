@@ -1853,7 +1853,8 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{});
             },
             .native_tostring => {
-                const value = if (resolved.arg_count == 0) Value.nil else self.get(thread, resolved.base + 1);
+                if (resolved.arg_count == 0) return self.fail("bad argument #1 to 'tostring' (value expected)");
+                const value = self.get(thread, resolved.base + 1);
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .string = try self.valueToString(thread, value) }});
             },
             .native_getmetatable => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.getMetatableValue(argValue(self, thread, resolved, 0))}),
@@ -2214,7 +2215,7 @@ pub const State = struct {
             return;
         }
         const raw = rawBinaryOp(lhs, rhs, kind) catch |err| switch (err) {
-            error.RuntimeError => if ((kind == .idiv or kind == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail("divide by zero") else return err,
+            error.RuntimeError => if ((kind == .idiv or kind == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail(if (kind == .mod) "attempt to perform 'n%0'" else "divide by zero") else return err,
         };
         if (raw) |value| {
             self.set(thread, op.dest, value);
@@ -2311,7 +2312,7 @@ pub const State = struct {
     fn binaryOp(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: BinaryOp) !Value {
         if (op == .concat and luaStringLike(lhs) and luaStringLike(rhs)) return self.concatValues(lhs, rhs);
         const raw = rawBinaryOp(lhs, rhs, op) catch |err| switch (err) {
-            error.RuntimeError => if ((op == .idiv or op == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail("divide by zero") else return err,
+            error.RuntimeError => if ((op == .idiv or op == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail(if (op == .mod) "attempt to perform 'n%0'" else "divide by zero") else return err,
         };
         if (raw) |value| return value;
         const metamethod_name = binaryMetamethod(op);
@@ -2564,9 +2565,14 @@ pub const State = struct {
     }
 
     fn assertValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        if (op.arg_count == 0) return self.fail("bad argument #1 to 'assert' (value expected)");
+
         const condition = argValue(self, thread, op, 0);
         if (!truthy(condition)) {
-            const message = if (op.arg_count >= 2) argValue(self, thread, op, 1) else Value{ .string = try self.intern("assertion failed!") };
+            const message = if (op.arg_count >= 2)
+                try self.errorObjectValue(argValue(self, thread, op, 1))
+            else
+                Value{ .string = try self.intern("assertion failed!") };
             return self.throwValue(message);
         }
 
@@ -2577,15 +2583,21 @@ pub const State = struct {
     }
 
     fn errorValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        const value = argValue(self, thread, op, 0);
+        const raw_value = argValue(self, thread, op, 0);
+        const value = try self.errorObjectValue(raw_value);
         const level = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse 1 else 1;
-        if (level <= 0 or value != .string) return self.throwValue(value);
+        if (level <= 0 or value != .string or raw_value == .nil) return self.throwValue(value);
 
         const level_index = std.math.cast(usize, level) orelse return self.throwValue(value);
         const line = self.lineForErrorLevel(thread, level_index) orelse return self.throwValue(value);
         const message = try std.fmt.allocPrint(self.allocator, "zlua:{d}: {s}", .{ line, value.string });
         defer self.allocator.free(message);
         return self.throwValue(.{ .string = try self.intern(message) });
+    }
+
+    fn errorObjectValue(self: *State, value: Value) !Value {
+        if (value == .nil) return .{ .string = try self.intern("<no error object>") };
+        return value;
     }
 
     fn pcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {

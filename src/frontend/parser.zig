@@ -21,7 +21,6 @@ const Parser = struct {
             const statement = try self.parseStatement(end_tags);
             try statements.append(self.allocator, statement);
             if (statement == .return_stmt) {
-                while (self.match(.semicolon) != null) {}
                 if (!self.atBlockEnd(end_tags)) return error.ParseError;
             }
         }

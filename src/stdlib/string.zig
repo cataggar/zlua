@@ -538,7 +538,7 @@ pub fn rep(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
     const count_value = runtime.argValue(state, thread, op, 1);
     const count = switch (count_value) {
-        .number => |number| runtime.floatToInteger(number),
+        .number => |number| runtime.floatToInteger(number) orelse return state.fail("number has no integer representation"),
         else => runtime.toInteger(count_value),
     } orelse return state.fail("number expected");
     const sep = if (op.arg_count >= 3) try state.expectString(runtime.argValue(state, thread, op, 2)) else "";
@@ -576,8 +576,10 @@ pub fn reverse(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn sub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const start = normalizeIndex(runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse 1, source.len);
-    const stop = normalizeIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse -1 else -1, source.len);
+    const start_arg = if (op.arg_count >= 2) runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number has no integer representation") else 1;
+    const stop_arg = if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse return state.fail("number has no integer representation") else -1;
+    const start = normalizeIndex(start_arg, source.len);
+    const stop = normalizeIndex(stop_arg, source.len);
     if (start > stop or start > source.len) {
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern("") }});
         return;

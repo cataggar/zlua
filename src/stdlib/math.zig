@@ -189,7 +189,8 @@ pub fn ult(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 fn unary(state: *State, thread: *Thread, op: bytecode.Call, func: UnaryFn) !void {
-    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const arg = runtime.argValue(state, thread, op, 0);
+    const value = runtime.toNumber(arg) catch return state.fail(unaryArgError(func));
     const result = switch (func) {
         .acos => std.math.acos(value),
         .asin => std.math.asin(value),
@@ -200,6 +201,18 @@ fn unary(state: *State, thread: *Thread, op: bytecode.Call, func: UnaryFn) !void
         .tan => @tan(value),
     };
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = result }});
+}
+
+fn unaryArgError(func: UnaryFn) []const u8 {
+    return switch (func) {
+        .acos => "bad argument #1 to 'acos' (number expected)",
+        .asin => "bad argument #1 to 'asin' (number expected)",
+        .cos => "bad argument #1 to 'cos' (number expected)",
+        .exp => "bad argument #1 to 'exp' (number expected)",
+        .sin => "bad argument #1 to 'sin' (number expected)",
+        .sqrt => "bad argument #1 to 'sqrt' (number expected)",
+        .tan => "bad argument #1 to 'tan' (number expected)",
+    };
 }
 
 fn unaryScale(state: *State, thread: *Thread, op: bytecode.Call, scale: f64) !void {

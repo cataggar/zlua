@@ -291,6 +291,8 @@ pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn tonumber(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    if (op.arg_count == 0) return state.fail("bad argument #1 to 'tonumber' (value expected)");
+
     const value = runtime.argValue(state, thread, op, 0);
     if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil) {
         const base = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("base out of range");
