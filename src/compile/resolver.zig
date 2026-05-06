@@ -1,4 +1,5 @@
 const std = @import("std");
+const errors = @import("../errors.zig");
 const frontend = @import("../frontend.zig");
 const ast = frontend.ast;
 const source = frontend.source;
@@ -53,7 +54,17 @@ const Lookup = union(enum) {
 };
 
 pub fn resolve(allocator: std.mem.Allocator, tree: *const ast.Ast) !void {
-    var context = FunctionContext.init(allocator, null);
+    var context = FunctionContext.init(allocator, null, null);
+    defer context.deinit();
+
+    try context.enterScope();
+    try context.declareLocal(.{ .name = "_ENV", .span = zero_span }, .regular, false);
+    try context.resolveBlock(tree.statements, true);
+    try context.leaveScope();
+}
+
+pub fn resolveWithDiagnostic(allocator: std.mem.Allocator, tree: *const ast.Ast, error_diagnostic: *?errors.Diagnostic) !void {
+    var context = FunctionContext.init(allocator, null, error_diagnostic);
     defer context.deinit();
 
     try context.enterScope();
@@ -65,6 +76,7 @@ pub fn resolve(allocator: std.mem.Allocator, tree: *const ast.Ast) !void {
 const FunctionContext = struct {
     allocator: std.mem.Allocator,
     parent: ?*FunctionContext,
+    error_diagnostic: ?*?errors.Diagnostic = null,
     decls: std.ArrayList(Decl) = .empty,
     scopes: std.ArrayList(Scope) = .empty,
     labels: std.ArrayList(Label) = .empty,
@@ -72,8 +84,8 @@ const FunctionContext = struct {
     loop_depth: usize = 0,
     upvalues: std.ArrayList([]const u8) = .empty,
 
-    fn init(allocator: std.mem.Allocator, parent: ?*FunctionContext) FunctionContext {
-        return .{ .allocator = allocator, .parent = parent };
+    fn init(allocator: std.mem.Allocator, parent: ?*FunctionContext, error_diagnostic: ?*?errors.Diagnostic) FunctionContext {
+        return .{ .allocator = allocator, .parent = parent, .error_diagnostic = error_diagnostic };
     }
 
     fn deinit(self: *FunctionContext) void {
@@ -99,7 +111,7 @@ const FunctionContext = struct {
         var index = scope.goto_start;
         while (index < self.gotos.items.len) : (index += 1) {
             if (self.gotos.items[index].scope_depth != depth) continue;
-            if (depth == 1) return error.ResolveError;
+            if (depth == 1) return self.fail(.{ .missing_label = .{ .name = self.gotos.items[index].name, .span = self.gotos.items[index].span } });
             self.gotos.items[index].scope_depth = depth - 1;
             self.gotos.items[index].decl_count = scope.decl_start;
         }
@@ -176,8 +188,8 @@ const FunctionContext = struct {
                 try self.leaveScope();
                 self.loop_depth -= 1;
             },
-            .break_stmt => {
-                if (self.loop_depth == 0) return error.ResolveError;
+            .break_stmt => |span| {
+                if (self.loop_depth == 0) return self.fail(.{ .break_outside_loop = span });
             },
             .goto_stmt => |name| try self.resolveGoto(name),
             .label_stmt => |name| try self.resolveLabel(name, label_last_noop),
@@ -192,16 +204,16 @@ const FunctionContext = struct {
 
         var close_count: usize = 0;
         for (decl.bindings) |binding| {
-            const attr = try parseAttribute(binding.attribute);
+            const attr = try self.parseAttribute(binding.attribute);
             if (attr == .to_close) close_count += 1;
-            if (close_count > 1) return error.ResolveError;
+            if (close_count > 1) return self.fail(.{ .invalid_close = .{ .span = binding.name.span, .multiple = true } });
             try self.declareLocal(binding.name, attr, false);
         }
     }
 
     fn resolveGlobalDecl(self: *FunctionContext, decl: ast.GlobalDecl) anyerror!void {
-        const default_attr = try parseAttribute(decl.attribute);
-        if (default_attr == .to_close) return error.ResolveError;
+        const default_attr = try self.parseAttribute(decl.attribute);
+        if (default_attr == .to_close) return self.fail(.{ .invalid_close = .{ .span = if (decl.attribute) |attribute| attribute.span else zero_span, .global = true } });
 
         if (decl.all) {
             try self.decls.append(self.allocator, .{
@@ -215,9 +227,9 @@ const FunctionContext = struct {
 
         for (decl.values) |value| try self.resolveExpr(value);
         for (decl.names) |binding| {
-            if (std.mem.eql(u8, binding.name.name, "_ENV")) return error.ResolveError;
-            const attr = if (binding.attribute) |_| try parseAttribute(binding.attribute) else default_attr;
-            if (attr == .to_close) return error.ResolveError;
+            if (std.mem.eql(u8, binding.name.name, "_ENV")) return self.fail(.{ .invalid_environment = binding.name.span });
+            const attr = if (binding.attribute) |_| try self.parseAttribute(binding.attribute) else default_attr;
+            if (attr == .to_close) return self.fail(.{ .invalid_close = .{ .span = binding.name.span, .global = true } });
             try self.decls.append(self.allocator, .{
                 .name = binding.name.name,
                 .span = binding.name.span,
@@ -237,7 +249,7 @@ const FunctionContext = struct {
     }
 
     fn resolveFunctionBody(self: *FunctionContext, body: ast.FunctionBody, method: bool) anyerror!void {
-        var child = FunctionContext.init(self.allocator, self);
+        var child = FunctionContext.init(self.allocator, self, self.error_diagnostic);
         defer child.deinit();
 
         try child.enterScope();
@@ -304,15 +316,15 @@ const FunctionContext = struct {
                 try self.resolveExpr(index.key);
             },
             .field => |field| try self.resolveExpr(field.receiver),
-            else => return error.ResolveError,
+            else => return self.fail(.{ .invalid_assignment_target = exprSpan(expr) }),
         }
     }
 
     fn resolveNameAssignment(self: *FunctionContext, name: ast.Identifier) !void {
         const lookup = try self.lookupName(name.name, true);
         switch (lookup) {
-            .local, .global => |decl| if (decl.read_only) return error.ResolveError,
-            .undeclared => return error.ResolveError,
+            .local, .global => |decl| if (decl.read_only) return self.fail(.{ .assign_const = .{ .name = name.name, .span = name.span } }),
+            .undeclared => return self.fail(.{ .undeclared_global = .{ .name = name.name, .span = name.span } }),
         }
     }
 
@@ -379,7 +391,7 @@ const FunctionContext = struct {
         const env = try self.lookupName("_ENV", false);
         switch (env) {
             .local => {},
-            .global, .undeclared => return error.ResolveError,
+            .global, .undeclared => return self.fail(.{ .invalid_environment = zero_span }),
         }
     }
 
@@ -397,7 +409,7 @@ const FunctionContext = struct {
             const label = self.labels.items[index];
             if (!std.mem.eql(u8, label.name, name.name)) continue;
             if (label.scope_depth <= self.scopes.items.len) {
-                if (self.decls.items.len < label.decl_count) return error.ResolveError;
+                if (self.decls.items.len < label.decl_count) return self.fail(.{ .goto_into_scope = .{ .label = name.name, .decl = self.firstDeclAfter(self.decls.items.len, label.decl_count), .span = name.span } });
                 return;
             }
         }
@@ -412,7 +424,7 @@ const FunctionContext = struct {
 
     fn resolveLabel(self: *FunctionContext, name: ast.Identifier, last_noop: bool) !void {
         for (self.labels.items) |label| {
-            if (std.mem.eql(u8, label.name, name.name)) return error.ResolveError;
+            if (std.mem.eql(u8, label.name, name.name)) return self.fail(.{ .duplicate_label = .{ .name = name.name, .span = name.span, .previous_line = label.span.start.line } });
         }
 
         const decl_count = if (last_noop) self.scopes.items[self.scopes.items.len - 1].decl_start else self.decls.items.len;
@@ -428,7 +440,7 @@ const FunctionContext = struct {
         while (index < self.gotos.items.len) {
             const pending = self.gotos.items[index];
             if (std.mem.eql(u8, pending.name, name.name) and pending.scope_depth >= label.scope_depth) {
-                if (pending.decl_count < label.decl_count) return error.ResolveError;
+                if (pending.decl_count < label.decl_count) return self.fail(.{ .goto_into_scope = .{ .label = pending.name, .decl = self.firstDeclAfter(pending.decl_count, label.decl_count), .span = pending.span } });
                 self.removeGoto(index);
             } else {
                 index += 1;
@@ -443,14 +455,26 @@ const FunctionContext = struct {
         }
         self.gotos.items.len -= 1;
     }
-};
 
-fn parseAttribute(attribute: ?ast.Identifier) !Attribute {
-    const name = if (attribute) |attr| attr.name else return .regular;
-    if (std.mem.eql(u8, name, "const")) return .constant;
-    if (std.mem.eql(u8, name, "close")) return .to_close;
-    return error.ResolveError;
-}
+    fn parseAttribute(self: *FunctionContext, attribute: ?ast.Identifier) !Attribute {
+        const attr = attribute orelse return .regular;
+        if (std.mem.eql(u8, attr.name, "const")) return .constant;
+        if (std.mem.eql(u8, attr.name, "close")) return .to_close;
+        return self.fail(.{ .unknown_attribute = .{ .name = attr.name, .span = attr.span } });
+    }
+
+    fn firstDeclAfter(self: FunctionContext, start: usize, end: usize) []const u8 {
+        if (start < end and start < self.decls.items.len) return self.decls.items[start].name;
+        return "?";
+    }
+
+    fn fail(self: *FunctionContext, diagnostic: errors.ResolveError) Error {
+        if (self.error_diagnostic) |slot| {
+            if (slot.* == null) slot.* = .{ .resolve = diagnostic };
+        }
+        return error.ResolveError;
+    }
+};
 
 fn labelIsLastNoOp(block: ast.Block, index: usize) bool {
     var cursor = index + 1;
@@ -461,6 +485,35 @@ fn labelIsLastNoOp(block: ast.Block, index: usize) bool {
         }
     }
     return true;
+}
+
+fn exprSpan(expr: *const ast.Expr) source.Span {
+    return switch (expr.*) {
+        .nil => |span| span,
+        .boolean => |value| value.span,
+        .integer => |value| value.span,
+        .float => |value| value.span,
+        .string => |value| value.span,
+        .vararg => |span| span,
+        .identifier => |name| name.span,
+        .table_constructor => |constructor| if (constructor.fields.len > 0) fieldSpan(constructor.fields[0]) else zero_span,
+        .function_literal => |body| .{ .start = .{ .line = body.defined_line }, .end = .{ .line = body.defined_line } },
+        .grouped => |inner| exprSpan(inner),
+        .index => |index| exprSpan(index.receiver),
+        .field => |field| field.name.span,
+        .call => |call| exprSpan(call.callee),
+        .method_call => |call| call.method.span,
+        .unary => |unary| exprSpan(unary.operand),
+        .binary => |binary| exprSpan(binary.left),
+    };
+}
+
+fn fieldSpan(field: ast.TableField) source.Span {
+    return switch (field) {
+        .array => |expr| exprSpan(expr),
+        .keyed => |keyed| exprSpan(keyed.key),
+        .named => |named| named.name.span,
+    };
 }
 
 fn expectResolve(source_text: []const u8) !void {

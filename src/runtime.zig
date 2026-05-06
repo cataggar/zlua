@@ -1,5 +1,6 @@
 const std = @import("std");
 const compile = @import("compile.zig");
+const errors = @import("errors.zig");
 const frontend = @import("frontend.zig");
 const process = @import("testing/process.zig");
 const stdlib = @import("stdlib.zig");
@@ -1280,16 +1281,14 @@ pub const State = struct {
     }
 
     pub fn loadSourceAsClosureNamedEnv(self: *State, source: []const u8, source_name: ?[]const u8, environment: Value) !Value {
-        var tree = frontend.parse(self.allocator, source) catch return self.fail("cannot load source");
+        var diagnostic: ?errors.Diagnostic = null;
+        var tree = frontend.parseWithDiagnostic(self.allocator, source, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot load source");
         defer tree.deinit();
 
-        compile.resolver.resolve(self.allocator, &tree) catch return self.fail("cannot resolve source");
+        compile.resolver.resolveWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot resolve source");
         const proto = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(proto);
-        proto.* = compile.compile(self.allocator, &tree) catch |err| switch (err) {
-            error.TooManyReturns => return self.fail("too many returns"),
-            else => return self.fail("cannot compile source"),
-        };
+        proto.* = compile.compileWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot compile source");
         if (source_name) |name| try setProtoSourceName(proto, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);
@@ -4391,6 +4390,15 @@ pub const State = struct {
         return error.RuntimeError;
     }
 
+    fn failLoadDiagnostic(self: *State, source_name: ?[]const u8, source_text: []const u8, diagnostic: ?errors.Diagnostic, fallback: []const u8) RuntimeError {
+        const rendered = if (diagnostic) |diag|
+            errors.renderLoadDiagnostic(self.allocator, source_name, source_text, diag) catch return self.fail(fallback)
+        else
+            return self.fail(fallback);
+        defer self.allocator.free(rendered);
+        return self.fail(self.intern(rendered) catch return self.fail(fallback));
+    }
+
     fn throwValue(self: *State, value: Value) RuntimeError {
         self.last_error = null;
         self.last_error_value = value;
@@ -4408,23 +4416,18 @@ pub fn executeSource(allocator: std.mem.Allocator, source: []const u8) !process.
 }
 
 pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8, options: ExecuteOptions) !process.ProcessResult {
-    var tree = frontend.parse(allocator, source) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected source: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var diagnostic: ?errors.Diagnostic = null;
+    var tree = frontend.parseWithDiagnostic(allocator, source, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot load source");
     };
     defer tree.deinit();
 
-    compile.resolver.resolve(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected source: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    compile.resolver.resolveWithDiagnostic(allocator, &tree, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot resolve source");
     };
 
-    var proto = compile.compile(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua compiler rejected source: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var proto = compile.compileWithDiagnostic(allocator, &tree, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot compile source");
     };
     defer proto.deinit();
 
@@ -4459,6 +4462,17 @@ pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8
         .signal = null,
         .timed_out = false,
     };
+}
+
+fn sourceFailureResult(allocator: std.mem.Allocator, source: []const u8, diagnostic: ?errors.Diagnostic, fallback: []const u8) !process.ProcessResult {
+    const rendered = if (diagnostic) |diag|
+        try errors.renderLoadDiagnostic(allocator, null, source, diag)
+    else
+        try allocator.dupe(u8, fallback);
+    defer allocator.free(rendered);
+    const message = try std.fmt.allocPrint(allocator, "{s}\n", .{rendered});
+    defer allocator.free(message);
+    return process.ownedResult(allocator, "", message, 1);
 }
 
 const BinaryOp = enum { add, sub, mul, div, idiv, mod, pow, band, bor, bxor, shl, shr, concat };

@@ -42,7 +42,8 @@ pub fn loadfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
         const source_name = try std.fmt.allocPrint(state.allocator, "@{s}", .{path});
         defer state.allocator.free(source_name);
         break :blk state.loadSourceAsClosureNamedEnv(source, source_name, environment) catch {
-            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot load source") } });
+            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load source";
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
             return;
         };
     };

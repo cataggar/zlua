@@ -1,4 +1,5 @@
 const std = @import("std");
+const errors = @import("errors.zig");
 
 pub const source = @import("frontend/source.zig");
 pub const diagnostic = @import("frontend/diagnostic.zig");
@@ -18,6 +19,10 @@ pub fn lex(allocator: std.mem.Allocator, source_text: []const u8) ![]Token {
 
 pub fn parse(allocator: std.mem.Allocator, source_text: []const u8) !Ast {
     return parser.parse(allocator, source_text);
+}
+
+pub fn parseWithDiagnostic(allocator: std.mem.Allocator, source_text: []const u8, error_diagnostic: *?errors.Diagnostic) !Ast {
+    return parser.parseWithDiagnostic(allocator, source_text, error_diagnostic);
 }
 
 test {

@@ -39,12 +39,7 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     }
 
     const closure = state.loadSourceAsClosureNamedEnv(source, source_name, loadEnvironment(state, thread, op)) catch {
-        if (state.last_error_value == .string and std.mem.eql(u8, state.last_error_value.string, "too many returns")) {
-            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(state.last_error_value.string) } });
-            return;
-        }
-        const message = try loadFailureMessage(state.allocator, source);
-        defer state.allocator.free(message);
+        const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load source";
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
     };
@@ -122,19 +117,6 @@ fn isReaderFunction(value: Value) bool {
         .closure, .coroutine_wrapper, .gmatch_iterator, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap, .native => true,
         else => false,
     };
-}
-
-fn loadFailureMessage(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    if (unknownAttribute(source)) |name| return std.fmt.allocPrint(allocator, "unknown attribute '{s}'", .{name});
-    if (multipleCloseVariables(source)) return allocator.dupe(u8, "multiple to-be-closed variables in local list");
-    if (try constAssignmentMessage(allocator, source)) |message| return message;
-    if (try gotoFailureMessage(allocator, source)) |message| return message;
-    if (try globalFailureMessage(allocator, source)) |message| return message;
-
-    const unquoted = try removeSyntaxQuotes(allocator, source);
-    defer allocator.free(unquoted);
-    const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
-    return std.fmt.allocPrint(allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number unexpected symbol", .{ source, unquoted, unicode_prefix });
 }
 
 fn globalFailureMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {

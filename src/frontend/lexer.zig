@@ -1,11 +1,13 @@
 const std = @import("std");
 const diagnostic = @import("diagnostic.zig");
+const errors = @import("../errors.zig");
 const source_mod = @import("source.zig");
 const token_mod = @import("token.zig");
 
 pub const Lexer = struct {
     allocator: std.mem.Allocator,
     source: []const u8,
+    error_diagnostic: ?*?errors.Diagnostic = null,
     index: usize = 0,
     line: usize = 1,
     column: usize = 1,
@@ -13,6 +15,10 @@ pub const Lexer = struct {
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Lexer {
         return .{ .allocator = allocator, .source = source };
+    }
+
+    pub fn initWithDiagnostic(allocator: std.mem.Allocator, source: []const u8, error_diagnostic: *?errors.Diagnostic) Lexer {
+        return .{ .allocator = allocator, .source = source, .error_diagnostic = error_diagnostic };
     }
 
     pub fn deinit(self: *Lexer) void {
@@ -328,6 +334,18 @@ pub const Lexer = struct {
 
     fn addDiagnostic(self: *Lexer, code: diagnostic.Code, start: source_mod.Position, end: source_mod.Position, message: []const u8) !void {
         try self.diagnostics.append(self.allocator, .{ .code = code, .span = .{ .start = start, .end = end }, .message = message });
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            const lexeme = if (end.offset <= self.source.len and start.offset <= end.offset) self.source[start.offset..end.offset] else "";
+            slot.* = .{ .syntax = .{ .unexpected = .{
+                .token = .{
+                    .tag = .identifier,
+                    .lexeme = lexeme,
+                    .span = .{ .start = start, .end = end },
+                    .unquoted = code == .unexpected_character,
+                },
+                .message = syntaxMessage(code),
+            } } };
+        };
     }
 
     fn position(self: Lexer) source_mod.Position {
@@ -382,6 +400,29 @@ pub fn lex(allocator: std.mem.Allocator, source: []const u8) ![]token_mod.Token 
         if (tok.tag == .eof) break;
     }
     return tokens.toOwnedSlice(allocator);
+}
+
+pub fn lexWithDiagnostic(allocator: std.mem.Allocator, source: []const u8, error_diagnostic: *?errors.Diagnostic) ![]token_mod.Token {
+    var lexer = Lexer.initWithDiagnostic(allocator, source, error_diagnostic);
+    defer lexer.deinit();
+    var tokens = std.ArrayList(token_mod.Token).empty;
+    errdefer tokens.deinit(allocator);
+    while (true) {
+        const tok = try lexer.next();
+        try tokens.append(allocator, tok);
+        if (tok.tag == .eof) break;
+    }
+    return tokens.toOwnedSlice(allocator);
+}
+
+fn syntaxMessage(code: diagnostic.Code) errors.SyntaxMessage {
+    return switch (code) {
+        .unexpected_character => .unexpected_symbol,
+        .unfinished_string => .unfinished_string,
+        .invalid_escape => .invalid_escape,
+        .malformed_number => .malformed_number,
+        .unfinished_long_bracket => .unfinished_long_bracket,
+    };
 }
 
 fn isWhitespace(byte: ?u8) bool {

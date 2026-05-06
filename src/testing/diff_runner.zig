@@ -1,6 +1,7 @@
 const std = @import("std");
 const clua = @import("clua.zig");
 const compile = @import("../compile.zig");
+const errors = @import("../errors.zig");
 const expected_failures = @import("expected_failures.zig");
 const frontend = @import("../frontend.zig");
 const metadata = @import("metadata.zig");
@@ -247,63 +248,64 @@ fn runZluaForStage(
 }
 
 fn runZluaLexStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
-    const tokens = frontend.lex(allocator, source) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua lexer rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var diagnostic: ?errors.Diagnostic = null;
+    const tokens = frontend.lexer.lexWithDiagnostic(allocator, source, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot lex source");
     };
     allocator.free(tokens);
     return process.ownedResult(allocator, "", "", 0);
 }
 
 fn runZluaParseStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
-    var tree = frontend.parse(allocator, source) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var diagnostic: ?errors.Diagnostic = null;
+    var tree = frontend.parseWithDiagnostic(allocator, source, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot parse source");
     };
     tree.deinit();
     return process.ownedResult(allocator, "", "", 0);
 }
 
 fn runZluaResolveStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
-    var tree = frontend.parse(allocator, source) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var diagnostic: ?errors.Diagnostic = null;
+    var tree = frontend.parseWithDiagnostic(allocator, source, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot parse source");
     };
     defer tree.deinit();
 
-    compile.resolver.resolve(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    compile.resolver.resolveWithDiagnostic(allocator, &tree, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot resolve source");
     };
     return process.ownedResult(allocator, "", "", 0);
 }
 
 fn runZluaCompileStage(allocator: std.mem.Allocator, source: []const u8) !process.ProcessResult {
-    var tree = frontend.parse(allocator, source) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua parser rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var diagnostic: ?errors.Diagnostic = null;
+    var tree = frontend.parseWithDiagnostic(allocator, source, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot parse source");
     };
     defer tree.deinit();
 
-    compile.resolver.resolve(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua resolver rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    compile.resolver.resolveWithDiagnostic(allocator, &tree, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot resolve source");
     };
 
-    var proto = compile.compile(allocator, &tree) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "zlua compiler rejected fixture: {s}\n", .{@errorName(err)});
-        defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+    var proto = compile.compileWithDiagnostic(allocator, &tree, &diagnostic) catch {
+        return sourceFailureResult(allocator, source, diagnostic, "cannot compile source");
     };
     defer proto.deinit();
 
     return process.ownedResult(allocator, "", "", 0);
+}
+
+fn sourceFailureResult(allocator: std.mem.Allocator, source: []const u8, diagnostic: ?errors.Diagnostic, fallback: []const u8) !process.ProcessResult {
+    const rendered = if (diagnostic) |diag|
+        try errors.renderLoadDiagnostic(allocator, null, source, diag)
+    else
+        try allocator.dupe(u8, fallback);
+    defer allocator.free(rendered);
+    const message = try std.fmt.allocPrint(allocator, "{s}\n", .{rendered});
+    defer allocator.free(message);
+    return process.ownedResult(allocator, "", message, 1);
 }
 
 fn resultsEqual(

@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const errors = @import("../errors.zig");
 const lexer = @import("lexer.zig");
 const source_mod = @import("source.zig");
 const token_mod = @import("token.zig");
@@ -9,6 +10,7 @@ const Tag = token_mod.Tag;
 const Parser = struct {
     allocator: std.mem.Allocator,
     tokens: []const token_mod.Token,
+    error_diagnostic: ?*?errors.Diagnostic = null,
     index: usize = 0,
 
     fn parseChunk(self: *Parser) anyerror![]const ast.Stmt {
@@ -21,7 +23,7 @@ const Parser = struct {
             const statement = try self.parseStatement(end_tags);
             try statements.append(self.allocator, statement);
             if (statement == .return_stmt) {
-                if (!self.atBlockEnd(end_tags)) return error.ParseError;
+                if (!self.atBlockEnd(end_tags)) return self.failUnexpected(.syntax_error);
             }
         }
         return statements.toOwnedSlice(self.allocator);
@@ -209,7 +211,7 @@ const Parser = struct {
             return .{ .assignment = .{ .targets = try self.singleExprSlice(first), .values = try self.parseExpressionList() } };
         }
         if (first.* == .call or first.* == .method_call) return .{ .call_stmt = first };
-        return error.ParseError;
+        return self.failUnexpected(.syntax_error);
     }
 
     fn parseExpressionList(self: *Parser) anyerror![]const *ast.Expr {
@@ -245,9 +247,9 @@ const Parser = struct {
         if (self.match(.float_literal)) |tok| return self.newExpr(.{ .float = .{ .lexeme = tok.lexeme, .span = tok.span } });
         if (self.match(.string_literal)) |tok| return self.newExpr(.{ .string = .{ .lexeme = tok.lexeme, .span = tok.span } });
         if (self.match(.ellipsis)) |tok| return self.newExpr(.{ .vararg = tok.span });
-        if (self.match(.left_brace)) |_| return self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace() });
+        if (self.match(.left_brace)) |tok| return self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace(tok) });
         if (self.match(.keyword_function)) |tok| return self.newExpr(.{ .function_literal = try self.parseFunctionBody(tok.span.start.line) });
-        return error.ParseError;
+        return self.failUnexpected(.syntax_error);
     }
 
     fn parsePrefixExpression(self: *Parser) anyerror!*ast.Expr {
@@ -257,7 +259,7 @@ const Parser = struct {
             const inner = try self.parseExpression(0);
             _ = try self.expect(.right_paren);
             break :blk try self.newExpr(.{ .grouped = inner });
-        } else return error.ParseError;
+        } else return self.failUnexpected(.syntax_error);
 
         while (true) {
             if (self.match(.left_bracket)) |_| {
@@ -284,19 +286,21 @@ const Parser = struct {
             _ = try self.expect(.right_paren);
             return args;
         }
-        if (self.match(.left_brace)) |_| return self.singleExprSlice(try self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace() }));
+        if (self.match(.left_brace)) |tok| return self.singleExprSlice(try self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace(tok) }));
         if (self.match(.string_literal)) |tok| return self.singleExprSlice(try self.newExpr(.{ .string = .{ .lexeme = tok.lexeme, .span = tok.span } }));
-        return error.ParseError;
+        return self.failUnexpected(.syntax_error);
     }
 
-    fn parseTableConstructorAfterLeftBrace(self: *Parser) anyerror!ast.TableConstructor {
+    fn parseTableConstructorAfterLeftBrace(self: *Parser, open: token_mod.Token) anyerror!ast.TableConstructor {
         var fields = std.ArrayList(ast.TableField).empty;
         while (!self.check(.right_brace)) {
+            if (self.check(.eof)) return self.failExpectedClose("}", "{", open, self.peek());
             try fields.append(self.allocator, try self.parseTableField());
             if (self.match(.comma) == null and self.match(.semicolon) == null) break;
             if (self.check(.right_brace)) break;
         }
-        _ = try self.expect(.right_brace);
+        if (!self.check(.right_brace)) return self.failExpectedClose("}", "{", open, self.peek());
+        _ = self.advance();
         return .{ .fields = try fields.toOwnedSlice(self.allocator) };
     }
 
@@ -348,7 +352,7 @@ const Parser = struct {
             }
             try params.append(self.allocator, try self.expectIdentifier());
             if (self.match(.comma) == null) break;
-            if (self.check(.right_paren)) return error.ParseError;
+            if (self.check(.right_paren)) return self.failUnexpected(.syntax_error);
         }
         return .{ .params = try params.toOwnedSlice(self.allocator), .is_vararg = is_vararg, .vararg_name = vararg_name };
     }
@@ -377,8 +381,32 @@ const Parser = struct {
     }
 
     fn expect(self: *Parser, tag: Tag) anyerror!token_mod.Token {
-        if (!self.check(tag)) return error.ParseError;
+        if (!self.check(tag)) return self.failExpected(tag);
         return self.advance();
+    }
+
+    fn failExpected(self: *Parser, tag: Tag) error{ParseError} {
+        _ = tag;
+        return self.failUnexpected(.syntax_error);
+    }
+
+    fn failExpectedClose(self: *Parser, expected: []const u8, opener: []const u8, open: token_mod.Token, near: token_mod.Token) error{ParseError} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .syntax = .{ .expected_close = .{
+                .expected = expected,
+                .opener = opener,
+                .opener_line = open.span.start.line,
+                .near = errors.tokenRef(near),
+            } } };
+        };
+        return error.ParseError;
+    }
+
+    fn failUnexpected(self: *Parser, message: errors.SyntaxMessage) error{ParseError} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .syntax = .{ .unexpected = .{ .token = errors.tokenRef(self.peek()), .message = message } } };
+        };
+        return error.ParseError;
     }
 
     fn match(self: *Parser, tag: Tag) ?token_mod.Token {
@@ -491,6 +519,19 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !ast.Ast {
     errdefer arena.deinit();
 
     var parser: Parser = .{ .allocator = arena.allocator(), .tokens = tokens };
+    const statements = try parser.parseChunk();
+    _ = try parser.expect(.eof);
+    return .{ .arena = arena, .source = source, .statements = statements };
+}
+
+pub fn parseWithDiagnostic(allocator: std.mem.Allocator, source: []const u8, error_diagnostic: *?errors.Diagnostic) !ast.Ast {
+    const tokens = try lexer.lexWithDiagnostic(allocator, source, error_diagnostic);
+    defer allocator.free(tokens);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    var parser: Parser = .{ .allocator = arena.allocator(), .tokens = tokens, .error_diagnostic = error_diagnostic };
     const statements = try parser.parseChunk();
     _ = try parser.expect(.eof);
     return .{ .arena = arena, .source = source, .statements = statements };
