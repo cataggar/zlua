@@ -330,15 +330,25 @@ pub const Thread = struct {
     hook_count_remaining: u32 = 0,
     hook_running: bool = false,
     hook_return_name: ?[]const u8 = null,
+    hook_level2_func: Value = .nil,
+    hook_transfer_index_base: i64 = 0,
+    hook_transfer_stack_base: usize = 0,
+    hook_transfer_count: usize = 0,
+    hook_transfer_values: []const Value = &.{},
     next_call_name: ?[]const u8 = null,
+    next_call_namewhat: ?[]const u8 = null,
     pending_yield_hook_return: bool = false,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
+    last_transfer_base: usize = 0,
+    last_transfer_count: usize = 0,
     yield_result_base: usize = 0,
     yield_result_count: u16 = 0,
     native_call_depth: usize = 0,
+    traceback_native_name: ?[]const u8 = null,
     protected_close_depth: usize = 0,
     close_error_value: ?Value = null,
+    error_traceback: ?[]const u8 = null,
     pending_unwind_error: ?Value = null,
     pending_unwind_resume_frame_count: usize = 0,
     pending_unwind_target_frame_count: usize = 0,
@@ -404,8 +414,11 @@ const CallFrame = struct {
     return_count: u16,
     varargs: []const Value,
     owns_varargs: bool = false,
+    vararg_table_local: Value = .nil,
     last_hook_line: ?usize = null,
     debug_name_override: ?[]const u8 = null,
+    debug_namewhat_override: ?[]const u8 = null,
+    is_tail_call: bool = false,
     pending_returns: ?[]Value = null,
 
     fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
@@ -788,6 +801,8 @@ pub const State = struct {
         try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
         try state.setTable(debug_lib, .{ .string = try state.intern("gethook") }, .{ .native = .debug_gethook });
         try state.setTable(debug_lib, .{ .string = try state.intern("setmetatable") }, .{ .native = .debug_setmetatable });
+        try state.setTable(debug_lib, .{ .string = try state.intern("setuservalue") }, .{ .native = .debug_setuservalue });
+        try state.setTable(debug_lib, .{ .string = try state.intern("getuservalue") }, .{ .native = .debug_getuservalue });
         try state.globals.put(try state.intern("debug"), debug_lib);
 
         const package_lib = try state.newTableWithHints(0, 8);
@@ -1058,7 +1073,15 @@ pub const State = struct {
 
     pub fn currentWhat(self: *State, thread: *Thread, level: i64) []const u8 {
         _ = self;
-        return if (level == 2 and thread.protected_close_depth != 0) "C" else "Lua";
+        if (level == 2 and thread.protected_close_depth != 0) return "C";
+        if (level >= 1) {
+            const depth: usize = @intCast(level);
+            if (depth <= thread.frames.items.len) {
+                const frame = thread.frames.items[thread.frames.items.len - depth];
+                if (frame.proto.defined_line == 0) return "main";
+            }
+        }
+        return "Lua";
     }
 
     pub fn currentFunctionName(self: *State, thread: *Thread, level: i64) ?[]const u8 {
@@ -1079,6 +1102,15 @@ pub const State = struct {
         return frame.debug_name_override orelse frame.proto.debug_name;
     }
 
+    pub fn currentFunctionNameWhat(self: *State, thread: *Thread, level: i64) ?[]const u8 {
+        _ = self;
+        if (level < 1) return null;
+        const depth: usize = @intCast(level);
+        if (depth > thread.frames.items.len) return null;
+        const frame = thread.frames.items[thread.frames.items.len - depth];
+        return frame.debug_namewhat_override;
+    }
+
     pub fn setThreadHook(self: *State, target: *Thread, hook: Value, mask: []const u8, count: u32) void {
         _ = self;
         target.hook = hook;
@@ -1093,7 +1125,7 @@ pub const State = struct {
         target.hook_line = std.mem.indexOfScalar(u8, mask, 'l') != null;
         target.hook_return = std.mem.indexOfScalar(u8, mask, 'r') != null;
         target.hook_count = count;
-        target.hook_count_remaining = count;
+        target.hook_count_remaining = hookDispatchInterval(count);
         if (target.hook_line and target.frames.items.len != 0) {
             const frame_index = target.frames.items.len - 1;
             target.frames.items[frame_index].last_hook_line = lineForFrame(target.frames.items[frame_index]);
@@ -1134,6 +1166,14 @@ pub const State = struct {
         if (thread.hook == .nil or thread.hook_running) return;
         thread.hook_running = true;
         defer thread.hook_running = false;
+        self.conservative_gc_depth += 1;
+        defer self.conservative_gc_depth -= 1;
+        const previous_result_base = thread.last_result_base;
+        const previous_result_count = thread.last_result_count;
+        defer {
+            thread.last_result_base = previous_result_base;
+            thread.last_result_count = previous_result_count;
+        }
         _ = try self.callOneResult(thread, thread.hook, args);
     }
 
@@ -1144,7 +1184,8 @@ pub const State = struct {
         const line = lineForFrame(thread.frames.items[frame_index]) orelse return;
         if (thread.frames.items[frame_index].last_hook_line == line) return;
         thread.frames.items[frame_index].last_hook_line = line;
-        const args = [_]Value{ .{ .string = try self.intern("line") }, .{ .integer = @intCast(line) } };
+        const line_value = if (thread.frames.items[frame_index].closure.stripped_debug) Value.nil else Value{ .integer = @intCast(line) };
+        const args = [_]Value{ .{ .string = try self.intern("line") }, line_value };
         try self.callHookWithArgs(thread, &args);
     }
 
@@ -1154,8 +1195,12 @@ pub const State = struct {
             thread.hook_count_remaining -= 1;
             return;
         }
-        thread.hook_count_remaining = thread.hook_count;
+        thread.hook_count_remaining = hookDispatchInterval(thread.hook_count);
         try self.callHook(thread, "count");
+    }
+
+    fn hookDispatchInterval(count: u32) u32 {
+        return if (count == 0) 0 else count * 2;
     }
 
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -1524,7 +1569,7 @@ pub const State = struct {
         }
 
         const closure = try self.allocator.create(Closure);
-        closure.* = .{ .proto = proto, .upvalues = upvalues };
+        closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = parent.closure.stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
         return .{ .closure = closure };
@@ -1820,7 +1865,7 @@ pub const State = struct {
 
         return switch (metamethod) {
             .table => self.getTableDepthContinuable(thread, dest, metamethod, key, depth + 1),
-            else => try self.callOneResultWithContinuation(thread, metamethod, &.{ table_value, key }, .{ .value = dest }),
+            else => try self.callOneMetamethodWithContinuation(thread, "__index", metamethod, &.{ table_value, key }, .{ .value = dest }),
         };
     }
 
@@ -1841,7 +1886,7 @@ pub const State = struct {
         return switch (metamethod) {
             .table => self.getTableDepth(thread, metamethod, key, depth + 1),
             else => if (thread) |active_thread|
-                try self.callOneResult(active_thread, metamethod, &.{ table_value, key })
+                try self.callOneMetamethod(active_thread, "__index", metamethod, &.{ table_value, key })
             else
                 self.fail(callErrorMessage(metamethod)),
         };
@@ -1892,7 +1937,7 @@ pub const State = struct {
 
         switch (metamethod) {
             .table => try self.setTableDepthContinuable(thread, metamethod, key, value, depth + 1),
-            else => _ = try self.callOneResultWithContinuation(thread, metamethod, &.{ table_value, key, value }, .discard),
+            else => _ = try self.callOneMetamethodWithContinuation(thread, "__newindex", metamethod, &.{ table_value, key, value }, .discard),
         }
     }
 
@@ -1921,7 +1966,7 @@ pub const State = struct {
         switch (metamethod) {
             .table => try self.setTableDepth(thread, metamethod, key, value, depth + 1),
             else => if (thread) |active_thread| {
-                _ = try self.callOneResult(active_thread, metamethod, &.{ table_value, key, value });
+                _ = try self.callOneMetamethod(active_thread, "__newindex", metamethod, &.{ table_value, key, value });
             } else {
                 return self.fail(callErrorMessage(metamethod));
             },
@@ -1949,11 +1994,11 @@ pub const State = struct {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
             .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod|
-                try self.callOneResult(thread, metamethod, &.{ value, value })
+                try self.callOneMetamethod(thread, "__len", metamethod, &.{ value, value })
             else
                 .{ .integer = table.len() },
             else => if ((try self.getMetamethod(value, "__len"))) |metamethod|
-                try self.callOneResult(thread, metamethod, &.{ value, value })
+                try self.callOneMetamethod(thread, "__len", metamethod, &.{ value, value })
             else
                 self.fail("attempt to get length of a non-string value"),
         };
@@ -1986,11 +2031,32 @@ pub const State = struct {
             if (entering_native) thread.native_call_depth -= 1;
         }
         const call_name = thread.next_call_name;
+        const call_namewhat = thread.next_call_namewhat;
         thread.next_call_name = null;
+        thread.next_call_namewhat = null;
         const hook_native = isNativeCallable(callee) and !thread.hook_running;
-        if (hook_native and thread.hook_call) try self.callHook(thread, "call");
+        if (hook_native and thread.hook_call) {
+            const previous_hook_func = thread.hook_level2_func;
+            const previous_transfer_index_base = thread.hook_transfer_index_base;
+            const previous_transfer_stack_base = thread.hook_transfer_stack_base;
+            const previous_transfer_count = thread.hook_transfer_count;
+            const previous_transfer_values = thread.hook_transfer_values;
+            thread.hook_level2_func = callee;
+            thread.hook_transfer_index_base = 1;
+            thread.hook_transfer_stack_base = thread.frames.items[thread.frames.items.len - 1].base + resolved.base + 1;
+            thread.hook_transfer_count = resolved.arg_count;
+            thread.hook_transfer_values = &.{};
+            defer {
+                thread.hook_level2_func = previous_hook_func;
+                thread.hook_transfer_index_base = previous_transfer_index_base;
+                thread.hook_transfer_stack_base = previous_transfer_stack_base;
+                thread.hook_transfer_count = previous_transfer_count;
+                thread.hook_transfer_values = previous_transfer_values;
+            }
+            try self.callHook(thread, "call");
+        }
         switch (callee) {
-            .closure => |closure| try self.callClosure(thread, resolved, closure, call_name),
+            .closure => |closure| try self.callClosure(thread, resolved, closure, call_name, call_namewhat),
             .native_print => {
                 for (0..resolved.arg_count) |index| {
                     if (index != 0) try self.stdout.append(self.allocator, '\t');
@@ -2082,7 +2148,26 @@ pub const State = struct {
                 try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
             },
         }
-        if (hook_native and thread.hook_return) try self.callReturnHook(thread, call_name orelse nativeHookName(callee));
+        if (hook_native and thread.hook_return) {
+            const previous_hook_func = thread.hook_level2_func;
+            const previous_transfer_index_base = thread.hook_transfer_index_base;
+            const previous_transfer_stack_base = thread.hook_transfer_stack_base;
+            const previous_transfer_count = thread.hook_transfer_count;
+            const previous_transfer_values = thread.hook_transfer_values;
+            thread.hook_level2_func = callee;
+            thread.hook_transfer_index_base = 2;
+            thread.hook_transfer_stack_base = thread.last_transfer_base;
+            thread.hook_transfer_count = thread.last_transfer_count;
+            thread.hook_transfer_values = &.{};
+            defer {
+                thread.hook_level2_func = previous_hook_func;
+                thread.hook_transfer_index_base = previous_transfer_index_base;
+                thread.hook_transfer_stack_base = previous_transfer_stack_base;
+                thread.hook_transfer_count = previous_transfer_count;
+                thread.hook_transfer_values = previous_transfer_values;
+            }
+            try self.callReturnHook(thread, call_name orelse nativeHookName(callee));
+        }
     }
 
     fn prependCallArgument(self: *State, thread: *Thread, resolved: bytecode.Call, metamethod: Value, receiver: Value) !void {
@@ -2104,6 +2189,34 @@ pub const State = struct {
 
     fn callOneResultWithContinuation(self: *State, thread: *Thread, callable: Value, args: []const Value, result: CallOneContinuationResult) anyerror!Value {
         return self.callOneResultMaybeContinuation(thread, callable, args, result);
+    }
+
+    fn callOneMetamethodWithContinuation(self: *State, thread: *Thread, name: []const u8, callable: Value, args: []const Value, result: CallOneContinuationResult) anyerror!Value {
+        const previous_name = thread.next_call_name;
+        const previous_namewhat = thread.next_call_namewhat;
+        thread.next_call_name = metamethodDebugName(name);
+        thread.next_call_namewhat = "metamethod";
+        defer {
+            thread.next_call_name = previous_name;
+            thread.next_call_namewhat = previous_namewhat;
+        }
+        return self.callOneResultWithContinuation(thread, callable, args, result);
+    }
+
+    fn callOneMetamethod(self: *State, thread: *Thread, name: []const u8, callable: Value, args: []const Value) anyerror!Value {
+        const previous_name = thread.next_call_name;
+        const previous_namewhat = thread.next_call_namewhat;
+        thread.next_call_name = metamethodDebugName(name);
+        thread.next_call_namewhat = "metamethod";
+        defer {
+            thread.next_call_name = previous_name;
+            thread.next_call_namewhat = previous_namewhat;
+        }
+        return self.callOneResult(thread, callable, args);
+    }
+
+    fn metamethodDebugName(name: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, name, "__")) name[2..] else name;
     }
 
     fn callOneResultMaybeContinuation(self: *State, thread: *Thread, callable: Value, args: []const Value, continuation_result: ?CallOneContinuationResult) anyerror!Value {
@@ -2424,7 +2537,7 @@ pub const State = struct {
             if (bitwiseIntegerError(lhs, rhs, kind)) |message| return self.fail(message);
             return self.fail("attempt to perform operation on unsupported values");
         };
-        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .value = self.absoluteRegister(thread, op.dest) });
+        const result = try self.callOneMetamethodWithContinuation(thread, metamethod_name, metamethod, &.{ lhs, rhs }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
     }
 
@@ -2435,7 +2548,7 @@ pub const State = struct {
             return;
         }
         const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.fail("attempt to perform operation on unsupported value");
-        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
+        const result = try self.callOneMetamethodWithContinuation(thread, unaryMetamethod(kind), metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
     }
 
@@ -2454,7 +2567,7 @@ pub const State = struct {
             self.set(thread, op.dest, .{ .boolean = false });
             return;
         };
-        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+        const result = try self.callOneMetamethodWithContinuation(thread, "__eq", metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, .{ .boolean = truthy(result) });
     }
 
@@ -2468,17 +2581,17 @@ pub const State = struct {
         switch (kind) {
             .lt => {
                 const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
-                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+                const result = try self.callOneMetamethodWithContinuation(thread, "__lt", metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, .{ .boolean = truthy(result) });
             },
             .le => {
                 if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
-                    const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+                    const result = try self.callOneMetamethodWithContinuation(thread, "__le", metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
                     self.set(thread, op.dest, .{ .boolean = truthy(result) });
                     return;
                 }
                 const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
-                const result = try self.callOneResultWithContinuation(thread, lt, &.{ rhs, lhs }, .{ .inverted_truthy = self.absoluteRegister(thread, op.dest) });
+                const result = try self.callOneMetamethodWithContinuation(thread, "__lt", lt, &.{ rhs, lhs }, .{ .inverted_truthy = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, .{ .boolean = !truthy(result) });
             },
         }
@@ -2489,13 +2602,13 @@ pub const State = struct {
         switch (value) {
             .string => |string| self.set(thread, op.dest, .{ .integer = @intCast(string.len) }),
             .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod| {
-                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
+                const result = try self.callOneMetamethodWithContinuation(thread, "__len", metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, result);
             } else {
                 self.set(thread, op.dest, .{ .integer = table.len() });
             },
             else => if ((try self.getMetamethod(value, "__len"))) |metamethod| {
-                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
+                const result = try self.callOneMetamethodWithContinuation(thread, "__len", metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, result);
             } else {
                 return self.fail("attempt to get length of a non-string value");
@@ -2522,20 +2635,21 @@ pub const State = struct {
             if (bitwiseIntegerError(lhs, rhs, op)) |message| return self.fail(message);
             return self.fail("attempt to perform operation on unsupported values");
         };
-        return self.callOneResult(thread, metamethod, &.{ lhs, rhs });
+        return self.callOneMetamethod(thread, metamethod_name, metamethod, &.{ lhs, rhs });
     }
 
     fn unaryOp(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) !Value {
         if (rawUnaryOp(value, op)) |result| return result;
-        const metamethod = (try self.getMetamethod(value, unaryMetamethod(op))) orelse return self.fail("attempt to perform operation on unsupported value");
-        return self.callOneResult(thread, metamethod, &.{ value, value });
+        const metamethod_name = unaryMetamethod(op);
+        const metamethod = (try self.getMetamethod(value, metamethod_name)) orelse return self.fail("attempt to perform operation on unsupported value");
+        return self.callOneMetamethod(thread, metamethod_name, metamethod, &.{ value, value });
     }
 
     fn equalValues(self: *State, thread: *Thread, lhs: Value, rhs: Value) !bool {
         if (valuesEqual(lhs, rhs)) return true;
         if (lhs != .table or rhs != .table) return false;
         const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__eq")) orelse return false;
-        return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+        return truthy(try self.callOneMetamethod(thread, "__eq", metamethod, &.{ lhs, rhs }));
     }
 
     pub fn compareValues(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: CompareOp) !bool {
@@ -2543,25 +2657,26 @@ pub const State = struct {
         switch (op) {
             .lt => {
                 const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
-                return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+                return truthy(try self.callOneMetamethod(thread, "__lt", metamethod, &.{ lhs, rhs }));
             },
             .le => {
                 if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
-                    return truthy(try self.callOneResult(thread, metamethod, &.{ lhs, rhs }));
+                    return truthy(try self.callOneMetamethod(thread, "__le", metamethod, &.{ lhs, rhs }));
                 }
                 const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
-                return !truthy(try self.callOneResult(thread, lt, &.{ rhs, lhs }));
+                return !truthy(try self.callOneMetamethod(thread, "__lt", lt, &.{ rhs, lhs }));
             },
         }
     }
 
-    fn callClosure(self: *State, thread: *Thread, op: bytecode.Call, closure: *Closure, debug_name_override: ?[]const u8) !void {
+    fn callClosure(self: *State, thread: *Thread, op: bytecode.Call, closure: *Closure, debug_name_override: ?[]const u8, debug_namewhat_override: ?[]const u8) !void {
         if (thread.frames.items.len >= max_call_frames) return self.fail("stack overflow");
 
         const caller = thread.frames.items[thread.frames.items.len - 1];
         const base = caller.base + op.base;
         var frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
         frame.debug_name_override = debug_name_override;
+        frame.debug_namewhat_override = debug_namewhat_override;
         errdefer frame.deinit(self.allocator);
         try thread.frames.append(self.allocator, frame);
         if (thread.hook_call and !thread.hook_running) try self.callHook(thread, "call");
@@ -2592,8 +2707,27 @@ pub const State = struct {
                 const frame = thread.frames.items[thread.frames.items.len - 1];
                 self.closeUpvalues(thread, frame.base);
                 const new_frame = try self.prepareClosureFrame(thread, closure, frame.base + resolved.base, frame.base, @intCast(resolved.arg_count), frame.return_start, frame.return_count);
+                var tail_frame = new_frame;
+                tail_frame.is_tail_call = true;
                 thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
-                thread.frames.items[thread.frames.items.len - 1] = new_frame;
+                thread.frames.items[thread.frames.items.len - 1] = tail_frame;
+                if (thread.hook_call and !thread.hook_running) {
+                    const previous_transfer_index_base = thread.hook_transfer_index_base;
+                    const previous_transfer_stack_base = thread.hook_transfer_stack_base;
+                    const previous_transfer_count = thread.hook_transfer_count;
+                    const previous_transfer_values = thread.hook_transfer_values;
+                    thread.hook_transfer_index_base = 1;
+                    thread.hook_transfer_stack_base = new_frame.base;
+                    thread.hook_transfer_count = closure.proto.param_count;
+                    thread.hook_transfer_values = &.{};
+                    defer {
+                        thread.hook_transfer_index_base = previous_transfer_index_base;
+                        thread.hook_transfer_stack_base = previous_transfer_stack_base;
+                        thread.hook_transfer_count = previous_transfer_count;
+                        thread.hook_transfer_values = previous_transfer_values;
+                    }
+                    try self.callHook(thread, "tail call");
+                }
             },
             else => {
                 const frame = thread.frames.items[thread.frames.items.len - 1];
@@ -2624,7 +2758,23 @@ pub const State = struct {
         };
         try self.closeActiveToBeClosedInTopFrame(thread, null);
         frame = &thread.frames.items[frame_index];
-        if (thread.hook_return and !thread.hook_running) try self.callReturnHook(thread, frame.debug_name_override orelse frame.proto.debug_name);
+        if (thread.hook_return and !thread.hook_running) {
+            const previous_transfer_index_base = thread.hook_transfer_index_base;
+            const previous_transfer_stack_base = thread.hook_transfer_stack_base;
+            const previous_transfer_count = thread.hook_transfer_count;
+            const previous_transfer_values = thread.hook_transfer_values;
+            thread.hook_transfer_index_base = @as(i64, @intCast(first)) + 1;
+            thread.hook_transfer_stack_base = frame.base + first;
+            thread.hook_transfer_count = preserved.len;
+            thread.hook_transfer_values = preserved;
+            defer {
+                thread.hook_transfer_index_base = previous_transfer_index_base;
+                thread.hook_transfer_stack_base = previous_transfer_stack_base;
+                thread.hook_transfer_count = previous_transfer_count;
+                thread.hook_transfer_values = previous_transfer_values;
+            }
+            try self.callReturnHook(thread, frame.debug_name_override orelse frame.proto.debug_name);
+        }
         frame = &thread.frames.items[frame_index];
         frame.pending_returns = null;
         self.closeUpvalues(thread, frame.base);
@@ -2658,12 +2808,15 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const actual_count = try self.resolveReturnCount(return_count, values.len);
         const absolute_base = frame.base + base;
-        try thread.ensureStack(self.allocator, absolute_base + actual_count);
-        for (0..actual_count) |index| {
+        const stored_count = @max(actual_count, values.len);
+        try thread.ensureStack(self.allocator, absolute_base + stored_count);
+        for (0..stored_count) |index| {
             thread.stack.items[absolute_base + index] = if (index < values.len) values[index] else .nil;
         }
         thread.last_result_base = absolute_base;
         thread.last_result_count = actual_count;
+        thread.last_transfer_base = absolute_base;
+        thread.last_transfer_count = values.len;
     }
 
     fn prepareClosureFrame(self: *State, thread: *Thread, closure: *Closure, source_base: usize, frame_base: usize, arg_count: usize, return_start: usize, return_count: u16) !CallFrame {
@@ -2844,6 +2997,9 @@ pub const State = struct {
         defer self.allocator.free(args);
 
         const context = self.protectedCallContextWithErrors(thread);
+        const previous_traceback_native_name = thread.traceback_native_name;
+        thread.traceback_native_name = "pcall";
+        defer thread.traceback_native_name = previous_traceback_native_name;
         const result = self.runProtectedCall(thread, context, argValue(self, thread, op, 0), args) catch |err| switch (err) {
             error.CoroutineYield => {
                 try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .pcall, .nil);
@@ -2901,25 +3057,100 @@ pub const State = struct {
         defer out.deinit(self.allocator);
 
         const message = argValue(self, thread, op, 0);
+        if (message == .thread) {
+            const target = message.thread;
+            const level_value = if (op.arg_count >= 3) argValue(self, thread, op, 2) else Value.nil;
+            const has_coroutine_level = level_value != .nil;
+            if (!has_coroutine_level and target.close_error_value != null) if (target.error_traceback) |traceback| {
+                try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = traceback }});
+                return;
+            };
+            const coroutine_level = if (has_coroutine_level) toInteger(level_value) orelse 1 else 0;
+            const has_yield_trace = !has_coroutine_level and (target.frames.items.len != 0 or (target.status != .dead and target.yield_values.items.len != 0));
+            try out.appendSlice(self.allocator, "stack traceback:");
+            if (has_yield_trace) try out.appendSlice(self.allocator, "\n\t'yield'");
+            const skip = if (coroutine_level <= 1) @as(usize, 0) else @as(usize, @intCast(coroutine_level - 1));
+            var remaining = if (skip >= target.frames.items.len) @as(usize, 0) else target.frames.items.len - skip;
+            if (remaining == 0 and target.status != .dead and target.yield_values.items.len != 0 and !has_coroutine_level) {
+                try out.appendSlice(self.allocator, "\n\t@db.lua: in function <");
+            }
+            while (remaining > 0) {
+                remaining -= 1;
+                const level = target.frames.items.len - remaining;
+                const frame = target.frames.items[remaining];
+                try self.appendCoroutineTracebackFrame(&out, target, frame, @intCast(level));
+            }
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(out.items) }});
+            return;
+        }
+        if (message != .nil and message != .string) {
+            try self.returnValues(thread, op.base, op.return_count, &.{message});
+            return;
+        }
         if (message != .nil) {
             try appendValue(self.allocator, &out, message);
             try out.append(self.allocator, '\n');
         }
         try out.appendSlice(self.allocator, "stack traceback:");
+        if (thread.traceback_native_name) |name| try appendFmt(self.allocator, &out, "\n\t{s}", .{name});
         if (self.traceback_error_in_close) try out.appendSlice(self.allocator, "\n\tzlua:?: in metamethod 'close'");
         const level = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse 1 else 1;
+        if (level <= 0) try out.appendSlice(self.allocator, "\n\t'traceback'");
         const skip = if (level <= 0) thread.frames.items.len else std.math.cast(usize, level - 1) orelse thread.frames.items.len;
         var index = if (skip >= thread.frames.items.len) @as(usize, 0) else thread.frames.items.len - skip;
-        while (index > 0) {
-            index -= 1;
-            const frame = thread.frames.items[index];
-            const line = lineForFrame(frame) orelse 0;
-            try out.appendSlice(self.allocator, "\n\tzlua:");
-            try appendFmt(self.allocator, &out, "{d}", .{line});
-            try out.appendSlice(self.allocator, if (thread.hook_running and index == thread.frames.items.len - 1) ": in hook" else ": in function");
+        if (index > 21) {
+            var first = index;
+            var emitted: usize = 0;
+            while (emitted < 10) : (emitted += 1) {
+                first -= 1;
+                try self.appendThreadTracebackFrame(&out, thread, first);
+            }
+            try out.appendSlice(self.allocator, "\n\t...\t(skip)");
+            var tail: usize = 11;
+            while (tail > 0) {
+                tail -= 1;
+                try self.appendThreadTracebackFrame(&out, thread, tail);
+            }
+        } else {
+            while (index > 0) {
+                index -= 1;
+                try self.appendThreadTracebackFrame(&out, thread, index);
+            }
         }
 
         try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(out.items) }});
+    }
+
+    fn appendThreadTracebackFrame(self: *State, out: *std.ArrayList(u8), thread: *Thread, frame_index: usize) !void {
+        const frame = thread.frames.items[frame_index];
+        const line = lineForFrame(frame) orelse 0;
+        try out.appendSlice(self.allocator, "\n\tzlua:");
+        try appendFmt(self.allocator, out, "{d}", .{line});
+        try out.appendSlice(self.allocator, if (thread.hook_running and frame_index == thread.frames.items.len - 1) ": in hook" else ": in function");
+    }
+
+    fn appendCoroutineTracebackFrame(self: *State, out: *std.ArrayList(u8), target: *Thread, frame: CallFrame, level: i64) !void {
+        try out.append(self.allocator, '\n');
+        try out.append(self.allocator, '\t');
+        try out.appendSlice(self.allocator, frame.proto.source_name);
+        if (self.currentFunctionName(target, level)) |name| {
+            try appendFmt(self.allocator, out, ": in function '{s}'", .{name});
+        } else {
+            try out.appendSlice(self.allocator, ": in function <");
+        }
+    }
+
+    fn snapshotCoroutineErrorTraceback(self: *State, target: *Thread) ![]const u8 {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        try out.appendSlice(self.allocator, "stack traceback:\n\t'error'");
+        var remaining = target.frames.items.len;
+        while (remaining > 0) {
+            remaining -= 1;
+            const level = target.frames.items.len - remaining;
+            try self.appendCoroutineTracebackFrame(&out, target, target.frames.items[remaining], @intCast(level));
+        }
+        return self.intern(out.items);
     }
 
     fn coroutineCreate(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -3109,6 +3340,7 @@ pub const State = struct {
                     };
                     if (completed) continue;
                     var final_error = error_value;
+                    target.error_traceback = try self.snapshotCoroutineErrorTraceback(target);
                     if (try self.closeCoroutine(target, final_error)) |close_error_value| final_error = close_error_value;
                     target.close_error_value = final_error;
                     target.status = .dead;
@@ -3121,6 +3353,7 @@ pub const State = struct {
 
         target.status = .dead;
         target.close_error_value = null;
+        target.error_traceback = null;
         if (target.entry == .native and target.entry.native == .dofile and target.last_result_count >= 2) {
             const values = target.stack.items[target.last_result_base .. target.last_result_base + target.last_result_count];
             if (values[0] == .native and values[0].native == .dofile and values[1] == .string) {
@@ -3298,6 +3531,9 @@ pub const State = struct {
                 else => blk: {
                     const args = [_]Value{ state, control };
                     const frame_count = thread.frames.items.len;
+                    const previous_name = thread.next_call_name;
+                    thread.next_call_name = "for iterator";
+                    defer thread.next_call_name = previous_name;
                     owned_values = self.callCollect(thread, iterator, &args) catch |err| switch (err) {
                         error.CoroutineYield => {
                             try self.pushGenericForContinuation(thread, frame_count, op, jump_on_nil);
@@ -3311,6 +3547,9 @@ pub const State = struct {
             else => blk: {
                 const args = [_]Value{ state, control };
                 const frame_count = thread.frames.items.len;
+                const previous_name = thread.next_call_name;
+                thread.next_call_name = "for iterator";
+                defer thread.next_call_name = previous_name;
                 owned_values = self.callCollect(thread, iterator, &args) catch |err| switch (err) {
                     error.CoroutineYield => {
                         try self.pushGenericForContinuation(thread, frame_count, op, jump_on_nil);
@@ -3659,15 +3898,20 @@ pub const State = struct {
         if (thread.resume_parent) |parent| self.markThread(parent);
         self.markThreadStack(thread);
         self.markValue(thread.hook);
+        self.markValue(thread.hook_level2_func);
+        for (thread.hook_transfer_values) |value| self.markValue(value);
         for (thread.yield_values.items) |value| self.markValue(value);
         if (thread.close_error_value) |value| self.markValue(value);
+        if (thread.error_traceback) |traceback| self.markString(traceback);
         for (thread.protected_continuations.items) |continuation| {
             self.markValue(continuation.context.last_error_value);
             self.markValue(continuation.handler);
         }
         for (thread.frames.items) |frame| {
             self.markClosure(frame.closure);
+            self.markValue(frame.vararg_table_local);
             for (frame.varargs) |value| self.markValue(value);
+            if (frame.pending_returns) |returns| for (returns) |value| self.markValue(value);
         }
         var current = thread.open_upvalues;
         while (current) |upvalue| : (current = upvalue.next) self.markUpvalue(upvalue);
@@ -3685,6 +3929,7 @@ pub const State = struct {
             }
         }
         self.markStackRange(thread, thread.last_result_base, thread.last_result_count);
+        self.markStackRange(thread, thread.last_transfer_base, thread.last_transfer_count);
         self.markStackRange(thread, thread.yield_result_base, thread.yield_result_count);
     }
 
@@ -3860,6 +4105,14 @@ pub const State = struct {
                     active_thread.stack.items.len = saved_stack_len;
                     active_thread.last_result_base = saved_last_result_base;
                     active_thread.last_result_count = saved_last_result_count;
+                }
+                const previous_name = active_thread.next_call_name;
+                const previous_namewhat = active_thread.next_call_namewhat;
+                active_thread.next_call_name = "__gc";
+                active_thread.next_call_namewhat = "metamethod";
+                defer {
+                    active_thread.next_call_name = previous_name;
+                    active_thread.next_call_namewhat = previous_namewhat;
                 }
                 _ = try self.callOneResult(active_thread, finalizer, &.{.{ .table = table }});
                 try self.runThreadUntil(active_thread, active_thread.frames.items.len);
@@ -4117,6 +4370,10 @@ pub const State = struct {
 
     fn appendDebugValue(self: *State, out: *std.ArrayList(u8), value: Value) !void {
         try appendFmt(self.allocator, out, "({s}) ", .{debugValueTypeName(value)});
+        if (value == .table and !self.isTrackedTable(value.table)) {
+            try appendFmt(self.allocator, out, "table: 0x{x}", .{@intFromPtr(value.table)});
+            return;
+        }
         try appendValue(self.allocator, out, value);
     }
 
@@ -4819,7 +5076,7 @@ fn forLoopContinuesNumber(current: f64, limit: f64, step: f64) bool {
     return if (step > 0) current <= limit else current >= limit;
 }
 
-fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
+pub fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
     return local.start_pc <= pc and (local.end_pc == 0 or pc < local.end_pc);
 }
 

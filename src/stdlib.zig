@@ -122,6 +122,8 @@ pub const NativeFn = enum {
     debug_sethook,
     debug_gethook,
     debug_setmetatable,
+    debug_setuservalue,
+    debug_getuservalue,
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
@@ -230,6 +232,8 @@ pub const NativeFn = enum {
             .debug_sethook => "debug.sethook",
             .debug_gethook => "debug.gethook",
             .debug_setmetatable => "debug.setmetatable",
+            .debug_setuservalue => "debug.setuservalue",
+            .debug_getuservalue => "debug.getuservalue",
         };
     }
 };
@@ -341,6 +345,8 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_sethook => try debug.sethook(state, thread, op),
         .debug_gethook => try debug.gethook(state, thread, op),
         .debug_setmetatable => try debug.setmetatable(state, thread, op),
+        .debug_setuservalue => try debug.setuservalue(state, thread, op),
+        .debug_getuservalue => try debug.getuservalue(state, thread, op),
     }
 }
 

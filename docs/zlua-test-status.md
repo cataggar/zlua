@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=30`, `categorized_failed=2`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=31`, `categorized_failed=1`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,13 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `files.lua` work verified with `just official-file files`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. The quick official dashboard now reports `zlua_passed=30` and `categorized_failed=2`.
+Latest focused `calls.lua`, `db.lua`, and `nextvar.lua` work verified with `just official-file calls`, `just official-file db`, `just official-file locals`, `just official-file nextvar`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. The quick official dashboard now reports `zlua_passed=31` and `categorized_failed=1`.
+
+- Generic `for` resolver checks now match Lua 5.5's position-specific rule: the first visible control variable is read-only, while later variables remain assignable.
+- `string.dump` now emits string constants once in its zlua debug payload, preserving the official string reuse count for dumped closure families.
+- `calls.lua`, `db.lua`, `locals.lua`, and `nextvar.lua` now pass in the basic official dashboard.
+
+Previous focused `files.lua` work verified with `just official-file files`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during that focused work.
 
 - Generic `for` loops now expose the generator, state, and to-be-closed handle as `"(for state)"` debug locals, so `io.lines(file)` close-state inspection matches official Lua.
 - `io.flush()` mirrors file-handle flush failure for `/dev/full`, and write/append opens materialize the host file immediately while preserving buffered write visibility through flush/close.
@@ -74,13 +80,13 @@ Latest focused `goto.lua` work:
 - `global` can be parsed as a normal identifier in assignment/expression positions when it is not a global declaration.
 - `goto.lua` now passes in the basic official dashboard.
 
-Latest focused `db.lua` work:
+Earlier focused `db.lua` work:
 
-- Generic `for` variables are now assignable while numeric `for` variables remain const, matching Lua 5.5 and allowing `db.lua` to compile past its active-line helper.
+- Generic `for` variables after the first visible control variable are assignable while numeric `for` variables and the first generic control variable remain const, matching Lua 5.5 and allowing `db.lua` to compile past its active-line helper without regressing `nextvar.lua`.
 - `debug.gethook` is available, hook masks/counts are introspectable, line hooks receive the line argument, and count hooks have basic instruction-count dispatch.
 - `debug.getinfo` now handles invalid options, out-of-range stack levels, C-function source names, `func`, active-line tables, stripped dumped chunks, and the early official source-name/namewhat checks.
 - `load` string chunks propagate source names to child closures, and short source formatting now covers string, `@`, and `=` chunk names used by `db.lua`.
-- `db.lua` still xfails later in official line-hook trace sequencing; the quick official dashboard counts are unchanged.
+- `db.lua` now passes in the basic official dashboard.
 
 Latest focused `gc.lua` work:
 
@@ -128,7 +134,7 @@ Latest focused `locals.lua` / `nextvar.lua` work:
 - Hash deletion now preserves dead keys long enough for `next(t, deleted_key)`, compacts collectable tombstones before sweep, and keeps iteration order stable across GC cleanup.
 - `pairs`/`ipairs` report argument-specific table errors, `pairs` honors yielding `__pairs` metamethods and fourth to-be-closed iterator state, and `ipairs` uses normal indexed access for `__index`-backed proxy tables.
 - `table.insert`, `table.remove`, `table.sort`, `table.concat`, and `table.unpack` now use metamethod-aware length/index/update paths covered by `nextvar.lua`, including `table.insert` wraparound at `math.maxinteger`.
-- Numeric `for` loops preserve integer control-variable types for float/string limits, handle integer step overflow termination, and reject assignment to generic `for` variables like official Lua 5.5.
+- Numeric `for` loops preserve integer control-variable types for float/string limits, handle integer step overflow termination, and reject assignment to the first visible generic `for` variable like official Lua 5.5.
 - String GC now sweeps unreferenced temporary strings, uses allocation identity when marking/removing strings, and keeps load-reader callbacks conservative so `collectgarbage()` inside readers does not free in-flight chunks.
 - `load` reports official-compatible messages for multiple `<close>` locals and broader const-assignment forms, including repeated declaration attributes and assignment through function declarations.
 - To-be-closed variables now receive the correct close arguments, clear slots after successful close, preserve pending return values across close handlers, and prevent tail-call compilation while close variables are active.
@@ -211,7 +217,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `constructs.lua` | Pass | Pass |  |
 | `coroutine.lua` | Pass | Pass |  |
 | `cstack.lua` | Pass | Pass |  |
-| `db.lua` | Pass | XFail | `runtime` |
+| `db.lua` | Pass | Pass |  |
 | `errors.lua` | Pass | XFail | `runtime` |
 | `events.lua` | Pass | Pass |  |
 | `files.lua` | Pass | Pass |  |
@@ -244,7 +250,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 30 |
-| Categorized zlua failures | 2 |
+| zlua passes | 31 |
+| Categorized zlua failures | 1 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

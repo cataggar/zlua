@@ -37,10 +37,13 @@ pub fn dump(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const target = runtime.argValue(state, thread, op, 0);
     if (target != .closure) return state.fail("unable to dump given function");
 
-    const strip_debug = op.arg_count >= 2 and runtime.truthy(runtime.argValue(state, thread, op, 1));
+    const strip_debug = (op.arg_count >= 2 and runtime.truthy(runtime.argValue(state, thread, op, 1))) or target.closure.stripped_debug;
     var debug_payload = std.ArrayList(u8).empty;
     defer debug_payload.deinit(state.allocator);
-    if (!strip_debug) try appendProtoDebugStrings(state.allocator, &debug_payload, target.closure.proto);
+    if (!strip_debug) {
+        try debug_payload.appendSlice(state.allocator, target.closure.proto.source_name);
+        try appendProtoDebugStrings(state.allocator, &debug_payload, target.closure.proto);
+    }
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
@@ -59,7 +62,6 @@ pub fn dump(state: *State, thread: *Thread, op: bytecode.Call) !void {
 fn appendProtoDebugStrings(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const compile.proto.Proto) !void {
     for (proto.constants.items) |constant| {
         if (constant == .string) {
-            try out.appendSlice(allocator, constant.string);
             try out.appendSlice(allocator, constant.string);
         }
     }

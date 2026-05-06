@@ -250,6 +250,7 @@ const FunctionCompiler = struct {
         } else if (pending.items.len > 0) try self.compileExprListAdjusted(decl.values, pending.items[0].register, @intCast(pending.items.len));
         if (pending.items.len == 0) try self.compileExprListAdjusted(decl.values, self.registerMark(), 0);
 
+        for (pending.items) |local| self.proto.locals.items[local.debug_index].start_pc = self.proto.pc();
         for (pending.items) |local| try self.locals.append(self.allocator, .{
             .name = local.name,
             .register = local.register,
