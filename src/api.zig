@@ -11,6 +11,18 @@ pub const ConversionError = error{
     ArityMismatch,
 };
 
+pub fn UserdataOptions(comptime T: type) type {
+    return struct {
+        finalizer: ?*const fn (*T) void = null,
+    };
+}
+
+pub fn UserdataPtrOptions(comptime T: type) type {
+    return struct {
+        finalizer: ?*const fn (*T) void = null,
+    };
+}
+
 pub const Stdlib = enum {
     none,
     base,
@@ -175,32 +187,9 @@ pub const State = struct {
 
     pub fn register(self: *State, name: []const u8, callback: HostFn) !void {
         if (std.mem.eql(u8, name, callback_dispatch_global)) return error.UnsupportedOption;
-        try self.ensureCallbackDispatcher();
-
-        const name_copy = try self.allocator().dupe(u8, name);
-        errdefer self.allocator().free(name_copy);
-
-        try self.callbacks.append(self.allocator(), .{ .name = name_copy, .callback = callback });
-        var callback_installed = false;
-        errdefer if (!callback_installed) {
-            const entry = self.callbacks.pop().?;
-            self.allocator().free(entry.name);
-        };
-
-        const callback_id = self.callbacks.items.len;
-        const source = try std.fmt.allocPrint(self.allocator(),
-            \\return function(...)
-            \\  return __zlua_api_callback({d}, ...)
-            \\end
-        , .{callback_id});
-        defer self.allocator().free(source);
-
-        var chunk = try self.loadString(source, .{ .name = "=zlua api callback wrapper" });
-        defer chunk.deinit();
-        var function = try chunk.call(.{}, Function);
+        var function = try self.createCallbackFunction(name, callback);
         defer function.deinit();
         try self.setGlobal(name, function);
-        callback_installed = true;
     }
 
     pub fn registerTyped(self: *State, name: []const u8, comptime function: anytype) !void {
@@ -216,6 +205,26 @@ pub const State = struct {
     pub fn createTable(self: *State, options: TableOptions) !Table {
         const raw = self.raw_state.newTableWithHints(options.array_hint, options.hash_hint) catch |err| return self.captureLuaError(err);
         return Table.fromRuntime(self, raw);
+    }
+
+    pub fn newUserdata(self: *State, comptime T: type, value: T, options: UserdataOptions(T)) !Userdata(T) {
+        const ptr = try self.allocator().create(T);
+        errdefer self.allocator().destroy(ptr);
+        ptr.* = value;
+
+        const raw = try self.raw_state.newUserdata(ptr, typeId(T), @typeName(T), userdataFinalizer(T, options.finalizer), userdataFinalizerData(T, options.finalizer), userdataDestroy(T));
+        var userdata = try Userdata(T).fromRuntime(self, raw);
+        errdefer userdata.deinit();
+        try userdata.initMetatable();
+        return userdata;
+    }
+
+    pub fn newUserdataPtr(self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)) !Userdata(T) {
+        const raw = try self.raw_state.newUserdata(ptr, typeId(T), @typeName(T), userdataFinalizer(T, options.finalizer), userdataFinalizerData(T, options.finalizer), null);
+        var userdata = try Userdata(T).fromRuntime(self, raw);
+        errdefer userdata.deinit();
+        try userdata.initMetatable();
+        return userdata;
     }
 
     pub fn createModule(self: *State, name: []const u8) !Table {
@@ -318,6 +327,34 @@ pub const State = struct {
         self.raw_state.setApiCallbackDispatch(apiCallbackDispatch, self);
         const raw_name = try self.raw_state.intern(callback_dispatch_global);
         self.raw_state.putGlobal(raw_name, .{ .native = .api_callback_dispatch }) catch |err| return self.captureLuaError(err);
+    }
+
+    fn createCallbackFunction(self: *State, name: []const u8, callback: HostFn) !Function {
+        try self.ensureCallbackDispatcher();
+
+        const name_copy = try self.allocator().dupe(u8, name);
+        errdefer self.allocator().free(name_copy);
+
+        try self.callbacks.append(self.allocator(), .{ .name = name_copy, .callback = callback });
+        var callback_installed = false;
+        errdefer if (!callback_installed) {
+            const entry = self.callbacks.pop().?;
+            self.allocator().free(entry.name);
+        };
+
+        const callback_id = self.callbacks.items.len;
+        const source = try std.fmt.allocPrint(self.allocator(),
+            \\return function(...)
+            \\  return __zlua_api_callback({d}, ...)
+            \\end
+        , .{callback_id});
+        defer self.allocator().free(source);
+
+        var chunk = try self.loadString(source, .{ .name = "=zlua api callback wrapper" });
+        defer chunk.deinit();
+        const function = try chunk.call(.{}, Function);
+        callback_installed = true;
+        return function;
     }
 
     fn ensurePackageLibrary(self: *State) !void {
@@ -460,6 +497,126 @@ pub const Function = struct {
     }
 };
 
+pub fn Userdata(comptime T: type) type {
+    return struct {
+        pub const is_zlua_userdata = true;
+        pub const ValueType = T;
+
+        ref: Ref,
+
+        fn fromRuntime(state: *State, value: runtime.Value) !@This() {
+            const raw = switch (value) {
+                .userdata => |userdata| userdata,
+                else => return error.TypeMismatch,
+            };
+            if (raw.type_id != typeId(T)) return error.TypeMismatch;
+            return .{ .ref = try Ref.fromRuntime(state, value) };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.ref.deinit();
+            self.* = undefined;
+        }
+
+        pub fn ptr(self: @This()) !*T {
+            return userdataPtr(T, try self.rawUserdata());
+        }
+
+        pub fn method(self: @This(), name: []const u8, comptime function: anytype) !void {
+            const Wrapper = struct {
+                fn call(ctx: *Context) !void {
+                    try callUserdataMethod(T, function, ctx);
+                }
+            };
+
+            const callback_name = try std.fmt.allocPrint(self.ref.state.allocator(), "{s}.{s}", .{ @typeName(T), name });
+            defer self.ref.state.allocator().free(callback_name);
+
+            var method_function = try self.ref.state.createCallbackFunction(callback_name, Wrapper.call);
+            defer method_function.deinit();
+
+            const metatable = try self.metatableValue();
+            const index_key = runtime.Value{ .string = try self.ref.state.raw_state.intern("__index") };
+            var index_value = metatable.table.get(index_key);
+            if (index_value == .nil) {
+                index_value = self.ref.state.raw_state.newTableWithHints(0, 4) catch |err| return self.ref.state.captureLuaError(err);
+                try metatable.table.set(self.ref.state.allocator(), index_key, index_value);
+                self.ref.state.raw_state.setTableValue(metatable, index_key, index_value) catch |err| return self.ref.state.captureLuaError(err);
+            }
+            if (index_value != .table) return error.TypeMismatch;
+            try self.ref.state.raw_state.setTableValue(index_value, .{ .string = try self.ref.state.raw_state.intern(name) }, .{ .closure = try method_function.rawClosure() });
+        }
+
+        pub fn metamethod(self: @This(), name: []const u8, comptime function: anytype) !void {
+            const Wrapper = struct {
+                fn call(ctx: *Context) !void {
+                    try callUserdataMethod(T, function, ctx);
+                }
+            };
+
+            const callback_name = try std.fmt.allocPrint(self.ref.state.allocator(), "{s}.{s}", .{ @typeName(T), name });
+            defer self.ref.state.allocator().free(callback_name);
+
+            var metamethod_function = try self.ref.state.createCallbackFunction(callback_name, Wrapper.call);
+            defer metamethod_function.deinit();
+
+            const metatable = try self.metatableValue();
+            try self.ref.state.raw_state.setTableValue(metatable, .{ .string = try self.ref.state.raw_state.intern(name) }, .{ .closure = try metamethod_function.rawClosure() });
+        }
+
+        fn initMetatable(self: @This()) !void {
+            const raw = try self.rawUserdata();
+            if (raw.metatable != null) return;
+            const metatable = self.ref.state.raw_state.newTableWithHints(0, 3) catch |err| return self.ref.state.captureLuaError(err);
+            const index = self.ref.state.raw_state.newTableWithHints(0, 4) catch |err| return self.ref.state.captureLuaError(err);
+            try metatable.table.set(self.ref.state.allocator(), .{ .string = try self.ref.state.raw_state.intern("__name") }, .{ .string = try self.ref.state.raw_state.intern(@typeName(T)) });
+            try metatable.table.set(self.ref.state.allocator(), .{ .string = try self.ref.state.raw_state.intern("__index") }, index);
+            raw.metatable = metatable.table;
+        }
+
+        fn rawValue(self: @This()) !runtime.Value {
+            const raw = self.ref.rawValue();
+            if (raw != .userdata) return error.TypeMismatch;
+            return raw;
+        }
+
+        fn rawUserdata(self: @This()) !*runtime.Userdata {
+            return switch (self.ref.rawValue()) {
+                .userdata => |userdata| userdata,
+                else => error.TypeMismatch,
+            };
+        }
+
+        fn metatableValue(self: @This()) !runtime.Value {
+            const raw = try self.rawUserdata();
+            const metatable = raw.metatable orelse return error.TypeMismatch;
+            return .{ .table = metatable };
+        }
+    };
+}
+
+pub const AnyUserdata = struct {
+    ref: Ref,
+
+    fn fromRuntime(state: *State, value: runtime.Value) !AnyUserdata {
+        return switch (value) {
+            .userdata => .{ .ref = try Ref.fromRuntime(state, value) },
+            else => error.TypeMismatch,
+        };
+    }
+
+    pub fn deinit(self: *AnyUserdata) void {
+        self.ref.deinit();
+        self.* = undefined;
+    }
+
+    fn rawValue(self: AnyUserdata) !runtime.Value {
+        const raw = self.ref.rawValue();
+        if (raw != .userdata) return error.TypeMismatch;
+        return raw;
+    }
+};
+
 pub fn CallResult(comptime R: type) type {
     return union(enum) {
         ok: R,
@@ -499,6 +656,7 @@ pub const Value = union(enum) {
     string: []const u8,
     table: Table,
     function: Function,
+    userdata: AnyUserdata,
     unsupported,
 
     fn fromRuntime(state: *State, value: runtime.Value) !Value {
@@ -510,6 +668,7 @@ pub const Value = union(enum) {
             .string => |string| .{ .string = string },
             .table => .{ .table = try Table.fromRuntime(state, value) },
             .closure => .{ .function = try Function.fromRuntime(state, value) },
+            .userdata => .{ .userdata = try AnyUserdata.fromRuntime(state, value) },
             else => .unsupported,
         };
     }
@@ -518,6 +677,7 @@ pub const Value = union(enum) {
         switch (self.*) {
             .table => |*table| table.deinit(),
             .function => |*function| function.deinit(),
+            .userdata => |*userdata| userdata.deinit(),
             else => {},
         }
         self.* = undefined;
@@ -532,6 +692,7 @@ pub const Value = union(enum) {
             .string => |string| .{ .string = string },
             .table => |table| table.rawValue(),
             .function => |function| .{ .closure = try function.rawClosure() },
+            .userdata => |userdata| userdata.rawValue(),
             .unsupported => error.UnsupportedType,
         };
     }
@@ -629,7 +790,6 @@ pub const Context = struct {
         try self.pushReturn(values);
     }
 };
-pub const AnyUserdata = opaque {};
 pub const Thread = opaque {};
 
 fn runtimeOptions(options: Options) runtime.StateOptions {
@@ -730,10 +890,115 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
     }
 }
 
+fn callUserdataMethod(comptime T: type, comptime function: anytype, ctx: *Context) !void {
+    _ = Userdata(T);
+    const FunctionType = @TypeOf(function);
+    const SignatureType = switch (@typeInfo(FunctionType)) {
+        .@"fn" => FunctionType,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => pointer.child,
+            else => @compileError("userdata methods require a function or function pointer"),
+        },
+        else => @compileError("userdata methods require a function or function pointer"),
+    };
+    const function_info = switch (@typeInfo(FunctionType)) {
+        .@"fn" => |info| info,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => |info| info,
+            else => @compileError("userdata methods require a function or function pointer"),
+        },
+        else => @compileError("userdata methods require a function or function pointer"),
+    };
+
+    if (function_info.is_var_args) @compileError("userdata methods do not support varargs functions");
+    if (function_info.params.len == 0) @compileError("userdata methods require a receiver parameter");
+    const Receiver = function_info.params[0].type orelse @compileError("userdata method receiver must be typed");
+    if (@typeInfo(Receiver) != .pointer) @compileError("userdata method receiver must be a pointer");
+
+    var args: std.meta.ArgsTuple(SignatureType) = undefined;
+    args[0] = try ctx.arg(0, Receiver);
+    inline for (function_info.params[1..], 1..) |param, index| {
+        const Param = param.type orelse @compileError("userdata method parameters must be typed");
+        args[index] = try ctx.arg(index, Param);
+    }
+
+    const Return = function_info.return_type orelse void;
+    if (Return == void) {
+        @call(.auto, function, args);
+        try ctx.returnValues(.{});
+        return;
+    }
+
+    switch (@typeInfo(Return)) {
+        .error_union => |error_union| {
+            const result = try @call(.auto, function, args);
+            if (error_union.payload == void) {
+                try ctx.returnValues(.{});
+            } else {
+                try ctx.returnValues(result);
+            }
+        },
+        else => {
+            const result = @call(.auto, function, args);
+            try ctx.returnValues(result);
+        },
+    }
+}
+
+fn TypeToken(comptime T: type) type {
+    return struct {
+        const ValueType = T;
+        var id: u8 = 0;
+    };
+}
+
+fn typeId(comptime T: type) usize {
+    return @intFromPtr(&TypeToken(T).id);
+}
+
+fn userdataPtr(comptime T: type, raw: *runtime.Userdata) !*T {
+    if (raw.type_id != typeId(T)) return error.TypeMismatch;
+    return @ptrCast(@alignCast(raw.ptr));
+}
+
+fn userdataFinalizer(comptime T: type, finalizer: ?*const fn (*T) void) ?runtime.UserdataFinalizer {
+    if (finalizer == null) return null;
+    return struct {
+        fn call(ptr: *anyopaque, data: ?*const anyopaque) void {
+            const typed_finalizer: *const fn (*T) void = @ptrCast(@alignCast(data.?));
+            typed_finalizer(@ptrCast(@alignCast(ptr)));
+        }
+    }.call;
+}
+
+fn userdataFinalizerData(comptime T: type, finalizer: ?*const fn (*T) void) ?*const anyopaque {
+    return if (finalizer) |active| @ptrCast(active) else null;
+}
+
+fn userdataDestroy(comptime T: type) runtime.UserdataDeinit {
+    return struct {
+        fn destroy(allocator: std.mem.Allocator, ptr: *anyopaque) void {
+            allocator.destroy(@as(*T, @ptrCast(@alignCast(ptr))));
+        }
+    }.destroy;
+}
+
+fn isUserdataHandle(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "is_zlua_userdata") and T.is_zlua_userdata,
+        else => false,
+    };
+}
+
+fn isOwnedApiValue(comptime T: type) bool {
+    return T == Value or T == Ref or T == Table or T == Function or T == ErrorRef or T == AnyUserdata or isUserdataHandle(T);
+}
+
 fn expectedLuaType(comptime T: type) []const u8 {
     if (T == Value or T == Ref or T == ErrorRef) return "value";
     if (T == Table) return "table";
     if (T == Function) return "function";
+    if (T == AnyUserdata or isUserdataHandle(T)) return "userdata";
 
     return switch (@typeInfo(T)) {
         .bool => "boolean",
@@ -741,6 +1006,7 @@ fn expectedLuaType(comptime T: type) []const u8 {
         .optional => |optional| expectedLuaType(optional.child),
         .pointer => |pointer| switch (pointer.size) {
             .slice => if (pointer.child == u8) "string" else "value",
+            .one => if (@typeInfo(pointer.child) == .@"struct") @typeName(pointer.child) else "value",
             else => "value",
         },
         else => "value",
@@ -765,6 +1031,7 @@ fn toRuntimeValue(state: *State, value: anytype) !runtime.Value {
     if (T == Ref) return value.rawValue();
     if (T == Table) return value.rawValue();
     if (T == Function) return .{ .closure = try value.rawClosure() };
+    if (comptime isUserdataHandle(T)) return value.rawValue();
 
     return switch (@typeInfo(T)) {
         .null => .nil,
@@ -856,6 +1123,8 @@ fn fromRuntimeValue(state: *State, raw: runtime.Value, comptime T: type) !T {
     if (T == Ref) return Ref.fromRuntime(state, raw);
     if (T == Table) return Table.fromRuntime(state, raw);
     if (T == Function) return Function.fromRuntime(state, raw);
+    if (T == AnyUserdata) return AnyUserdata.fromRuntime(state, raw);
+    if (comptime isUserdataHandle(T)) return T.fromRuntime(state, raw);
     if (T == void) return {};
 
     return switch (@typeInfo(T)) {
@@ -885,6 +1154,10 @@ fn fromRuntimeValue(state: *State, raw: runtime.Value, comptime T: type) !T {
                 .string => |value| value,
                 else => error.TypeMismatch,
             } else error.UnsupportedType,
+            .one => if (@typeInfo(pointer.child) == .@"struct") switch (raw) {
+                .userdata => |userdata| userdataPtr(pointer.child, userdata),
+                else => error.TypeMismatch,
+            } else error.UnsupportedType,
             else => error.UnsupportedType,
         },
         else => error.UnsupportedType,
@@ -906,7 +1179,7 @@ fn isTupleResult(comptime T: type) bool {
 }
 
 fn deinitIfOwned(comptime T: type, value: *T) void {
-    if (T == Value or T == Ref or T == Table or T == Function or T == ErrorRef) {
+    if (comptime isOwnedApiValue(T)) {
         value.deinit();
     }
 }
@@ -1232,4 +1505,141 @@ test "api typed host callback wrapper compiles and runs" {
         \\assert(clamp(-1, 1, 10) == 1)
         \\assert(clamp(11, 1, 10) == 10)
     , .{ .name = "=api-21.4-typed" });
+}
+
+test "api userdata methods receive typed Zig pointers" {
+    const Counter = struct {
+        value: i64,
+
+        fn inc(self: *@This(), amount: i64) i64 {
+            self.value += amount;
+            return self.value;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var counter = try lua.newUserdata(Counter, .{ .value = 0 }, .{});
+    defer counter.deinit();
+    try counter.method("inc", Counter.inc);
+    try lua.setGlobal("counter", counter);
+
+    try lua.doString(
+        \\assert(type(counter) == 'userdata')
+        \\assert(counter:inc(2) == 2)
+        \\assert(counter:inc(3) == 5)
+    , .{ .name = "=api-21.5-counter" });
+
+    try std.testing.expectEqual(@as(i64, 5), (try counter.ptr()).value);
+}
+
+test "api userdata pointer wrappers and Context.arg typed reads" {
+    const Counter = struct {
+        value: i64,
+    };
+    const Callbacks = struct {
+        fn add(ctx: *Context) !void {
+            const counter = try ctx.arg(0, *Counter);
+            const amount = try ctx.arg(1, i64);
+            counter.value += amount;
+            try ctx.returnValues(counter.value);
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var backing = Counter{ .value = 10 };
+    var counter = try lua.newUserdataPtr(Counter, &backing, .{});
+    defer counter.deinit();
+    try lua.setGlobal("counter", counter);
+    try lua.register("add_counter", Callbacks.add);
+
+    try lua.doString("assert(add_counter(counter, 32) == 42)", .{ .name = "=api-21.5-ptr" });
+    try std.testing.expectEqual(@as(i64, 42), backing.value);
+}
+
+test "api userdata wrong type errors are clear" {
+    const Counter = struct { value: i64 };
+    const Other = struct { value: i64 };
+    const Callbacks = struct {
+        fn needCounter(ctx: *Context) !void {
+            _ = try ctx.arg(0, *Counter);
+            try ctx.returnValues(.{});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var other = try lua.newUserdata(Other, .{ .value = 1 }, .{});
+    defer other.deinit();
+    try lua.setGlobal("other", other);
+    try lua.register("need_counter", Callbacks.needCounter);
+
+    var chunk = try lua.loadString("need_counter(other)", .{ .name = "=api-21.5-wrong-userdata" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "need_counter") != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Counter)) != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Other)) != null);
+        },
+    }
+}
+
+test "api userdata finalizers run under forced GC" {
+    const Tracker = struct {
+        finalized: *usize,
+
+        fn finalize(self: *@This()) void {
+            self.finalized.* += 1;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var finalized: usize = 0;
+    {
+        var tracker = try lua.newUserdata(Tracker, .{ .finalized = &finalized }, .{ .finalizer = Tracker.finalize });
+        tracker.deinit();
+    }
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(usize, 1), finalized);
+}
+
+test "api userdata close metamethod runs for to-be-closed locals" {
+    const Closer = struct {
+        closed: *usize,
+
+        fn close(self: *@This()) void {
+            self.closed.* += 1;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var closed: usize = 0;
+    var closer = try lua.newUserdata(Closer, .{ .closed = &closed }, .{});
+    defer closer.deinit();
+    try closer.metamethod("__close", Closer.close);
+    try lua.setGlobal("closer", closer);
+
+    try lua.doString(
+        \\do
+        \\  local scoped <close> = closer
+        \\end
+    , .{ .name = "=api-21.5-close" });
+    try std.testing.expectEqual(@as(usize, 1), closed);
 }

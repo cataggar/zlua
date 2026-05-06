@@ -19,6 +19,8 @@ pub const Context = api.Context;
 pub const Error = api.Error;
 pub const Tuple = api.Tuple;
 pub const HostFn = api.HostFn;
+pub const Userdata = api.Userdata;
+pub const AnyUserdata = api.AnyUserdata;
 
 test {
     _ = frontend;

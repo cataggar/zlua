@@ -28,6 +28,7 @@ pub const Value = union(enum) {
     number: f64,
     string: []const u8,
     table: *Table,
+    userdata: *Userdata,
     closure: *Closure,
     thread: *Thread,
     coroutine_wrapper: *Thread,
@@ -64,6 +65,9 @@ pub const Value = union(enum) {
 };
 
 pub const NativeFn = stdlib.NativeFn;
+
+pub const UserdataFinalizer = *const fn (*anyopaque, ?*const anyopaque) void;
+pub const UserdataDeinit = *const fn (std.mem.Allocator, *anyopaque) void;
 
 pub const ProtectedCallResult = union(enum) {
     success: []Value,
@@ -389,6 +393,18 @@ pub const Table = struct {
     }
 };
 
+pub const Userdata = struct {
+    ptr: *anyopaque,
+    type_id: usize,
+    type_name: []const u8,
+    metatable: ?*Table = null,
+    finalizer: ?UserdataFinalizer = null,
+    finalizer_data: ?*const anyopaque = null,
+    deinit_fn: ?UserdataDeinit = null,
+    marked: bool = false,
+    finalized: bool = false,
+};
+
 pub const Thread = struct {
     stack: std.ArrayList(Value) = .empty,
     frames: std.ArrayList(CallFrame) = .empty,
@@ -629,6 +645,7 @@ pub const State = struct {
     strings: std.StringHashMap([]const u8),
     string_allocations: std.ArrayList(StringAllocation) = .empty,
     table_allocations: std.ArrayList(*Table) = .empty,
+    userdata_allocations: std.ArrayList(*Userdata) = .empty,
     closure_allocations: std.ArrayList(*Closure) = .empty,
     upvalue_allocations: std.ArrayList(*Upvalue) = .empty,
     thread_allocations: std.ArrayList(*Thread) = .empty,
@@ -694,6 +711,7 @@ pub const State = struct {
         for (self.thread_allocations.items) |thread| self.destroyThread(thread);
         for (self.closure_allocations.items) |closure| self.destroyClosure(closure);
         for (self.upvalue_allocations.items) |upvalue| self.allocator.destroy(upvalue);
+        for (self.userdata_allocations.items) |userdata| self.destroyUserdata(userdata);
         for (self.table_allocations.items) |table| self.destroyTable(table);
         for (self.proto_allocations.items) |proto| {
             proto.deinit();
@@ -707,6 +725,7 @@ pub const State = struct {
         self.thread_allocations.deinit(self.allocator);
         self.upvalue_allocations.deinit(self.allocator);
         self.closure_allocations.deinit(self.allocator);
+        self.userdata_allocations.deinit(self.allocator);
         self.table_allocations.deinit(self.allocator);
         self.string_allocations.deinit(self.allocator);
         self.* = undefined;
@@ -1449,6 +1468,21 @@ pub const State = struct {
         errdefer table.deinit(self.allocator);
         try self.table_allocations.append(self.allocator, table);
         return .{ .table = table };
+    }
+
+    pub fn newUserdata(self: *State, ptr: *anyopaque, type_id: usize, type_name: []const u8, finalizer: ?UserdataFinalizer, finalizer_data: ?*const anyopaque, deinit_fn: ?UserdataDeinit) !Value {
+        const userdata = try self.allocator.create(Userdata);
+        errdefer self.allocator.destroy(userdata);
+        userdata.* = .{
+            .ptr = ptr,
+            .type_id = type_id,
+            .type_name = type_name,
+            .finalizer = finalizer,
+            .finalizer_data = finalizer_data,
+            .deinit_fn = deinit_fn,
+        };
+        try self.userdata_allocations.append(self.allocator, userdata);
+        return .{ .userdata = userdata };
     }
 
     fn newRootClosure(self: *State, proto: *const proto_mod.Proto) !*Closure {
@@ -2436,6 +2470,7 @@ pub const State = struct {
     fn getMetatableValue(self: *State, value: Value) !Value {
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return .nil,
+            .userdata => |userdata| userdata.metatable orelse return .nil,
             .string => self.string_metatable orelse return .nil,
             .integer, .number => self.number_metatable orelse return .nil,
             .boolean => self.boolean_metatable orelse return .nil,
@@ -2471,6 +2506,10 @@ pub const State = struct {
                 table.metatable = metatable;
                 if (metatable) |mt| self.writeBarrier(table.marked, .{ .table = mt });
             },
+            .userdata => |userdata| {
+                userdata.metatable = metatable;
+                if (metatable) |mt| self.writeBarrier(userdata.marked, .{ .table = mt });
+            },
             .string => self.string_metatable = metatable,
             .integer, .number => self.number_metatable = metatable,
             .boolean => self.boolean_metatable = metatable,
@@ -2482,6 +2521,7 @@ pub const State = struct {
     fn getMetamethod(self: *State, value: Value, name: []const u8) !?Value {
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return null,
+            .userdata => |userdata| userdata.metatable orelse return null,
             .string => self.string_metatable orelse return null,
             .integer, .number => self.number_metatable orelse return null,
             .boolean => self.boolean_metatable orelse return null,
@@ -3788,12 +3828,14 @@ pub const State = struct {
         self.convergeEphemerons();
         self.clearWeakValues();
         try self.runPendingFinalizers(thread);
+        self.runPendingUserdataFinalizers();
         self.clearWeakTables();
         self.clearDeadHashKeys();
         self.sweepThreads();
         self.sweepClosures();
         self.sweepUpvalues();
         self.sweepStrings();
+        self.sweepUserdata();
         self.sweepTables();
         self.resetAutoGcThreshold();
     }
@@ -3810,6 +3852,7 @@ pub const State = struct {
     fn resetMarks(self: *State) void {
         for (self.string_allocations.items) |*allocation| allocation.marked = false;
         for (self.table_allocations.items) |table| table.marked = false;
+        for (self.userdata_allocations.items) |userdata| userdata.marked = false;
         for (self.closure_allocations.items) |closure| closure.marked = false;
         for (self.upvalue_allocations.items) |upvalue| upvalue.marked = false;
         for (self.thread_allocations.items) |thread| thread.marked = false;
@@ -3840,6 +3883,7 @@ pub const State = struct {
         switch (value) {
             .string => |string| self.markString(string),
             .table => |table| if (self.isTrackedTable(table)) self.markTable(table),
+            .userdata => |userdata| if (self.isTrackedUserdata(userdata)) self.markUserdata(userdata),
             .closure => |closure| if (self.isTrackedClosure(closure)) self.markClosure(closure),
             .thread, .coroutine_wrapper => |thread| if (self.isTrackedThread(thread) or thread == self.current_thread) self.markThread(thread),
             .gmatch_iterator => |table| if (self.isTrackedTable(table)) self.markTable(table),
@@ -3894,6 +3938,12 @@ pub const State = struct {
             self.markValue(entry.key);
             self.markValue(entry.value);
         }
+    }
+
+    fn markUserdata(self: *State, userdata: *Userdata) void {
+        if (userdata.marked) return;
+        userdata.marked = true;
+        if (userdata.metatable) |metatable| self.markTable(metatable);
     }
 
     fn markWeakTableStrings(self: *State, table: *Table, keys: bool, values: bool) void {
@@ -4021,6 +4071,7 @@ pub const State = struct {
         return switch (value) {
             .string => |string| if (self.findStringAllocation(string)) |index| self.string_allocations.items[index].marked else true,
             .table => |table| !self.isTrackedTable(table) or table.marked,
+            .userdata => |userdata| !self.isTrackedUserdata(userdata) or userdata.marked,
             .closure => |closure| !self.isTrackedClosure(closure) or closure.marked,
             .thread, .coroutine_wrapper => |thread| !self.isTrackedThread(thread) or thread.marked,
             else => true,
@@ -4030,6 +4081,7 @@ pub const State = struct {
     fn valueIsWeaklyCleared(self: *State, value: Value) bool {
         return switch (value) {
             .table => |table| self.isTrackedTable(table) and !table.marked,
+            .userdata => |userdata| self.isTrackedUserdata(userdata) and !userdata.marked,
             .closure => |closure| self.isTrackedClosure(closure) and !closure.marked,
             .thread, .coroutine_wrapper => |thread| self.isTrackedThread(thread) and !thread.marked,
             else => false,
@@ -4040,6 +4092,7 @@ pub const State = struct {
         return switch (value) {
             .string => |string| if (self.findStringAllocation(string)) |index| !self.string_allocations.items[index].marked else false,
             .table => |table| self.isTrackedTable(table) and !table.marked,
+            .userdata => |userdata| self.isTrackedUserdata(userdata) and !userdata.marked,
             .closure => |closure| self.isTrackedClosure(closure) and !closure.marked,
             .thread, .coroutine_wrapper => |thread| self.isTrackedThread(thread) and !thread.marked,
             else => false,
@@ -4163,6 +4216,23 @@ pub const State = struct {
         self.clearWeakValues();
     }
 
+    fn runPendingUserdataFinalizers(self: *State) void {
+        var ran_finalizer = false;
+        for (self.userdata_allocations.items) |userdata| {
+            if (userdata.marked or userdata.finalized) continue;
+            const finalizer = userdata.finalizer orelse continue;
+            userdata.marked = true;
+            userdata.finalized = true;
+            finalizer(userdata.ptr, userdata.finalizer_data);
+            ran_finalizer = true;
+        }
+        if (!ran_finalizer) return;
+        self.resetMarks();
+        self.markRoots();
+        self.convergeEphemerons();
+        self.clearWeakValues();
+    }
+
     fn callableValue(self: *State, value: Value) bool {
         if (functionLike(value)) return true;
         return (self.getMetamethod(value, "__call") catch null) != null;
@@ -4181,6 +4251,19 @@ pub const State = struct {
             }
             self.allocator.free(allocation.bytes);
             _ = self.string_allocations.swapRemove(index);
+        }
+    }
+
+    fn sweepUserdata(self: *State) void {
+        var index: usize = 0;
+        while (index < self.userdata_allocations.items.len) {
+            const userdata = self.userdata_allocations.items[index];
+            if (userdata.marked) {
+                index += 1;
+                continue;
+            }
+            self.destroyUserdata(userdata);
+            _ = self.userdata_allocations.swapRemove(index);
         }
     }
 
@@ -4258,6 +4341,13 @@ pub const State = struct {
         return false;
     }
 
+    fn isTrackedUserdata(self: *State, userdata: *Userdata) bool {
+        for (self.userdata_allocations.items) |allocation| {
+            if (allocation == userdata) return true;
+        }
+        return false;
+    }
+
     fn isTrackedClosure(self: *State, closure: *Closure) bool {
         for (self.closure_allocations.items) |allocation| {
             if (allocation == closure) return true;
@@ -4277,6 +4367,15 @@ pub const State = struct {
         self.allocator.destroy(table);
     }
 
+    fn destroyUserdata(self: *State, userdata: *Userdata) void {
+        if (!userdata.finalized) {
+            if (userdata.finalizer) |finalizer| finalizer(userdata.ptr, userdata.finalizer_data);
+            userdata.finalized = true;
+        }
+        if (userdata.deinit_fn) |deinit_fn| deinit_fn(self.allocator, userdata.ptr);
+        self.allocator.destroy(userdata);
+    }
+
     fn destroyClosure(self: *State, closure: *Closure) void {
         if (closure.upvalues.len != 0) self.allocator.free(closure.upvalues);
         self.allocator.destroy(closure);
@@ -4293,6 +4392,7 @@ pub const State = struct {
         for (self.table_allocations.items) |table| {
             if (table.counts_for_gc_count) bytes += @sizeOf(Table) + table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
         }
+        bytes += self.userdata_allocations.items.len * @sizeOf(Userdata);
         bytes += self.closure_allocations.items.len * @sizeOf(Closure);
         bytes += self.upvalue_allocations.items.len * @sizeOf(Upvalue);
         bytes += self.thread_allocations.items.len * @sizeOf(Thread);
@@ -4771,6 +4871,7 @@ fn luaTypeName(value: Value) []const u8 {
         .integer, .number => "number",
         .string => "string",
         .table => "table",
+        .userdata => "userdata",
         .thread => "thread",
         .closure,
         .coroutine_wrapper,
@@ -5024,6 +5125,7 @@ pub fn valuesEqual(lhs: Value, rhs: Value) bool {
         },
         .string => |value| rhs == .string and std.mem.eql(u8, value, rhs.string),
         .table => |value| rhs == .table and value == rhs.table,
+        .userdata => |value| rhs == .userdata and value == rhs.userdata,
         .closure => |value| rhs == .closure and value == rhs.closure,
         .thread => |value| rhs == .thread and value == rhs.thread,
         .coroutine_wrapper => |value| rhs == .coroutine_wrapper and value == rhs.coroutine_wrapper,
@@ -5068,39 +5170,40 @@ fn hashValue(value: Value) u64 {
         .number => |payload| if (floatToInteger(payload)) |integer| hashInteger(integer) else hashFloat(payload),
         .string => |payload| hashBytes(4, payload),
         .table => |payload| hashPointer(5, payload),
-        .closure => |payload| hashPointer(6, payload),
-        .thread => |payload| hashPointer(7, payload),
-        .coroutine_wrapper => |payload| hashPointer(8, payload),
-        .gmatch_iterator => |payload| hashPointer(9, payload),
-        .native_print => hashTag(10),
-        .native_tostring => hashTag(11),
-        .native_getmetatable => hashTag(12),
-        .native_setmetatable => hashTag(13),
-        .native_rawequal => hashTag(14),
-        .native_rawget => hashTag(15),
-        .native_rawset => hashTag(16),
-        .native_rawlen => hashTag(17),
-        .native_next => hashTag(18),
-        .native_pairs => hashTag(19),
-        .native_ipairs => hashTag(20),
-        .native_ipairs_iter => hashTag(21),
-        .native_table_create => hashTag(22),
-        .native_select => hashTag(23),
-        .native_assert => hashTag(24),
-        .native_error => hashTag(25),
-        .native_pcall => hashTag(26),
-        .native_xpcall => hashTag(27),
-        .native_collectgarbage => hashTag(28),
-        .native_debug_traceback => hashTag(29),
-        .native_coroutine_create => hashTag(30),
-        .native_coroutine_resume => hashTag(31),
-        .native_coroutine_yield => hashTag(32),
-        .native_coroutine_status => hashTag(33),
-        .native_coroutine_running => hashTag(34),
-        .native_coroutine_isyieldable => hashTag(35),
-        .native_coroutine_close => hashTag(36),
-        .native_coroutine_wrap => hashTag(37),
-        .native => |payload| hashEnum(38, payload),
+        .userdata => |payload| hashPointer(6, payload),
+        .closure => |payload| hashPointer(7, payload),
+        .thread => |payload| hashPointer(8, payload),
+        .coroutine_wrapper => |payload| hashPointer(9, payload),
+        .gmatch_iterator => |payload| hashPointer(10, payload),
+        .native_print => hashTag(11),
+        .native_tostring => hashTag(12),
+        .native_getmetatable => hashTag(13),
+        .native_setmetatable => hashTag(14),
+        .native_rawequal => hashTag(15),
+        .native_rawget => hashTag(16),
+        .native_rawset => hashTag(17),
+        .native_rawlen => hashTag(18),
+        .native_next => hashTag(19),
+        .native_pairs => hashTag(20),
+        .native_ipairs => hashTag(21),
+        .native_ipairs_iter => hashTag(22),
+        .native_table_create => hashTag(23),
+        .native_select => hashTag(24),
+        .native_assert => hashTag(25),
+        .native_error => hashTag(26),
+        .native_pcall => hashTag(27),
+        .native_xpcall => hashTag(28),
+        .native_collectgarbage => hashTag(29),
+        .native_debug_traceback => hashTag(30),
+        .native_coroutine_create => hashTag(31),
+        .native_coroutine_resume => hashTag(32),
+        .native_coroutine_yield => hashTag(33),
+        .native_coroutine_status => hashTag(34),
+        .native_coroutine_running => hashTag(35),
+        .native_coroutine_isyieldable => hashTag(36),
+        .native_coroutine_close => hashTag(37),
+        .native_coroutine_wrap => hashTag(38),
+        .native => |payload| hashEnum(39, payload),
     };
 }
 
@@ -5261,6 +5364,7 @@ fn indexErrorMessage(value: Value) []const u8 {
         .string => "attempt to index a string value",
         .boolean => "attempt to index a boolean value",
         .nil => "attempt to index a nil value",
+        .userdata => "attempt to index a userdata value",
         else => "attempt to index a non-table value",
     };
 }
@@ -5272,6 +5376,7 @@ fn callErrorMessage(value: Value) []const u8 {
         .boolean => "attempt to call a boolean value",
         .nil => "attempt to call a nil value",
         .table => "attempt to call a table value",
+        .userdata => "attempt to call a userdata value",
         else => "attempt to call a non-function value",
     };
 }
@@ -5344,6 +5449,7 @@ fn debugValueTypeName(value: Value) []const u8 {
         .number => "number",
         .string => "string",
         .table => "table",
+        .userdata => "userdata",
         .thread => "thread",
         .closure,
         .coroutine_wrapper,
@@ -5604,6 +5710,7 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
                 try appendFmt(allocator, out, "file (0x{x})", .{@intFromPtr(table)});
             }
         } else try appendFmt(allocator, out, "table: 0x{x}", .{@intFromPtr(table)}),
+        .userdata => |userdata| try appendFmt(allocator, out, "userdata: 0x{x}", .{@intFromPtr(userdata)}),
         .closure => |closure| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(closure)}),
         .thread => |thread| try appendFmt(allocator, out, "thread: 0x{x}", .{@intFromPtr(thread)}),
         .coroutine_wrapper => |thread| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(thread)}),
@@ -5656,6 +5763,7 @@ pub fn isClosedFileValue(value: Value) bool {
 fn appendNamedValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: Value) !void {
     const address: ?usize = switch (value) {
         .table => |table| @intFromPtr(table),
+        .userdata => |userdata| @intFromPtr(userdata),
         .closure => |closure| @intFromPtr(closure),
         .thread => |thread| @intFromPtr(thread),
         .coroutine_wrapper => |thread| @intFromPtr(thread),
