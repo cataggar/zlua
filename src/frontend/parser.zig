@@ -113,7 +113,8 @@ const Parser = struct {
         var names = std.ArrayList(ast.Identifier).empty;
         try names.append(self.allocator, first_name);
         while (self.match(.comma)) |_| try names.append(self.allocator, try self.expectIdentifier());
-        _ = try self.expect(.keyword_in);
+        if (!self.check(.keyword_in)) return self.failExpectedMessage("'=' or 'in'");
+        _ = self.advance();
         const iterators = try self.parseExpressionList();
         _ = try self.expect(.keyword_do);
         const body = try self.parseBlock(&.{.keyword_end});
@@ -211,7 +212,7 @@ const Parser = struct {
             return .{ .assignment = .{ .targets = try self.singleExprSlice(first), .values = try self.parseExpressionList() } };
         }
         if (first.* == .call or first.* == .method_call) return .{ .call_stmt = first };
-        return self.failUnexpected(.syntax_error);
+        return self.failUnexpected(.unexpected_symbol);
     }
 
     fn parseExpressionList(self: *Parser) anyerror![]const *ast.Expr {
@@ -259,7 +260,7 @@ const Parser = struct {
             const inner = try self.parseExpression(0);
             _ = try self.expect(.right_paren);
             break :blk try self.newExpr(.{ .grouped = inner });
-        } else return self.failUnexpected(.syntax_error);
+        } else return self.failUnexpected(.unexpected_symbol);
 
         while (true) {
             if (self.match(.left_bracket)) |_| {
@@ -288,7 +289,7 @@ const Parser = struct {
         }
         if (self.match(.left_brace)) |tok| return self.singleExprSlice(try self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace(tok) }));
         if (self.match(.string_literal)) |tok| return self.singleExprSlice(try self.newExpr(.{ .string = .{ .lexeme = tok.lexeme, .span = tok.span } }));
-        return self.failUnexpected(.syntax_error);
+        return self.failExpectedMessage("function arguments");
     }
 
     fn parseTableConstructorAfterLeftBrace(self: *Parser, open: token_mod.Token) anyerror!ast.TableConstructor {
@@ -386,8 +387,14 @@ const Parser = struct {
     }
 
     fn failExpected(self: *Parser, tag: Tag) error{ParseError} {
-        _ = tag;
-        return self.failUnexpected(.syntax_error);
+        return self.failExpectedMessage(expectedText(tag));
+    }
+
+    fn failExpectedMessage(self: *Parser, expected: []const u8) error{ParseError} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .syntax = .{ .expected = .{ .expected = expected, .near = errors.tokenRef(self.peek()) } } };
+        };
+        return error.ParseError;
     }
 
     fn failExpectedClose(self: *Parser, expected: []const u8, opener: []const u8, open: token_mod.Token, near: token_mod.Token) error{ParseError} {
@@ -508,6 +515,28 @@ fn binaryInfo(tag: Tag) ?BinaryInfo {
         .percent => .{ .op = .mod, .precedence = 10 },
         .caret => .{ .op = .pow, .precedence = 12, .right_assoc = true },
         else => null,
+    };
+}
+
+fn expectedText(tag: Tag) []const u8 {
+    return switch (tag) {
+        .eof => "<eof>",
+        .identifier => "<name>",
+        .keyword_do => "'do'",
+        .keyword_end => "'end'",
+        .keyword_in => "'in'",
+        .keyword_then => "'then'",
+        .keyword_until => "'until'",
+        .equal => "'='",
+        .left_paren => "'('",
+        .right_paren => "')'",
+        .left_brace => "'{'",
+        .right_brace => "'}'",
+        .left_bracket => "'['",
+        .right_bracket => "']'",
+        .double_colon => "'::'",
+        .comma => "','",
+        else => "syntax error",
     };
 }
 

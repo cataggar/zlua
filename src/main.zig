@@ -84,7 +84,9 @@ fn runCliProgram(
         return 0;
     }
 
-    var state = try zlua.runtime.State.initWithOptions(allocator, .{
+    const state_allocator = std.heap.smp_allocator;
+
+    var state = try zlua.runtime.State.initWithOptions(state_allocator, .{
         .io = io,
         .filesystem = .host_cwd,
         .environment = environ_map,
@@ -93,21 +95,21 @@ fn runCliProgram(
     });
     defer state.deinit();
 
-    try installArgTable(allocator, &state, script_path, script_args);
+    try installArgTable(state_allocator, &state, script_path, script_args);
 
     for (evals.items) |source| {
-        if (try executeChunk(allocator, &state, source)) |exit_code| return exit_code;
+        if (try executeChunk(state_allocator, &state, source)) |exit_code| return exit_code;
     }
 
     if (script_path) |path| {
-        const source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| {
+        const source = std.Io.Dir.cwd().readFileAlloc(io, path, state_allocator, .limited(1024 * 1024)) catch |err| {
             try stderrPrint(io, "cannot read script {s}: {s}\n", .{ path, @errorName(err) });
             return 1;
         };
-        defer allocator.free(source);
-        const source_name = try std.fmt.allocPrint(allocator, "@{s}", .{path});
-        defer allocator.free(source_name);
-        if (try executeChunkNamed(allocator, &state, stripInitialShebang(source), source_name)) |exit_code| return exit_code;
+        defer state_allocator.free(source);
+        const source_name = try std.fmt.allocPrint(state_allocator, "@{s}", .{path});
+        defer state_allocator.free(source_name);
+        if (try executeChunkNamed(state_allocator, &state, stripInitialShebang(source), source_name)) |exit_code| return exit_code;
     }
 
     try stdoutWrite(io, state.stdout.items);

@@ -36,6 +36,7 @@ pub const ArgumentErrorDetail = union(enum) {
 
 pub const SyntaxError = union(enum) {
     unexpected: UnexpectedSyntax,
+    expected: ExpectedSyntax,
     expected_close: ExpectedClose,
 };
 
@@ -57,7 +58,17 @@ pub const SyntaxMessage = enum {
     malformed_number,
     unfinished_string,
     invalid_escape,
+    hex_digit_expected,
+    decimal_escape_too_large,
+    utf8_value_too_large,
+    missing_open_brace,
+    missing_close_brace,
     unfinished_long_bracket,
+};
+
+pub const ExpectedSyntax = struct {
+    expected: []const u8,
+    near: TokenRef,
 };
 
 pub const ExpectedClose = struct {
@@ -77,7 +88,7 @@ pub const ResolveError = union(enum) {
     invalid_close: struct { span: source.Span, global: bool = false, multiple: bool = false },
     unknown_attribute: struct { name: []const u8, span: source.Span },
     invalid_assignment_target: source.Span,
-    invalid_environment: source.Span,
+    invalid_environment: struct { name: []const u8, span: source.Span },
 };
 
 pub const CompileError = union(enum) {
@@ -125,6 +136,10 @@ fn appendDiagnosticDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8),
                 try out.appendSlice(allocator, " near ");
                 try appendNearToken(allocator, out, unexpected.token);
             },
+            .expected => |expected| {
+                try appendFmt(allocator, out, "{s} expected near ", .{expected.expected});
+                try appendNearToken(allocator, out, expected.near);
+            },
             .expected_close => |expected| {
                 try appendFmt(allocator, out, "'{s}' expected (to close '{s}' at line {d}) near ", .{ expected.expected, expected.opener, expected.opener_line });
                 try appendNearToken(allocator, out, expected.near);
@@ -133,7 +148,7 @@ fn appendDiagnosticDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8),
         .resolve => |resolve| switch (resolve) {
             .duplicate_label => |err| try appendFmt(allocator, out, "label '{s}' already defined at line {d}", .{ err.name, err.previous_line }),
             .missing_label => |err| try appendFmt(allocator, out, "no visible label '{s}' for <goto> at line {d}", .{ err.name, err.span.start.line }),
-            .goto_into_scope => |err| try appendFmt(allocator, out, "<goto {s}> jumps into the scope of local '{s}'", .{ err.label, err.decl }),
+            .goto_into_scope => |err| try appendFmt(allocator, out, "<goto {s}> at line {d} jumps into the scope of '{s}'", .{ err.label, err.span.start.line, err.decl }),
             .break_outside_loop => try out.appendSlice(allocator, "break outside loop"),
             .assign_const => |err| try appendFmt(allocator, out, "attempt to assign to const variable '{s}'", .{err.name}),
             .undeclared_global => |err| try appendFmt(allocator, out, "variable '{s}' is not declared", .{err.name}),
@@ -145,7 +160,7 @@ fn appendDiagnosticDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8),
                 try out.appendSlice(allocator, "invalid to-be-closed variable"),
             .unknown_attribute => |err| try appendFmt(allocator, out, "unknown attribute '{s}'", .{err.name}),
             .invalid_assignment_target => try out.appendSlice(allocator, "syntax error"),
-            .invalid_environment => try out.appendSlice(allocator, "variable '_ENV' is not declared"),
+            .invalid_environment => |err| try appendFmt(allocator, out, "_ENV is global when accessing variable '{s}'", .{err.name}),
         },
         .compile => |compile| switch (compile) {
             .too_many_returns => try out.appendSlice(allocator, "too many returns"),
@@ -179,6 +194,7 @@ fn diagnosticLine(diagnostic: Diagnostic) usize {
     return switch (diagnostic) {
         .syntax => |syntax| switch (syntax) {
             .unexpected => |unexpected| unexpected.token.span.start.line,
+            .expected => |expected| expected.near.span.start.line,
             .expected_close => |expected| expected.near.span.start.line,
         },
         .resolve => |resolve| switch (resolve) {
@@ -191,7 +207,7 @@ fn diagnosticLine(diagnostic: Diagnostic) usize {
             .invalid_close => |err| err.span.start.line,
             .unknown_attribute => |err| err.span.start.line,
             .invalid_assignment_target => |span| span.start.line,
-            .invalid_environment => |span| span.start.line,
+            .invalid_environment => |err| err.span.start.line,
         },
         .compile => |compile| switch (compile) {
             .too_many_returns => |span| span.start.line,
@@ -212,6 +228,11 @@ fn syntaxMessageText(message: SyntaxMessage) []const u8 {
         .malformed_number => "malformed number",
         .unfinished_string => "unfinished string",
         .invalid_escape => "invalid escape sequence",
+        .hex_digit_expected => "hexadecimal digit expected",
+        .decimal_escape_too_large => "decimal escape too large",
+        .utf8_value_too_large => "UTF-8 value too large",
+        .missing_open_brace => "missing '{'",
+        .missing_close_brace => "missing '}'",
         .unfinished_long_bracket => "unfinished long string",
     };
 }

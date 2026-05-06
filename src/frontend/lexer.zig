@@ -202,9 +202,15 @@ pub const Lexer = struct {
             },
             'x' => {
                 _ = self.advance();
-                if (!isHexDigit(self.peek())) return self.failVoid(.invalid_escape, start, self.position(), "invalid hexadecimal escape");
+                if (!isHexDigit(self.peek())) {
+                    self.consumeInvalidHexEscapeByte();
+                    return self.failVoid(.invalid_escape, start, self.position(), "hexadecimal digit expected");
+                }
                 _ = self.advance();
-                if (!isHexDigit(self.peek())) return self.failVoid(.invalid_escape, start, self.position(), "invalid hexadecimal escape");
+                if (!isHexDigit(self.peek())) {
+                    self.consumeInvalidHexEscapeByte();
+                    return self.failVoid(.invalid_escape, start, self.position(), "hexadecimal digit expected");
+                }
                 _ = self.advance();
             },
             'u' => try self.unicodeEscape(start),
@@ -215,7 +221,10 @@ pub const Lexer = struct {
 
     fn unicodeEscape(self: *Lexer, start: source_mod.Position) !void {
         _ = self.advance();
-        if (self.peek() != '{') return self.failVoid(.invalid_escape, start, self.position(), "invalid unicode escape");
+        if (self.peek() != '{') {
+            self.consumeInvalidEscapeByte();
+            return self.failVoid(.invalid_escape, start, self.position(), "missing '{'");
+        }
         _ = self.advance();
         var count: usize = 0;
         var value: u32 = 0;
@@ -224,7 +233,15 @@ pub const Lexer = struct {
             value = appendUnicodeEscapeDigit(value, digit);
             count += 1;
         }
-        if (count == 0 or self.peek() != '}' or value > max_lua_utf8_codepoint) return self.failVoid(.invalid_escape, start, self.position(), "invalid unicode escape");
+        if (count == 0) {
+            self.consumeInvalidEscapeByte();
+            return self.failVoid(.invalid_escape, start, self.position(), "hexadecimal digit expected");
+        }
+        if (value > max_lua_utf8_codepoint) return self.failVoid(.invalid_escape, start, self.position(), "UTF-8 value too large");
+        if (self.peek() != '}') {
+            self.consumeInvalidEscapeByte();
+            return self.failVoid(.invalid_escape, start, self.position(), "missing '}'");
+        }
         _ = self.advance();
     }
 
@@ -234,7 +251,23 @@ pub const Lexer = struct {
         while (count < 3 and isDigit(self.peek())) : (count += 1) {
             value = value * 10 + @as(u32, self.advance().? - '0');
         }
-        if (value > 255) return self.failVoid(.invalid_escape, start, self.position(), "decimal escape too large");
+        if (value > 255) {
+            self.consumeClosingQuoteIfPresent(self.source[start.offset]);
+            return self.failVoid(.invalid_escape, start, self.position(), "decimal escape too large");
+        }
+    }
+
+    fn consumeInvalidHexEscapeByte(self: *Lexer) void {
+        self.consumeInvalidEscapeByte();
+    }
+
+    fn consumeInvalidEscapeByte(self: *Lexer) void {
+        if (self.atEnd() or isNewline(self.peek().?)) return;
+        _ = self.advance();
+    }
+
+    fn consumeClosingQuoteIfPresent(self: *Lexer, quote: u8) void {
+        if (self.peek() == quote) _ = self.advance();
     }
 
     fn longString(self: *Lexer, start: source_mod.Position) !token_mod.Token {
@@ -336,14 +369,18 @@ pub const Lexer = struct {
         try self.diagnostics.append(self.allocator, .{ .code = code, .span = .{ .start = start, .end = end }, .message = message });
         if (self.error_diagnostic) |slot| if (slot.* == null) {
             const lexeme = if (end.offset <= self.source.len and start.offset <= end.offset) self.source[start.offset..end.offset] else "";
-            slot.* = .{ .syntax = .{ .unexpected = .{
-                .token = .{
+            const token: errors.TokenRef = switch (code) {
+                .unfinished_string, .unfinished_long_bracket => .{ .tag = .eof, .lexeme = "", .span = .{ .start = start, .end = end }, .unquoted = true },
+                else => .{
                     .tag = .identifier,
                     .lexeme = lexeme,
                     .span = .{ .start = start, .end = end },
                     .unquoted = code == .unexpected_character,
                 },
-                .message = syntaxMessage(code),
+            };
+            slot.* = .{ .syntax = .{ .unexpected = .{
+                .token = token,
+                .message = syntaxMessage(code, message),
             } } };
         };
     }
@@ -415,11 +452,22 @@ pub fn lexWithDiagnostic(allocator: std.mem.Allocator, source: []const u8, error
     return tokens.toOwnedSlice(allocator);
 }
 
-fn syntaxMessage(code: diagnostic.Code) errors.SyntaxMessage {
+fn syntaxMessage(code: diagnostic.Code, message: []const u8) errors.SyntaxMessage {
     return switch (code) {
         .unexpected_character => .unexpected_symbol,
         .unfinished_string => .unfinished_string,
-        .invalid_escape => .invalid_escape,
+        .invalid_escape => if (std.mem.eql(u8, message, "hexadecimal digit expected"))
+            .hex_digit_expected
+        else if (std.mem.eql(u8, message, "decimal escape too large"))
+            .decimal_escape_too_large
+        else if (std.mem.eql(u8, message, "UTF-8 value too large"))
+            .utf8_value_too_large
+        else if (std.mem.eql(u8, message, "missing '{'"))
+            .missing_open_brace
+        else if (std.mem.eql(u8, message, "missing '}'"))
+            .missing_close_brace
+        else
+            .invalid_escape,
         .malformed_number => .malformed_number,
         .unfinished_long_bracket => .unfinished_long_bracket,
     };

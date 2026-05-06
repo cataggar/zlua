@@ -2330,8 +2330,11 @@ pub const State = struct {
         self.last_error = null;
         self.last_error_in_close = false;
         self.invokeValue(thread, .{ .base = context.relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
-            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode, error.OutOfMemory => {
                 if (thread.frames.items.len < context.frame_count) return err;
+                if (err == error.OutOfMemory) {
+                    if (self.last_error == null) self.last_error = .{ .diagnostic = "not enough memory" };
+                }
                 const error_value = self.currentErrorValue();
                 const failure = try self.restoreProtectedCall(thread, context, error_value);
                 return .{ .failure = failure };
@@ -2339,8 +2342,11 @@ pub const State = struct {
             else => return err,
         };
         self.runThreadUntil(thread, context.frame_count) catch |err| switch (err) {
-            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode, error.OutOfMemory => {
                 if (thread.frames.items.len < context.frame_count) return err;
+                if (err == error.OutOfMemory) {
+                    if (self.last_error == null) self.last_error = .{ .diagnostic = "not enough memory" };
+                }
                 const error_value = self.currentErrorValue();
                 const failure = try self.restoreProtectedCall(thread, context, error_value);
                 return .{ .failure = failure };

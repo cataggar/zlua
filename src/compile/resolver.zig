@@ -227,7 +227,6 @@ const FunctionContext = struct {
 
         for (decl.values) |value| try self.resolveExpr(value);
         for (decl.names) |binding| {
-            if (std.mem.eql(u8, binding.name.name, "_ENV")) return self.fail(.{ .invalid_environment = binding.name.span });
             const attr = if (binding.attribute) |_| try self.parseAttribute(binding.attribute) else default_attr;
             if (attr == .to_close) return self.fail(.{ .invalid_close = .{ .span = binding.name.span, .global = true } });
             try self.decls.append(self.allocator, .{
@@ -274,7 +273,13 @@ const FunctionContext = struct {
     fn resolveExpr(self: *FunctionContext, expr: *const ast.Expr) anyerror!void {
         switch (expr.*) {
             .nil, .boolean, .integer, .float, .string, .vararg => {},
-            .identifier => |name| _ = try self.lookupName(name.name, true),
+            .identifier => |name| {
+                const lookup = try self.lookupName(name.name, true);
+                switch (lookup) {
+                    .global => try self.ensureEnvironmentIsLocal(name.name, name.span),
+                    .local, .undeclared => {},
+                }
+            },
             .table_constructor => |constructor| {
                 for (constructor.fields) |field| switch (field) {
                     .array => |value| try self.resolveExpr(value),
@@ -323,7 +328,11 @@ const FunctionContext = struct {
     fn resolveNameAssignment(self: *FunctionContext, name: ast.Identifier) !void {
         const lookup = try self.lookupName(name.name, true);
         switch (lookup) {
-            .local, .global => |decl| if (decl.read_only) return self.fail(.{ .assign_const = .{ .name = name.name, .span = name.span } }),
+            .local => |decl| if (decl.read_only) return self.fail(.{ .assign_const = .{ .name = name.name, .span = name.span } }),
+            .global => |decl| {
+                try self.ensureEnvironmentIsLocal(name.name, name.span);
+                if (decl.read_only) return self.fail(.{ .assign_const = .{ .name = name.name, .span = name.span } });
+            },
             .undeclared => return self.fail(.{ .undeclared_global = .{ .name = name.name, .span = name.span } }),
         }
     }
@@ -352,7 +361,7 @@ const FunctionContext = struct {
         }
 
         const global = Decl{ .name = name, .span = zero_span, .kind = .global_name };
-        try self.ensureEnvironmentIsLocal(name);
+        try self.ensureEnvironmentIsLocal(name, zero_span);
         return .{ .global = global };
     }
 
@@ -386,12 +395,12 @@ const FunctionContext = struct {
         return result;
     }
 
-    fn ensureEnvironmentIsLocal(self: *FunctionContext, name: []const u8) anyerror!void {
+    fn ensureEnvironmentIsLocal(self: *FunctionContext, name: []const u8, span: source.Span) anyerror!void {
         if (std.mem.eql(u8, name, "_ENV")) return;
         const env = try self.lookupName("_ENV", false);
         switch (env) {
             .local => {},
-            .global, .undeclared => return self.fail(.{ .invalid_environment = zero_span }),
+            .global, .undeclared => return self.fail(.{ .invalid_environment = .{ .name = name, .span = span } }),
         }
     }
 
