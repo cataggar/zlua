@@ -171,7 +171,7 @@ const FunctionContext = struct {
                 for (stmt.iterators) |iterator| try self.resolveExpr(iterator);
                 self.loop_depth += 1;
                 try self.enterScope();
-                for (stmt.names) |name| try self.declareLocal(name, .regular, false);
+                for (stmt.names) |name| try self.declareLocal(name, .regular, true);
                 try self.resolveBlock(stmt.body, true);
                 try self.leaveScope();
                 self.loop_depth -= 1;
@@ -489,8 +489,8 @@ test "resolver accepts declarations and upvalues" {
     );
 }
 
-test "resolver allows generic for variable reassignment" {
-    try expectResolve(
+test "resolver rejects generic for variable reassignment" {
+    try expectResolveError(
         \\for _, value in pairs{1} do
         \\  value = value + 1
         \\end

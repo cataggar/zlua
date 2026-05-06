@@ -241,7 +241,7 @@ pub const Table = struct {
         }
         if (self.entry_index.get(key)) |index| {
             if (value == .nil) {
-                self.removeEntryAt(index);
+                self.entries.items[index].value = .nil;
             } else {
                 self.entries.items[index].value = value;
             }
@@ -271,11 +271,7 @@ pub const Table = struct {
             if (index <= self.array.items.len) return self.firstEntryAfterArray(index);
         }
         if (self.entry_index.get(key)) |index| {
-            if (index + 1 < self.entries.items.len) {
-                const next_entry = self.entries.items[index + 1];
-                return .{ next_entry.key, next_entry.value };
-            }
-            return .{ .nil, .nil };
+            return self.firstHashEntryFrom(index + 1);
         }
         return error.RuntimeError;
     }
@@ -287,9 +283,16 @@ pub const Table = struct {
             const value = self.array.items[next_index - 1];
             if (value != .nil) return .{ .{ .integer = @intCast(next_index) }, value };
         }
-        if (self.entries.items.len == 0) return .{ .nil, .nil };
-        const entry = self.entries.items[0];
-        return .{ entry.key, entry.value };
+        return self.firstHashEntryFrom(0);
+    }
+
+    fn firstHashEntryFrom(self: Table, start: usize) [2]Value {
+        var index = start;
+        while (index < self.entries.items.len) : (index += 1) {
+            const entry = self.entries.items[index];
+            if (entry.value != .nil) return .{ entry.key, entry.value };
+        }
+        return .{ .nil, .nil };
     }
 
     fn removeHashKey(self: *Table, key: Value) void {
@@ -299,11 +302,11 @@ pub const Table = struct {
     fn removeEntryAt(self: *Table, index: usize) void {
         const old_key = self.entries.items[index].key;
         _ = self.entry_index.remove(old_key);
-        const last_index = self.entries.items.len - 1;
-        if (index != last_index) {
-            const moved_key = self.entries.items[last_index].key;
-            self.entries.items[index] = self.entries.items[last_index];
-            self.entry_index.getPtr(moved_key).?.* = index;
+        var next_index = index + 1;
+        while (next_index < self.entries.items.len) : (next_index += 1) {
+            const shifted_index = next_index - 1;
+            self.entries.items[shifted_index] = self.entries.items[next_index];
+            self.entry_index.getPtr(self.entries.items[shifted_index].key).?.* = shifted_index;
         }
         self.entries.items.len -= 1;
     }
@@ -1630,15 +1633,23 @@ pub const State = struct {
         const limit = self.get(thread, op.base + 1);
         const step = self.get(thread, op.base + 2);
         if (toInteger(initial)) |initial_integer| {
-            if (toInteger(limit)) |limit_integer| {
-                if (toInteger(step)) |step_integer| {
-                    if (step_integer == 0) return self.fail("'for' step is zero");
-                    self.set(thread, op.base, .{ .integer = initial_integer });
-                    self.set(thread, op.base + 1, .{ .integer = limit_integer });
-                    self.set(thread, op.base + 2, .{ .integer = step_integer });
-                    if (!forLoopContinuesInteger(initial_integer, limit_integer, step_integer)) try self.jumpThread(thread, op.offset, false);
-                    return;
-                }
+            if (toInteger(step)) |step_integer| {
+                if (step_integer == 0) return self.fail("'for' step is zero");
+                const limit_integer = toInteger(limit) orelse blk: {
+                    const limit_number = toNumberMaybe(limit) orelse return self.fail("'for' limit must be a number");
+                    break :blk integerForLimit(limit_number, step_integer) orelse {
+                        self.set(thread, op.base, .{ .integer = initial_integer });
+                        self.set(thread, op.base + 1, .{ .integer = initial_integer });
+                        self.set(thread, op.base + 2, .{ .integer = step_integer });
+                        try self.jumpThread(thread, op.offset, false);
+                        return;
+                    };
+                };
+                self.set(thread, op.base, .{ .integer = initial_integer });
+                self.set(thread, op.base + 1, .{ .integer = limit_integer });
+                self.set(thread, op.base + 2, .{ .integer = step_integer });
+                if (!forLoopContinuesInteger(initial_integer, limit_integer, step_integer)) try self.jumpThread(thread, op.offset, false);
+                return;
             }
         }
 
@@ -1659,7 +1670,8 @@ pub const State = struct {
         if (current == .integer and limit == .integer and step == .integer) {
             const next = current.integer +% step.integer;
             self.set(thread, op.base, .{ .integer = next });
-            if (forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset, false);
+            const wrapped = (step.integer > 0 and next < current.integer) or (step.integer < 0 and next > current.integer);
+            if (!wrapped and forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset, false);
             return;
         }
 
@@ -1975,17 +1987,25 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &values);
             },
             .native_pairs => {
-                const table = try self.expectTable(argValue(self, thread, resolved, 0));
-                _ = table;
-                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_next, argValue(self, thread, resolved, 0), .nil });
+                const table_value = argValue(self, thread, resolved, 0);
+                if (table_value != .table) return self.fail("bad argument #1 to 'pairs' (table expected)");
+                if (try self.getMetamethod(table_value, "__pairs")) |metamethod| {
+                    self.set(thread, resolved.base, metamethod);
+                    self.set(thread, resolved.base + 1, table_value);
+                    thread.native_call_depth -= 1;
+                    defer thread.native_call_depth += 1;
+                    try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = 1, .return_count = resolved.return_count }, 0);
+                    return;
+                }
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_next, table_value, .nil });
             },
             .native_ipairs => {
-                const table = try self.expectTable(argValue(self, thread, resolved, 0));
-                _ = table;
-                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_ipairs_iter, argValue(self, thread, resolved, 0), .{ .integer = 0 } });
+                const table_value = argValue(self, thread, resolved, 0);
+                if (table_value != .table) return self.fail("bad argument #1 to 'ipairs' (table expected)");
+                try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_ipairs_iter, table_value, .{ .integer = 0 } });
             },
             .native_ipairs_iter => {
-                const values = try self.ipairsIterValues(argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1));
+                const values = try self.ipairsIterValues(thread, argValue(self, thread, resolved, 0), argValue(self, thread, resolved, 1));
                 try self.returnValues(thread, resolved.base, resolved.return_count, &values);
             },
             .native_table_create => {
@@ -3130,11 +3150,12 @@ pub const State = struct {
         return table.next(key) catch return self.fail("invalid key to 'next'");
     }
 
-    fn ipairsIterValues(self: *State, table_value: Value, key_value: Value) ![2]Value {
+    fn ipairsIterValues(self: *State, thread: *Thread, table_value: Value, key_value: Value) ![2]Value {
         const table = try self.expectTable(table_value);
+        _ = table;
         const current = toInteger(key_value) orelse return self.fail("invalid index to 'ipairs'");
         const next_index = current +% 1;
-        const value = table.get(.{ .integer = next_index });
+        const value = try self.getTableFromThread(thread, table_value, .{ .integer = next_index });
         if (value == .nil) return .{ .nil, .nil };
         return .{ .{ .integer = next_index }, value };
     }
@@ -3152,7 +3173,7 @@ pub const State = struct {
                 break :blk fixed[0..2];
             },
             .native_ipairs_iter => blk: {
-                fixed = try self.ipairsIterValues(state, control);
+                fixed = try self.ipairsIterValues(thread, state, control);
                 break :blk fixed[0..2];
             },
             .native => |native| switch (native) {
@@ -3400,6 +3421,7 @@ pub const State = struct {
         self.clearWeakValues();
         try self.runPendingFinalizers(thread);
         self.clearWeakTables();
+        self.clearDeadHashKeys();
         self.sweepThreads();
         self.sweepClosures();
         self.sweepUpvalues();
@@ -3468,7 +3490,7 @@ pub const State = struct {
             return;
         }
         if (weak.values) {
-            for (table.entries.items) |entry| self.markValue(entry.key);
+            for (table.entries.items) |entry| if (entry.value != .nil) self.markValue(entry.key);
             self.markWeakTableStrings(table, false, true);
             return;
         }
@@ -3479,6 +3501,7 @@ pub const State = struct {
         }
         for (table.array.items) |value| self.markValue(value);
         for (table.entries.items) |entry| {
+            if (entry.value == .nil) continue;
             self.markValue(entry.key);
             self.markValue(entry.value);
         }
@@ -3489,6 +3512,7 @@ pub const State = struct {
             for (table.array.items) |value| self.markWeakString(value);
         }
         for (table.entries.items) |entry| {
+            if (entry.value == .nil) continue;
             if (keys) self.markWeakString(entry.key);
             if (values) self.markWeakString(entry.value);
         }
@@ -3571,6 +3595,7 @@ pub const State = struct {
     fn markEphemeronValues(self: *State, table: *Table) bool {
         var changed = false;
         for (table.entries.items) |entry| {
+            if (entry.value == .nil) continue;
             if (self.valueIsWeaklyCleared(entry.key)) continue;
             self.markValue(entry.key);
             if (self.markValueChanged(entry.value)) changed = true;
@@ -3616,6 +3641,16 @@ pub const State = struct {
         };
     }
 
+    fn valueIsCollectableUnmarked(self: *State, value: Value) bool {
+        return switch (value) {
+            .string => |string| if (self.findStringAllocation(string)) |index| !self.string_allocations.items[index].marked else false,
+            .table => |table| self.isTrackedTable(table) and !table.marked,
+            .closure => |closure| self.isTrackedClosure(closure) and !closure.marked,
+            .thread, .coroutine_wrapper => |thread| self.isTrackedThread(thread) and !thread.marked,
+            else => false,
+        };
+    }
+
     fn clearWeakValues(self: *State) void {
         for (self.table_allocations.items) |table| {
             if (!table.marked) continue;
@@ -3630,6 +3665,25 @@ pub const State = struct {
             const weak = self.weakMode(table);
             if (weak.values) self.clearWeakTableValues(table);
             if (weak.keys) self.clearWeakTableKeys(table);
+        }
+    }
+
+    fn clearDeadHashKeys(self: *State) void {
+        for (self.table_allocations.items) |table| {
+            if (!table.marked) continue;
+            var read_index: usize = 0;
+            var write_index: usize = 0;
+            while (read_index < table.entries.items.len) : (read_index += 1) {
+                const entry = table.entries.items[read_index];
+                if (entry.value == .nil and self.valueIsCollectableUnmarked(entry.key)) {
+                    _ = table.entry_index.remove(entry.key);
+                } else {
+                    if (write_index != read_index) table.entries.items[write_index] = entry;
+                    table.entry_index.getPtr(entry.key).?.* = write_index;
+                    write_index += 1;
+                }
+            }
+            table.entries.items.len = write_index;
         }
     }
 
@@ -4629,6 +4683,20 @@ fn jumpTarget(pc: usize, offset: bytecode.JumpOffset) usize {
 
 fn forLoopContinuesInteger(current: i64, limit: i64, step: i64) bool {
     return if (step > 0) current <= limit else current >= limit;
+}
+
+fn integerForLimit(limit: f64, step: i64) ?i64 {
+    if (std.math.isNan(limit)) return null;
+    const min_integer: f64 = @floatFromInt(std.math.minInt(i64));
+    const max_integer: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (step > 0) {
+        if (limit < min_integer) return null;
+        if (limit >= max_integer) return std.math.maxInt(i64);
+        return @intFromFloat(std.math.floor(limit));
+    }
+    if (limit > max_integer) return null;
+    if (limit <= min_integer) return std.math.minInt(i64);
+    return @intFromFloat(std.math.ceil(limit));
 }
 
 fn forLoopContinuesNumber(current: f64, limit: f64, step: f64) bool {

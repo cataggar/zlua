@@ -322,6 +322,11 @@ fn constAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]
     var lines = std.mem.splitScalar(u8, source, '\n');
     var line_number: usize = if (source.len != 0 and source[0] == '\n') 0 else 1;
     while (lines.next()) |line| : (line_number += 1) {
+        if (forControlAssignmentName(line)) |name| {
+            const message = try std.fmt.allocPrint(allocator, ":{d}: attempt to assign to const variable '{s}'", .{ line_number, name });
+            return message;
+        }
+
         try appendReadOnlyNames(allocator, line, &names);
 
         for (names.items) |name| {
@@ -332,6 +337,35 @@ fn constAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]
         }
     }
 
+    return null;
+}
+
+fn forControlAssignmentName(line: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (keywordIndex(line, cursor, "for")) |for_index| {
+        cursor = for_index + "for".len;
+        skipWhitespace(line, &cursor);
+        const first_name = readIdentifier(line, &cursor) orelse continue;
+        var names = [_]?[]const u8{ first_name, null };
+
+        skipWhitespace(line, &cursor);
+        if (cursor >= line.len) return null;
+        if (line[cursor] == ',') {
+            cursor += 1;
+            skipWhitespace(line, &cursor);
+            names[1] = readIdentifier(line, &cursor);
+            skipWhitespace(line, &cursor);
+        }
+
+        const separator = if (cursor < line.len) line[cursor] else 0;
+        if (separator != '=' and !keywordAt(line, cursor, "in")) continue;
+        const do_index = keywordIndex(line, cursor, "do") orelse return null;
+        const body = line[do_index + "do".len ..];
+        for (names) |name| {
+            const control_name = name orelse continue;
+            if (containsAssignmentTo(body, control_name)) return control_name;
+        }
+    }
     return null;
 }
 
