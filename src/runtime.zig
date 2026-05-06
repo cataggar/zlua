@@ -13,7 +13,7 @@ pub const RuntimeError = error{
     UnsupportedOpcode,
 };
 
-const max_stack_values: usize = 8192;
+const max_stack_values: usize = 65536;
 const max_call_frames: usize = 256;
 const max_metamethod_depth: usize = 15;
 pub const binary_chunk_signature = "\x1bLua";
@@ -197,6 +197,7 @@ pub const Table = struct {
     entries: std.ArrayList(TableEntry) = .empty,
     entry_index: TableEntryIndex,
     metatable: ?*Table = null,
+    counts_for_gc_count: bool = true,
     marked: bool = false,
     finalized: bool = false,
 
@@ -2597,7 +2598,7 @@ pub const State = struct {
         for (0..copied) |index| thread.stack.items[frame_base + index] = thread.stack.items[source_base + 1 + index];
         for (copied..register_count) |index| thread.stack.items[frame_base + index] = .nil;
 
-        if (closure.proto.is_vararg and closure.proto.max_registers > closure.proto.param_count) {
+        if (closure.proto.named_vararg) {
             thread.stack.items[frame_base + param_count] = try self.namedVarargTable(varargs);
         }
 
@@ -2623,6 +2624,7 @@ pub const State = struct {
     fn namedVarargTable(self: *State, varargs: []const Value) !Value {
         const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
         const table = table_value.table;
+        table.counts_for_gc_count = false;
         try table.set(self.allocator, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
         for (varargs, 0..) |value, index| {
             try table.set(self.allocator, .{ .integer = @intCast(index + 1) }, value);
@@ -2654,6 +2656,7 @@ pub const State = struct {
 
     fn loadVarargs(self: *State, thread: *Thread, op: bytecode.Vararg) !void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
+        if (frame.proto.named_vararg) return self.loadNamedVarargs(thread, frame, op);
         const actual_count = try self.resolveReturnCount(op.count, frame.varargs.len);
         const dest = frame.base + op.dest;
         try thread.ensureStack(self.allocator, dest + actual_count);
@@ -2662,6 +2665,28 @@ pub const State = struct {
         for (copied..actual_count) |index| thread.stack.items[dest + index] = .nil;
         thread.last_result_base = dest;
         thread.last_result_count = actual_count;
+    }
+
+    fn loadNamedVarargs(self: *State, thread: *Thread, frame: CallFrame, op: bytecode.Vararg) !void {
+        const table_value = thread.stack.items[frame.base + frame.proto.param_count];
+        const table = try self.expectTable(table_value);
+        const count = try self.namedVarargCount(table);
+        const actual_count = try self.resolveReturnCount(op.count, count);
+        const dest = frame.base + op.dest;
+        try thread.ensureStack(self.allocator, dest + actual_count);
+        const copied = @min(actual_count, count);
+        for (0..copied) |index| thread.stack.items[dest + index] = table.get(.{ .integer = @intCast(index + 1) });
+        for (copied..actual_count) |index| thread.stack.items[dest + index] = .nil;
+        thread.last_result_base = dest;
+        thread.last_result_count = actual_count;
+    }
+
+    fn namedVarargCount(self: *State, table: *Table) !usize {
+        const n_value = table.get(.{ .string = try self.intern("n") });
+        if (n_value != .integer or n_value.integer < 0 or n_value.integer >= bytecode.multret_count) {
+            return self.fail("vararg table has no proper 'n'");
+        }
+        return @intCast(n_value.integer);
     }
 
     fn setList(self: *State, thread: *Thread, op: bytecode.SetList) !void {
@@ -3887,7 +3912,9 @@ pub const State = struct {
     fn allocationStats(self: State) RuntimeAllocationStats {
         var bytes: usize = 0;
         for (self.string_allocations.items) |allocation| bytes += @sizeOf(StringAllocation) + allocation.bytes.len;
-        for (self.table_allocations.items) |table| bytes += @sizeOf(Table) + table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
+        for (self.table_allocations.items) |table| {
+            if (table.counts_for_gc_count) bytes += @sizeOf(Table) + table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
+        }
         bytes += self.closure_allocations.items.len * @sizeOf(Closure);
         bytes += self.upvalue_allocations.items.len * @sizeOf(Upvalue);
         bytes += self.thread_allocations.items.len * @sizeOf(Thread);

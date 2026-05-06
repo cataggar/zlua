@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=25`, `categorized_failed=7`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=26`, `categorized_failed=6`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -24,6 +24,14 @@ This document tracks the test layers currently used for zlua and the current sta
 | Not run | The file exists in the official suite but is not part of the per-file basic dashboard. |
 
 ## Focused Official Progress
+
+Latest focused `vararg.lua` work verified with `just official-file vararg`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+- Named vararg tables now drive later `...` expansion from the table and its `n` field, so mutations such as changing indexed values or `n` are reflected in returned varargs.
+- Named vararg `n` validation now reports the official-compatible `no proper 'n'` error for invalid counts while allowing large dynamic vararg expansion used by `vararg.lua`.
+- Load diagnostics recognize assignment to named vararg parameters, including nested closure assignment cases covered by the official const checks.
+- Named vararg backing tables remain normal GC-tracked table values but are excluded from `collectgarbage("count")`, matching the official read-only named-vararg memory check.
+- `vararg.lua` now passes in the basic official dashboard.
 
 Latest focused `nextvar.lua` work verified with `just official-file nextvar`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. `zig build test` initially exposed a stale generic-for resolver unit expectation, which has been updated.
 
@@ -194,7 +202,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `tpack.lua` | Pass | XFail | `runtime` |
 | `tracegc.lua` | Pass | Pass |  |
 | `utf8.lua` | Pass | Pass |  |
-| `vararg.lua` | Pass | XFail | `runtime` |
+| `vararg.lua` | Pass | Pass |  |
 | `verybig.lua` | Pass | Pass |  |
 
 ## Current Official Summary
@@ -207,7 +215,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 25 |
-| Categorized zlua failures | 7 |
+| zlua passes | 26 |
+| Categorized zlua failures | 6 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

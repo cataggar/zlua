@@ -147,9 +147,9 @@ const FunctionCompiler = struct {
         for (body.params) |param| _ = try child_context.declareLocal(param.name);
         child.param_count = @intCast(body.params.len + @as(usize, if (method) 1 else 0));
         child.is_vararg = body.is_vararg;
-        if (body.is_vararg) {
-            const name = if (body.vararg_name) |vararg_name| vararg_name.name else "...";
-            _ = try child_context.declareLocal(name);
+        if (body.vararg_name) |vararg_name| {
+            child.named_vararg = true;
+            _ = try child_context.declareLocal(vararg_name.name);
         }
         try child_context.compileBlock(body.body, true);
         if (!blockEndsWithReturn(body.body)) {

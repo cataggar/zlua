@@ -398,6 +398,8 @@ fn defaultCloseHasMultipleNames(line: []const u8) bool {
 }
 
 fn appendReadOnlyNames(allocator: std.mem.Allocator, line: []const u8, names: *std.ArrayList([]const u8)) !void {
+    try appendNamedVarargNames(allocator, line, names);
+
     var cursor: usize = 0;
     while (cursor < line.len) {
         const keyword = nextDeclarationKeyword(line, cursor) orelse break;
@@ -418,6 +420,15 @@ fn appendReadOnlyNames(allocator: std.mem.Allocator, line: []const u8, names: *s
             if (cursor == line.len or line[cursor] != ',') break;
             cursor += 1;
         }
+    }
+}
+
+fn appendNamedVarargNames(allocator: std.mem.Allocator, line: []const u8, names: *std.ArrayList([]const u8)) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, line, cursor, "...")) |index| {
+        cursor = index + "...".len;
+        skipWhitespace(line, &cursor);
+        if (readIdentifier(line, &cursor)) |name| try names.append(allocator, name);
     }
 }
 
