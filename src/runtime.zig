@@ -539,6 +539,7 @@ pub const State = struct {
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
     current_thread: ?*Thread = null,
+    coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
     is_collecting: bool = false,
     collect_after_instruction: bool = false,
@@ -723,9 +724,9 @@ pub const State = struct {
         try state.setTable(io_lib, .{ .string = try state.intern("write") }, .{ .native = .io_write });
         try state.setTable(io_lib, .{ .string = try state.intern("open") }, .{ .native = .io_open });
         try state.setTable(io_lib, .{ .string = try state.intern("type") }, .{ .native = .io_type });
-        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, try state.newTableWithHints(0, 0));
-        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, try state.newTableWithHints(0, 0));
-        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, try state.newTableWithHints(0, 0));
+        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, try state.newStandardFile("stdin", "r"));
+        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, try state.newStandardFile("stdout", "w"));
+        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, try state.newStandardFile("stderr", "w"));
         try state.globals.put(try state.intern("io"), io_lib);
 
         const os_lib = try state.newTableWithHints(0, 4);
@@ -770,6 +771,21 @@ pub const State = struct {
         try state.setTable(package_lib, .{ .string = try state.intern("cpath") }, .{ .string = try state.intern("") });
         try state.setTable(package_lib, .{ .string = try state.intern("config") }, .{ .string = try state.intern("/\n;\n?\n!\n-\n") });
         try state.globals.put(try state.intern("package"), package_lib);
+    }
+
+    fn newStandardFile(state: *State, path: []const u8, mode: []const u8) !Value {
+        const value = try state.newTableWithHints(0, 10);
+        const file = value.table;
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file") }, .{ .boolean = true });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_path") }, .{ .string = try state.intern(path) });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_mode") }, .{ .string = try state.intern(mode) });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern("") });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
+        try file.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .io_file_read });
+        try file.set(state.allocator, .{ .string = try state.intern("write") }, .{ .native = .io_file_write });
+        try file.set(state.allocator, .{ .string = try state.intern("close") }, .{ .native = .io_file_close });
+        return value;
     }
 
     pub fn deinit(self: *State) void {
@@ -2712,6 +2728,10 @@ pub const State = struct {
     }
 
     fn closeCoroutine(self: *State, target: *Thread, error_value: ?Value) !?Value {
+        if (self.coroutine_close_depth >= max_call_frames) return .{ .string = try self.intern("C stack overflow") };
+        self.coroutine_close_depth += 1;
+        defer self.coroutine_close_depth -= 1;
+
         const previous_thread = self.current_thread;
         const previous_parent = target.resume_parent;
         const previous_status = target.status;
@@ -2744,7 +2764,7 @@ pub const State = struct {
 
         const parent = self.current_thread;
         if (parent == target) return .{ .failure = .{ .string = try self.intern("cannot resume running coroutine") } };
-        if (resumeChainDepth(parent) >= max_call_frames) return .{ .failure = .{ .string = try self.intern("stack overflow") } };
+        if (resumeChainDepth(parent) >= max_call_frames) return .{ .failure = .{ .string = try self.intern("C stack overflow") } };
 
         if (parent) |parent_thread| {
             if (parent_thread.status == .running) parent_thread.status = .normal;
@@ -3298,15 +3318,14 @@ pub const State = struct {
     }
 
     fn markThreadStack(self: *State, thread: *Thread) void {
+        if (self.mark_all_stack_registers) {
+            self.markStackRange(thread, 0, thread.stack.items.len);
+            return;
+        }
         for (thread.frames.items) |frame| {
-            if (self.mark_all_stack_registers) {
-                const register_count = @max(frame.proto.max_registers, 1);
-                self.markStackRange(thread, frame.base, register_count);
-            } else {
-                for (frame.proto.locals.items) |local| {
-                    if (!localActiveAt(local, frame.pc)) continue;
-                    self.markStackRange(thread, frame.base + local.register, 1);
-                }
+            for (frame.proto.locals.items) |local| {
+                if (!localActiveAt(local, frame.pc)) continue;
+                self.markStackRange(thread, frame.base + local.register, 1);
             }
         }
         self.markStackRange(thread, thread.last_result_base, thread.last_result_count);
@@ -3442,8 +3461,18 @@ pub const State = struct {
             if (finalizer == .nil) continue;
             table.marked = true;
             table.finalized = true;
-            _ = try self.callOneResult(active_thread, finalizer, &.{.{ .table = table }});
-            try self.runThreadUntil(active_thread, active_thread.frames.items.len);
+            {
+                const saved_stack_len = active_thread.stack.items.len;
+                const saved_last_result_base = active_thread.last_result_base;
+                const saved_last_result_count = active_thread.last_result_count;
+                defer {
+                    active_thread.stack.items.len = saved_stack_len;
+                    active_thread.last_result_base = saved_last_result_base;
+                    active_thread.last_result_count = saved_last_result_count;
+                }
+                _ = try self.callOneResult(active_thread, finalizer, &.{.{ .table = table }});
+                try self.runThreadUntil(active_thread, active_thread.frames.items.len);
+            }
             ran_finalizer = true;
         }
         if (!ran_finalizer) return;
