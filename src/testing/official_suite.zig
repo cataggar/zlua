@@ -15,6 +15,7 @@ const Options = struct {
     show_zlua: bool = false,
     debug_errors: bool = false,
     timeout_ms: u64 = 0,
+    memory_limit_mb: u64 = 0,
 };
 
 const Mode = enum { basic, complete, internal };
@@ -106,6 +107,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.mode = try parseMode(arg[7..]);
         } else if (std.mem.startsWith(u8, arg, "--timeout-ms=")) {
             options.timeout_ms = try std.fmt.parseInt(u64, arg[13..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--memory-limit-mb=")) {
+            options.memory_limit_mb = try std.fmt.parseInt(u64, arg[18..], 10);
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return error.UnknownOption;
         } else {
@@ -152,6 +155,9 @@ fn runIndividualSuite(
         try out.print("mode: quick {s} official files (excluding heavy.lua)\n", .{@tagName(options.mode)});
     } else {
         try out.print("mode: {s} official files\n", .{@tagName(options.mode)});
+    }
+    if (options.memory_limit_mb != 0) {
+        try out.print("memory-limit: {d} MiB per child process\n", .{options.memory_limit_mb});
     }
     var files = std.ArrayList([]u8).empty;
     defer {
@@ -233,6 +239,7 @@ fn runOfficialFile(
         .timeout_ms = options.timeout_ms,
         .max_output_bytes = 4 * 1024 * 1024,
         .expand_arg0 = runner == .zlua,
+        .memory_limit_mb = options.memory_limit_mb,
     });
 }
 
@@ -296,12 +303,13 @@ fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 }
 
 test "argument parser accepts quick and complete mode" {
-    const args = [_][]const u8{ "--quick", "--mode=complete", "--debug-errors", "--timeout-ms=10" };
+    const args = [_][]const u8{ "--quick", "--mode=complete", "--debug-errors", "--timeout-ms=10", "--memory-limit-mb=256" };
     const options = try parseArgs(&args);
     try std.testing.expect(options.quick);
     try std.testing.expect(options.debug_errors);
     try std.testing.expectEqual(Mode.complete, options.mode);
     try std.testing.expectEqual(@as(u64, 10), options.timeout_ms);
+    try std.testing.expectEqual(@as(u64, 256), options.memory_limit_mb);
 }
 
 test "failure classifier maps frontend errors" {

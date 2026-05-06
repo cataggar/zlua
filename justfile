@@ -64,13 +64,13 @@ diff-file file *args:
 diff-ci:
     {{zig}} build test-diff
 
-# Run the quick official Lua 5.5 subset exactly as CI does.
+# Run the full official Lua 5.5 suite exactly as CI does.
 official-ci:
-    {{zig}} build test-official
+    {{zig}} build test-official-heavy
 
 # Run the full official Lua 5.5 suite dashboard, including memory-stress files.
 official-heavy:
-    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors
+    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors --memory-limit-mb=256
 
 # Run the official Lua 5.5 suite dashboard.
 official *args:

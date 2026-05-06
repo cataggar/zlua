@@ -184,7 +184,7 @@ fn printUsage(io: std.Io) !void {
         \\
         \\Commands:
         \\  test-diff [path] [--stage=name] [--feature=name] [--gc-stress] [--debug-errors] [--show-clua] [--show-zlua]
-        \\  test-official [--quick] [--mode=basic|complete|internal] [--debug-errors] [--show-clua] [--show-zlua]
+        \\  test-official [--quick] [--mode=basic|complete|internal] [--memory-limit-mb=n] [--debug-errors] [--show-clua] [--show-zlua]
         \\  --debug-errors <script>
         \\  -e 'chunk' [script [args...]]
         \\

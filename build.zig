@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const official_memory_limit_mb = b.option(u64, "official-memory-limit-mb", "Memory cap per official-suite child process in MiB (0 disables)") orelse 256;
 
     const clua_exe = addVendoredClua(b, target, optimize);
     b.installArtifact(clua_exe);
@@ -57,18 +58,21 @@ pub fn build(b: *std.Build) void {
     official_cmd.addArg("--quick");
     official_step.dependOn(&official_cmd.step);
 
-    const official_heavy_step = b.step("test-official-heavy", "Run full official Lua 5.5 suite dashboard");
+    const official_heavy_step = b.step("test-official-heavy", "Run full official Lua 5.5 suite dashboard under a memory cap");
     const official_heavy_cmd = b.addRunArtifact(exe);
     official_heavy_cmd.step.dependOn(b.getInstallStep());
     official_heavy_cmd.addArg("test-official");
     official_heavy_cmd.addArg("--clua");
     official_heavy_cmd.addArtifactArg(clua_exe);
+    if (official_memory_limit_mb != 0) {
+        official_heavy_cmd.addArg(b.fmt("--memory-limit-mb={d}", .{official_memory_limit_mb}));
+    }
     official_heavy_step.dependOn(&official_heavy_cmd.step);
 
     const ci_step = b.step("ci", "Run CI checks");
     ci_step.dependOn(test_step);
     ci_step.dependOn(diff_step);
-    ci_step.dependOn(official_step);
+    ci_step.dependOn(official_heavy_step);
 }
 
 fn addVendoredClua(
