@@ -121,6 +121,7 @@ pub const NativeFn = enum {
     debug_getregistry,
     debug_sethook,
     debug_gethook,
+    debug_setmetatable,
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
@@ -228,6 +229,7 @@ pub const NativeFn = enum {
             .debug_getregistry => "debug.getregistry",
             .debug_sethook => "debug.sethook",
             .debug_gethook => "debug.gethook",
+            .debug_setmetatable => "debug.setmetatable",
         };
     }
 };
@@ -338,6 +340,7 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_getregistry => try debug.getregistry(state, thread, op),
         .debug_sethook => try debug.sethook(state, thread, op),
         .debug_gethook => try debug.gethook(state, thread, op),
+        .debug_setmetatable => try debug.setmetatable(state, thread, op),
     }
 }
 

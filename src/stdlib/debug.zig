@@ -254,6 +254,12 @@ pub fn gethook(state: *State, thread: *Thread, op: bytecode.Call) !void {
     });
 }
 
+pub fn setmetatable(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const value = runtime.argValue(state, thread, op, 0);
+    try state.setDebugMetatableValue(value, runtime.argValue(state, thread, op, 1));
+    try state.returnValues(thread, op.base, op.return_count, &.{value});
+}
+
 fn upvalueIndex(value: Value) ?usize {
     const integer = runtime.toInteger(value) orelse return null;
     if (integer <= 0) return null;

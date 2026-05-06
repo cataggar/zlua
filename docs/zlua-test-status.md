@@ -1,6 +1,6 @@
 # zlua Test Status
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 This document tracks the test layers currently used for zlua and the current status of each official Lua 5.5 test file in the basic official dashboard.
 
@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=28`, `categorized_failed=4`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=29`, `categorized_failed=3`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -24,6 +24,14 @@ This document tracks the test layers currently used for zlua and the current sta
 | Not run | The file exists in the official suite but is not part of the per-file basic dashboard. |
 
 ## Focused Official Progress
+
+Latest focused `events.lua` work verified with `just official-file events`, `just official-file cstack`, `just official-file attrib`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. The quick official dashboard now reports `zlua_passed=29` and `categorized_failed=3`.
+
+- Unary metamethod calls (`__unm`, `__bnot`, and `__len`) now pass the operand twice, matching Lua's official call convention covered by `events.lua`.
+- `rawlen` rejects zlua file-handle tables so `rawlen(io.stdin)` behaves like official userdata-backed file handles.
+- `debug.setmetatable` now supports primitive metatables for numbers, booleans, nil, and strings, and primitive metatables participate in `getmetatable`, `__index`, `__add`, and `__len` lookup.
+- Pattern matching uses a plain-literal fast path and a lower recursive-pattern guard, preserving long literal searches while reporting `pattern too complex` before native stack overflow in the official `cstack.lua` recursive pattern case.
+- `events.lua` now passes in the basic official dashboard.
 
 Latest focused `tpack.lua` work verified with `just official-file tpack`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
 
@@ -74,7 +82,7 @@ Latest focused `gc.lua` work:
 - `string.rep` accepts integral float counts for official long-string construction without changing arithmetic result tagging.
 - `gc.lua` now passes in the basic official dashboard.
 
-Latest focused `cstack.lua` work:
+Earlier focused `cstack.lua` work:
 
 - Pattern matching now reports `pattern too complex` for excessively deep recursive patterns while preserving longer literal search cases used by the official require tests.
 - `string.gsub` table replacements use normal `__index` lookup, so recursive replacement tables participate in stack-overflow detection.
@@ -197,7 +205,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `cstack.lua` | Pass | Pass |  |
 | `db.lua` | Pass | XFail | `runtime` |
 | `errors.lua` | Pass | XFail | `runtime` |
-| `events.lua` | Pass | XFail | `runtime` |
+| `events.lua` | Pass | Pass |  |
 | `files.lua` | Pass | XFail | `runtime` |
 | `gc.lua` | Pass | Pass |  |
 | `gengc.lua` | Pass | Pass |  |
@@ -228,7 +236,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 28 |
-| Categorized zlua failures | 4 |
+| zlua passes | 29 |
+| Categorized zlua failures | 3 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

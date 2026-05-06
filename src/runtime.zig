@@ -560,6 +560,9 @@ pub const State = struct {
     current_thread: ?*Thread = null,
     coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
+    number_metatable: ?*Table = null,
+    boolean_metatable: ?*Table = null,
+    nil_metatable: ?*Table = null,
     is_collecting: bool = false,
     collect_after_instruction: bool = false,
     gc_running: bool = true,
@@ -772,7 +775,7 @@ pub const State = struct {
         try state.setTable(os_lib, .{ .string = try state.intern("difftime") }, .{ .native = .os_difftime });
         try state.globals.put(try state.intern("os"), os_lib);
 
-        const debug_lib = try state.newTableWithHints(0, 9);
+        const debug_lib = try state.newTableWithHints(0, 10);
         try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
         try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
         try state.setTable(debug_lib, .{ .string = try state.intern("getupvalue") }, .{ .native = .debug_getupvalue });
@@ -784,6 +787,7 @@ pub const State = struct {
         try state.setTable(debug_lib, .{ .string = try state.intern("getregistry") }, .{ .native = .debug_getregistry });
         try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
         try state.setTable(debug_lib, .{ .string = try state.intern("gethook") }, .{ .native = .debug_gethook });
+        try state.setTable(debug_lib, .{ .string = try state.intern("setmetatable") }, .{ .native = .debug_setmetatable });
         try state.globals.put(try state.intern("debug"), debug_lib);
 
         const package_lib = try state.newTableWithHints(0, 8);
@@ -1945,10 +1949,13 @@ pub const State = struct {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
             .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod|
-                try self.callOneResult(thread, metamethod, &.{value})
+                try self.callOneResult(thread, metamethod, &.{ value, value })
             else
                 .{ .integer = table.len() },
-            else => self.fail("attempt to get length of a non-string value"),
+            else => if ((try self.getMetamethod(value, "__len"))) |metamethod|
+                try self.callOneResult(thread, metamethod, &.{ value, value })
+            else
+                self.fail("attempt to get length of a non-string value"),
         };
     }
 
@@ -2337,6 +2344,9 @@ pub const State = struct {
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return .nil,
             .string => self.string_metatable orelse return .nil,
+            .integer, .number => self.number_metatable orelse return .nil,
+            .boolean => self.boolean_metatable orelse return .nil,
+            .nil => self.nil_metatable orelse return .nil,
             else => return .nil,
         };
         const locked = metatable.get(.{ .string = "__metatable" });
@@ -2357,10 +2367,32 @@ pub const State = struct {
         if (table.metatable) |metatable| self.writeBarrier(table.marked, .{ .table = metatable });
     }
 
+    pub fn setDebugMetatableValue(self: *State, value: Value, metatable_value: Value) !void {
+        const metatable = switch (metatable_value) {
+            .nil => null,
+            .table => |metatable| metatable,
+            else => return self.fail("nil or table expected"),
+        };
+        switch (value) {
+            .table => |table| {
+                table.metatable = metatable;
+                if (metatable) |mt| self.writeBarrier(table.marked, .{ .table = mt });
+            },
+            .string => self.string_metatable = metatable,
+            .integer, .number => self.number_metatable = metatable,
+            .boolean => self.boolean_metatable = metatable,
+            .nil => self.nil_metatable = metatable,
+            else => return self.fail("cannot set metatable for this value"),
+        }
+    }
+
     fn getMetamethod(self: *State, value: Value, name: []const u8) !?Value {
         const metatable = switch (value) {
             .table => |table| table.metatable orelse return null,
             .string => self.string_metatable orelse return null,
+            .integer, .number => self.number_metatable orelse return null,
+            .boolean => self.boolean_metatable orelse return null,
+            .nil => self.nil_metatable orelse return null,
             else => return null,
         };
         const metamethod = metatable.get(.{ .string = name });
@@ -2403,7 +2435,7 @@ pub const State = struct {
             return;
         }
         const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.fail("attempt to perform operation on unsupported value");
-        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{value}, .{ .value = self.absoluteRegister(thread, op.dest) });
+        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
     }
 
@@ -2457,19 +2489,24 @@ pub const State = struct {
         switch (value) {
             .string => |string| self.set(thread, op.dest, .{ .integer = @intCast(string.len) }),
             .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod| {
-                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{value}, .{ .value = self.absoluteRegister(thread, op.dest) });
+                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, result);
             } else {
                 self.set(thread, op.dest, .{ .integer = table.len() });
             },
-            else => return self.fail("attempt to get length of a non-string value"),
+            else => if ((try self.getMetamethod(value, "__len"))) |metamethod| {
+                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
+                self.set(thread, op.dest, result);
+            } else {
+                return self.fail("attempt to get length of a non-string value");
+            },
         }
     }
 
     fn rawLen(self: *State, value: Value) !Value {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
-            .table => |table| .{ .integer = table.len() },
+            .table => |table| if (isFileValue(value)) self.fail("table or string expected") else .{ .integer = table.len() },
             else => self.fail("table or string expected"),
         };
     }
@@ -2491,7 +2528,7 @@ pub const State = struct {
     fn unaryOp(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) !Value {
         if (rawUnaryOp(value, op)) |result| return result;
         const metamethod = (try self.getMetamethod(value, unaryMetamethod(op))) orelse return self.fail("attempt to perform operation on unsupported value");
-        return self.callOneResult(thread, metamethod, &.{value});
+        return self.callOneResult(thread, metamethod, &.{ value, value });
     }
 
     fn equalValues(self: *State, thread: *Thread, lhs: Value, rhs: Value) !bool {
@@ -3536,6 +3573,9 @@ pub const State = struct {
         self.markValue(self.last_error_value);
         if (self.current_thread) |thread| self.markThread(thread);
         if (self.string_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
+        if (self.number_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
+        if (self.boolean_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
+        if (self.nil_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
     }
 
     fn markValue(self: *State, value: Value) void {

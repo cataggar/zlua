@@ -901,7 +901,7 @@ fn findImpl(state: *State, thread: *Thread, op: bytecode.Call, positions: bool) 
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
     const pattern = try state.expectString(runtime.argValue(state, thread, op, 1));
     const initial = normalizeIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse 1 else 1, source.len);
-    const plain = op.arg_count >= 4 and runtime.truthy(runtime.argValue(state, thread, op, 3));
+    const plain = (op.arg_count >= 4 and runtime.truthy(runtime.argValue(state, thread, op, 3))) or !patternHasMagic(pattern);
     if (pattern.len == 0 and initial > source.len + 1) {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
         return;
@@ -947,7 +947,14 @@ const CaptureState = struct {
 };
 const Match = struct { range: MatchRange, captures: CaptureState };
 const MatchResult = struct { end: usize, captures: CaptureState };
-const pattern_match_max_depth: usize = 1000;
+const pattern_match_max_depth: usize = 100;
+
+fn patternHasMagic(pattern: []const u8) bool {
+    for (pattern) |ch| {
+        if (std.mem.indexOfScalar(u8, "^$()%.[]*+-?", ch) != null) return true;
+    }
+    return false;
+}
 
 fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?Match {
     if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
@@ -1012,21 +1019,20 @@ fn matchPatternFrom(state: *State, source: []const u8, pattern: []const u8, sour
             return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, captures);
         },
         '*', '+' => {
-            var ends: [4096]usize = undefined;
-            var end_count: usize = 0;
+            var ends = std.ArrayList(usize).empty;
+            defer ends.deinit(state.allocator);
             var end = source_index;
-            while (end_count < ends.len) {
+            while (ends.items.len < 4096) {
                 const item_end = (try matchPatternItem(state, source, atom, end, captures)) orelse break;
                 if (item_end == end) break;
                 end = item_end;
-                ends[end_count] = end;
-                end_count += 1;
+                try ends.append(state.allocator, end);
             }
             if (quantifier == '+' and end == source_index) return null;
-            var index = end_count;
+            var index = ends.items.len;
             while (index > 0) {
                 index -= 1;
-                if (try matchPatternFrom(state, source, pattern, ends[index], next_index, depth + 1, captures)) |matched_end| return matched_end;
+                if (try matchPatternFrom(state, source, pattern, ends.items[index], next_index, depth + 1, captures)) |matched_end| return matched_end;
             }
             if (quantifier == '*') return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, captures);
             return null;
