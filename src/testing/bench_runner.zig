@@ -115,7 +115,7 @@ pub fn runCli(
     };
 
     const zlua_path = options.zlua orelse zlua_exe;
-    if (!try validateZlua(allocator, io, zlua_path, options.debug_errors)) {
+    if (!try validateZlua(allocator, io, zlua_path)) {
         try out.print("zlua: missing or not runnable ({s})\n", .{zlua_path});
         try out.flush();
         return 1;
@@ -449,11 +449,10 @@ fn containsIndex(items: []const usize, needle: usize) bool {
     return false;
 }
 
-fn validateZlua(allocator: std.mem.Allocator, io: std.Io, zlua_exe: []const u8, debug_errors: bool) !bool {
+fn validateZlua(allocator: std.mem.Allocator, io: std.Io, zlua_exe: []const u8) !bool {
     var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, zlua_exe);
-    if (debug_errors) try argv.append(allocator, "--debug-errors");
     try argv.append(allocator, "--version");
     var result = process.runProcess(allocator, io, argv.items, .{ .timeout_ms = 2000, .expand_arg0 = true }) catch return false;
     defer result.deinit(allocator);

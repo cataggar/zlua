@@ -5,13 +5,20 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const official_memory_limit_mb = b.option(u64, "official-memory-limit-mb", "Memory cap per official-suite child process in MiB (0 disables)") orelse 256;
 
-    const clua_exe = addVendoredClua(b, target, optimize);
+    const clua_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
+    const clua_exe = addVendoredClua(b, target, clua_optimize);
     b.installArtifact(clua_exe);
 
     const mod = b.addModule("zlua", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const bench_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
+    const bench_mod = b.addModule("zlua-bench-release-safe", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = bench_optimize,
     });
 
     const exe = b.addExecutable(.{
@@ -24,6 +31,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+
+    const bench_zlua_exe = b.addExecutable(.{
+        .name = "zlua-bench-release-safe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = bench_optimize,
+            .imports = &.{.{ .name = "zlua", .module = bench_mod }},
+        }),
+    });
 
     const diff_exe = b.addExecutable(.{
         .name = "zlua-test-diff",
@@ -84,11 +101,10 @@ pub fn build(b: *std.Build) void {
 
     const run_bench_step = b.step("run-test-bench", "Run zlua vs CLua benchmark harness");
     const run_bench_cmd = b.addRunArtifact(bench_exe);
-    run_bench_cmd.step.dependOn(b.getInstallStep());
     run_bench_cmd.addArg("--clua");
     run_bench_cmd.addArtifactArg(clua_exe);
     run_bench_cmd.addArg("--zlua");
-    run_bench_cmd.addArtifactArg(exe);
+    run_bench_cmd.addArtifactArg(bench_zlua_exe);
     if (b.args) |args| run_bench_cmd.addArgs(args);
     run_bench_step.dependOn(&run_bench_cmd.step);
 
