@@ -69,6 +69,18 @@ pub const ProtectedCallResult = union(enum) {
     failure: Value,
 };
 
+pub const RuntimeErrorPayload = union(enum) {
+    diagnostic: []const u8,
+    lua_value: Value,
+
+    fn luaValue(self: RuntimeErrorPayload) Value {
+        return switch (self) {
+            .diagnostic => |message| .{ .string = message },
+            .lua_value => |value| value,
+        };
+    }
+};
+
 const ProtectedCallContext = struct {
     frame_count: usize,
     relative_base: bytecode.Register,
@@ -76,8 +88,7 @@ const ProtectedCallContext = struct {
     stack_len: usize,
     last_result_base: usize,
     last_result_count: usize,
-    last_error: ?[]const u8,
-    last_error_value: Value,
+    last_error: ?RuntimeErrorPayload,
 };
 
 const ProtectedContinuationKind = enum {
@@ -567,8 +578,7 @@ pub const State = struct {
     stderr: std.ArrayList(u8) = .empty,
     options: StateOptions,
     stdin_pos: usize = 0,
-    last_error: ?[]const u8 = null,
-    last_error_value: Value = .nil,
+    last_error: ?RuntimeErrorPayload = null,
     last_error_in_close: bool = false,
     traceback_error_in_close: bool = false,
     current_thread: ?*Thread = null,
@@ -2286,14 +2296,12 @@ pub const State = struct {
             .last_result_base = thread.last_result_base,
             .last_result_count = thread.last_result_count,
             .last_error = undefined,
-            .last_error_value = undefined,
         };
     }
 
     fn protectedCallContextWithErrors(self: *State, thread: *Thread) ProtectedCallContext {
         var context = self.protectedCallContext(thread);
         context.last_error = self.last_error;
-        context.last_error_value = self.last_error_value;
         return context;
     }
 
@@ -2303,7 +2311,6 @@ pub const State = struct {
         for (args, 0..) |arg, index| thread.stack.items[context.absolute_base + 1 + index] = arg;
 
         self.last_error = null;
-        self.last_error_value = .nil;
         self.last_error_in_close = false;
         self.invokeValue(thread, .{ .base = context.relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
@@ -2347,7 +2354,6 @@ pub const State = struct {
         thread.last_result_base = context.last_result_base;
         thread.last_result_count = context.last_result_count;
         self.last_error = context.last_error;
-        self.last_error_value = context.last_error_value;
         return failure;
     }
 
@@ -3807,8 +3813,7 @@ pub const State = struct {
             self.markString(entry.key_ptr.*);
             self.markValue(entry.value_ptr.*);
         }
-        if (self.last_error) |message| self.markString(message);
-        self.markValue(self.last_error_value);
+        self.markRuntimeErrorPayload(self.last_error);
         if (self.current_thread) |thread| self.markThread(thread);
         if (self.string_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
         if (self.number_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);
@@ -3824,6 +3829,14 @@ pub const State = struct {
             .thread, .coroutine_wrapper => |thread| if (self.isTrackedThread(thread) or thread == self.current_thread) self.markThread(thread),
             .gmatch_iterator => |table| if (self.isTrackedTable(table)) self.markTable(table),
             else => {},
+        }
+    }
+
+    fn markRuntimeErrorPayload(self: *State, payload: ?RuntimeErrorPayload) void {
+        const active = payload orelse return;
+        switch (active) {
+            .diagnostic => |message| self.markString(message),
+            .lua_value => |value| self.markValue(value),
         }
     }
 
@@ -3903,7 +3916,7 @@ pub const State = struct {
         if (thread.close_error_value) |value| self.markValue(value);
         if (thread.error_traceback) |traceback| self.markString(traceback);
         for (thread.protected_continuations.items) |continuation| {
-            self.markValue(continuation.context.last_error_value);
+            self.markRuntimeErrorPayload(continuation.context.last_error);
             self.markValue(continuation.handler);
         }
         for (thread.frames.items) |frame| {
@@ -4277,7 +4290,10 @@ pub const State = struct {
         try out.appendSlice(self.allocator, "error_value=");
         try self.appendDebugValue(out, self.currentErrorValue());
         try out.append(self.allocator, '\n');
-        if (self.last_error) |message| try appendFmt(self.allocator, out, "last_error={s}\n", .{message});
+        if (self.last_error) |payload| switch (payload) {
+            .diagnostic => |message| try appendFmt(self.allocator, out, "last_error={s}\n", .{message}),
+            .lua_value => {},
+        };
         try appendFmt(self.allocator, out, "allocations strings={d} tables={d} closures={d} upvalues={d} threads={d} bytes={d}\n", .{ stats.strings, stats.tables, stats.closures, stats.upvalues, stats.threads, stats.bytes });
         try appendFmt(self.allocator, out, "thread status={s} frames={d} stack={d} results={d}@{d} native_depth={d} protected_close_depth={d}\n", .{ @tagName(thread.status), thread.frames.items.len, thread.stack.items.len, thread.last_result_count, thread.last_result_base, thread.native_call_depth, thread.protected_close_depth });
         try appendFmt(self.allocator, out, "continuations protected={d} call_one={d} tail={d} generic_for={d}\n", .{ thread.protected_continuations.items.len, thread.call_one_continuations.items.len, thread.tail_call_continuations.items.len, thread.generic_for_continuations.items.len });
@@ -4376,17 +4392,16 @@ pub const State = struct {
         try appendValue(self.allocator, out, value);
     }
 
-    fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
-        if (self.last_error_value == .nil) return allocator.dupe(u8, @errorName(err));
+    pub fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
+        if (self.last_error == null) return allocator.dupe(u8, @errorName(err));
         var out = std.ArrayList(u8).empty;
         defer out.deinit(allocator);
-        try appendValue(allocator, &out, self.last_error_value);
+        try appendValue(allocator, &out, self.currentErrorValue());
         return allocator.dupe(u8, out.items);
     }
 
     pub fn fail(self: *State, message: []const u8) RuntimeError {
-        self.last_error = message;
-        self.last_error_value = .{ .string = message };
+        self.last_error = .{ .diagnostic = message };
         return error.RuntimeError;
     }
 
@@ -4400,14 +4415,13 @@ pub const State = struct {
     }
 
     fn throwValue(self: *State, value: Value) RuntimeError {
-        self.last_error = null;
-        self.last_error_value = value;
+        self.last_error = .{ .lua_value = value };
         return error.RuntimeError;
     }
 
-    fn currentErrorValue(self: *State) Value {
-        if (self.last_error != null and self.last_error_value == .nil) return .{ .string = self.last_error.? };
-        return self.last_error_value;
+    pub fn currentErrorValue(self: *State) Value {
+        const payload = self.last_error orelse return .nil;
+        return payload.luaValue();
     }
 };
 
@@ -4435,12 +4449,9 @@ pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8
     defer state.deinit();
     state.collect_after_instruction = options.collect_after_instruction;
     state.execute(&proto) catch |err| {
-        const detail = if (state.last_error) |message|
-            message
-        else
-            try state.errorDetailAlloc(allocator, err);
-        defer if (state.last_error == null) allocator.free(detail);
-        const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
+        const detail = try state.errorDetailAlloc(allocator, err);
+        defer allocator.free(detail);
+        const message = try std.fmt.allocPrint(allocator, "{s}\n", .{detail});
         defer allocator.free(message);
         var stderr = std.ArrayList(u8).empty;
         errdefer stderr.deinit(allocator);
@@ -5487,6 +5498,33 @@ test "debug errors dump stack state before unwinding" {
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "[zlua debug] unhandled runtime exception") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "local x r") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "stack (") != null);
+}
+
+test "unhandled Lua errors render without zlua prefix" {
+    var result = try executeSource(std.testing.allocator,
+        \\error("boom", 0)
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stderr, "boom\n"));
+}
+
+test "last Lua error value is a GC root" {
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+
+    const object = try state.newTableWithHints(0, 1);
+    try state.setTable(object, .{ .string = try state.intern("tag") }, .{ .string = try state.intern("live") });
+    try std.testing.expectEqual(error.RuntimeError, state.throwValue(object));
+
+    try state.collectGarbage();
+
+    const error_value = state.currentErrorValue();
+    try std.testing.expect(error_value == .table);
+    try std.testing.expect(error_value.table == object.table);
+    try std.testing.expect(state.isTrackedTable(object.table));
+    try std.testing.expect(valuesEqual(error_value.table.get(.{ .string = "tag" }), .{ .string = "live" }));
 }
 
 test "safe stdlib omits host-facing libraries" {

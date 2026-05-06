@@ -33,7 +33,8 @@ pub fn loadfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const environment = if (op.arg_count >= 3) runtime.argValue(state, thread, op, 2) else if (state.global_table) |table| Value{ .table = table } else state.getGlobal("_G");
     const closure = if (binary) blk: {
         break :blk state.loadBinaryDump(chunk, environment) catch {
-            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load binary chunk";
+            const error_value = state.currentErrorValue();
+            const message = if (error_value == .string) error_value.string else "cannot load binary chunk";
             try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
             return;
         };
@@ -42,7 +43,8 @@ pub fn loadfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
         const source_name = try std.fmt.allocPrint(state.allocator, "@{s}", .{path});
         defer state.allocator.free(source_name);
         break :blk state.loadSourceAsClosureNamedEnv(source, source_name, environment) catch {
-            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load source";
+            const error_value = state.currentErrorValue();
+            const message = if (error_value == .string) error_value.string else "cannot load source";
             try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
             return;
         };

@@ -30,7 +30,8 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     if (looksLikeBinaryChunk(source)) {
         const environment = loadEnvironment(state, thread, op);
         const closure = state.loadBinaryDump(source, environment) catch {
-            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load binary chunk";
+            const error_value = state.currentErrorValue();
+            const message = if (error_value == .string) error_value.string else "cannot load binary chunk";
             try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
             return;
         };
@@ -39,7 +40,8 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     }
 
     const closure = state.loadSourceAsClosureNamedEnv(source, source_name, loadEnvironment(state, thread, op)) catch {
-        const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load source";
+        const error_value = state.currentErrorValue();
+        const message = if (error_value == .string) error_value.string else "cannot load source";
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
     };

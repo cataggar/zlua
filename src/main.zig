@@ -117,8 +117,9 @@ fn runCliProgram(
 
 fn executeChunk(allocator: std.mem.Allocator, state: *zlua.runtime.State, source: []const u8) !?u8 {
     state.executeSourceChunk(source) catch |err| {
-        const detail = state.last_error orelse @errorName(err);
-        const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
+        const detail = try state.errorDetailAlloc(allocator, err);
+        defer allocator.free(detail);
+        const message = try std.fmt.allocPrint(allocator, "{s}\n", .{detail});
         defer allocator.free(message);
         try stdoutWrite(state.options.io.?, state.stdout.items);
         try stderrWrite(state.options.io.?, state.stderr.items);
@@ -130,8 +131,9 @@ fn executeChunk(allocator: std.mem.Allocator, state: *zlua.runtime.State, source
 
 fn executeChunkNamed(allocator: std.mem.Allocator, state: *zlua.runtime.State, source: []const u8, source_name: []const u8) !?u8 {
     state.executeSourceChunkNamed(source, source_name) catch |err| {
-        const detail = state.last_error orelse @errorName(err);
-        const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
+        const detail = try state.errorDetailAlloc(allocator, err);
+        defer allocator.free(detail);
+        const message = try std.fmt.allocPrint(allocator, "{s}\n", .{detail});
         defer allocator.free(message);
         try stdoutWrite(state.options.io.?, state.stdout.items);
         try stderrWrite(state.options.io.?, state.stderr.items);
