@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=29`, `categorized_failed=3`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=30`, `categorized_failed=2`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -24,6 +24,14 @@ This document tracks the test layers currently used for zlua and the current sta
 | Not run | The file exists in the official suite but is not part of the per-file basic dashboard. |
 
 ## Focused Official Progress
+
+Latest focused `files.lua` work verified with `just official-file files`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. The quick official dashboard now reports `zlua_passed=30` and `categorized_failed=2`.
+
+- Generic `for` loops now expose the generator, state, and to-be-closed handle as `"(for state)"` debug locals, so `io.lines(file)` close-state inspection matches official Lua.
+- `io.flush()` mirrors file-handle flush failure for `/dev/full`, and write/append opens materialize the host file immediately while preserving buffered write visibility through flush/close.
+- `loadfile` now handles initial BOM and `#` lines, text/binary modes, optional environments, and binary chunks after initial comments covered by `files.lua`.
+- `os.date` rejects malformed conversion specifiers, and `os.time` reports official-compatible integer and field-bound errors for the covered date-table cases.
+- `files.lua` now passes in the basic official dashboard.
 
 Latest focused `events.lua` work verified with `just official-file events`, `just official-file cstack`, `just official-file attrib`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work. The quick official dashboard now reports `zlua_passed=29` and `categorized_failed=3`.
 
@@ -206,7 +214,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `db.lua` | Pass | XFail | `runtime` |
 | `errors.lua` | Pass | XFail | `runtime` |
 | `events.lua` | Pass | Pass |  |
-| `files.lua` | Pass | XFail | `runtime` |
+| `files.lua` | Pass | Pass |  |
 | `gc.lua` | Pass | Pass |  |
 | `gengc.lua` | Pass | Pass |  |
 | `goto.lua` | Pass | Pass |  |
@@ -236,7 +244,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 29 |
-| Categorized zlua failures | 3 |
+| zlua passes | 30 |
+| Categorized zlua failures | 2 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

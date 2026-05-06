@@ -9,11 +9,83 @@ const Value = runtime.Value;
 
 pub fn loadfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const path = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const closure = state.loadFileAsClosure(path) catch {
+    const mode = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string) runtime.argValue(state, thread, op, 1).string else "bt";
+    if (invalidLoadMode(mode)) return state.fail("invalid mode");
+
+    const source = state.readFileAlloc(path) catch {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot open file") } });
         return;
     };
+    var keep_source = false;
+    defer if (!keep_source) state.allocator.free(source);
+
+    const chunk = fileChunkStart(source);
+    const binary = looksLikeBinaryChunk(chunk);
+    if (binary and std.mem.indexOfScalar(u8, mode, 'b') == null) {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("attempt to load a binary chunk") } });
+        return;
+    }
+    if (!binary and std.mem.indexOfScalar(u8, mode, 't') == null) {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("attempt to load a text chunk") } });
+        return;
+    }
+
+    const environment = if (op.arg_count >= 3) runtime.argValue(state, thread, op, 2) else if (state.global_table) |table| Value{ .table = table } else state.getGlobal("_G");
+    const closure = if (binary) blk: {
+        break :blk state.loadBinaryDump(chunk, environment) catch {
+            const message = if (state.last_error_value == .string) state.last_error_value.string else "cannot load binary chunk";
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
+            return;
+        };
+    } else blk: {
+        prepareTextFileSource(@constCast(source));
+        const source_name = try std.fmt.allocPrint(state.allocator, "@{s}", .{path});
+        defer state.allocator.free(source_name);
+        break :blk state.loadSourceAsClosureNamedEnv(source, source_name, environment) catch {
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot load source") } });
+            return;
+        };
+    };
+    if (!binary) {
+        try state.source_allocations.append(state.allocator, source);
+        keep_source = true;
+    }
     try state.returnValues(thread, op.base, op.return_count, &.{closure});
+}
+
+fn invalidLoadMode(mode: []const u8) bool {
+    if (mode.len == 0) return true;
+    for (mode) |byte| if (byte != 'b' and byte != 't') return true;
+    return false;
+}
+
+fn looksLikeBinaryChunk(source: []const u8) bool {
+    return (source.len > 0 and source[0] == 0x1b) or
+        std.mem.startsWith(u8, source, runtime.binary_chunk_signature) or
+        (source.len > 0 and std.mem.startsWith(u8, runtime.binary_chunk_signature, source));
+}
+
+fn fileChunkStart(source: []const u8) []const u8 {
+    var index = initialBomLen(source);
+    if (index < source.len and source[index] == '#') {
+        while (index < source.len and source[index] != '\n') index += 1;
+        if (index < source.len) index += 1;
+    }
+    return source[index..];
+}
+
+fn prepareTextFileSource(source: []u8) void {
+    var index = initialBomLen(source);
+    for (source[0..index]) |*byte| byte.* = ' ';
+    if (index < source.len and source[index] == '#') {
+        while (index < source.len and source[index] != '\n') : (index += 1) {
+            source[index] = ' ';
+        }
+    }
+}
+
+fn initialBomLen(source: []const u8) usize {
+    return if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) 3 else 0;
 }
 
 pub fn dofile(state: *State, thread: *Thread, op: bytecode.Call) !void {

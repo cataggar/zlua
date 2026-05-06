@@ -146,9 +146,15 @@ fn tableToTime(state: *State, value: Value) !i64 {
     const year = try tableField(state, table, "year");
     const month = try tableField(state, table, "month");
     const day = try tableField(state, table, "day");
-    const hour = tableOptionalField(table, "hour") orelse 12;
-    const min = tableOptionalField(table, "min") orelse 0;
-    const sec = tableOptionalField(table, "sec") orelse 0;
+    const hour = (try tableOptionalField(state, table, "hour")) orelse 12;
+    const min = (try tableOptionalField(state, table, "min")) orelse 0;
+    const sec = (try tableOptionalField(state, table, "sec")) orelse 0;
+    try checkYearFieldBounds(state, year);
+    try checkTimeFieldBounds(state, "month", month);
+    try checkTimeFieldBounds(state, "day", day);
+    try checkTimeFieldBounds(state, "hour", hour);
+    try checkTimeFieldBounds(state, "min", min);
+    try checkTimeFieldBounds(state, "sec", sec);
     const days = daysFromCivil(year, month, day);
     const timestamp = days * std.time.s_per_day + hour * 3600 + min * 60 + sec;
     const normalized = timeParts(timestamp);
@@ -169,10 +175,22 @@ fn tableField(state: *State, table: *runtime.Table, name: []const u8) !i64 {
     return runtime.toInteger(value) orelse state.fail("not an integer");
 }
 
-fn tableOptionalField(table: *runtime.Table, name: []const u8) ?i64 {
+fn tableOptionalField(state: *State, table: *runtime.Table, name: []const u8) !?i64 {
     const value = table.get(.{ .string = name });
     if (value == .nil) return null;
-    return runtime.toInteger(value);
+    return runtime.toInteger(value) orelse state.fail("not an integer");
+}
+
+fn checkYearFieldBounds(state: *State, year: i64) !void {
+    const min_year: i64 = @as(i64, std.math.minInt(i32)) + 1900;
+    const max_year: i64 = @as(i64, std.math.maxInt(i32)) + 1900;
+    if (year >= min_year and year <= max_year) return;
+    return state.fail("field 'year' is out-of-bound");
+}
+
+fn checkTimeFieldBounds(state: *State, comptime name: []const u8, value: i64) !void {
+    if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) return;
+    return state.fail("field '" ++ name ++ "' is out-of-bound");
 }
 
 fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
@@ -207,10 +225,11 @@ fn formatUtc(state: *State, out: *std.ArrayList(u8), format: []const u8, timesta
     const parts = timeParts(timestamp);
     var index: usize = 0;
     while (index < format.len) : (index += 1) {
-        if (format[index] != '%' or index + 1 >= format.len) {
+        if (format[index] != '%') {
             try out.append(state.allocator, format[index]);
             continue;
         }
+        if (index + 1 >= format.len) return state.fail("invalid conversion specifier");
         index += 1;
         switch (format[index]) {
             '%' => try out.append(state.allocator, '%'),

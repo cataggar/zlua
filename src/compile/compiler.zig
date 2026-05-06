@@ -452,6 +452,8 @@ const FunctionCompiler = struct {
         }
         self.release(base + 4);
 
+        _ = try self.declareLocalAt("(for state)", base, false);
+        _ = try self.declareLocalAt("(for state)", base + 1, false);
         const close_register = try self.declareLocalAt("(for state)", base + 3, true);
         _ = try self.emit(.{ .check_close = close_register });
         for (stmt.names) |name| _ = try self.declareLocal(name.name);

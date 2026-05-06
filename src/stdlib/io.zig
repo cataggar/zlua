@@ -43,6 +43,7 @@ pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
     else
         try state.allocator.dupe(u8, "");
     defer state.allocator.free(contents);
+    if (parsed.kind != 'r') try state.writeFile(path, contents);
     try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, contents, parsed)});
 }
 
@@ -64,6 +65,10 @@ pub fn close(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn flush(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const file = try currentFile(state, "__zlua_output");
+    if (std.mem.eql(u8, try fileString(state, file, "__zlua_file_path"), "/dev/full")) {
+        try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        return;
+    }
     try flushFile(state, file);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
 }
