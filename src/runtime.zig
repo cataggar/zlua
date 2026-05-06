@@ -325,6 +325,8 @@ pub const Thread = struct {
     hook_count: u32 = 0,
     hook_count_remaining: u32 = 0,
     hook_running: bool = false,
+    hook_return_name: ?[]const u8 = null,
+    next_call_name: ?[]const u8 = null,
     pending_yield_hook_return: bool = false,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
@@ -333,6 +335,9 @@ pub const Thread = struct {
     native_call_depth: usize = 0,
     protected_close_depth: usize = 0,
     close_error_value: ?Value = null,
+    pending_unwind_error: ?Value = null,
+    pending_unwind_resume_frame_count: usize = 0,
+    pending_unwind_target_frame_count: usize = 0,
     resume_parent: ?*Thread = null,
     entry: Value = .nil,
     marked: bool = false,
@@ -396,11 +401,15 @@ const CallFrame = struct {
     varargs: []const Value,
     owns_varargs: bool = false,
     last_hook_line: ?usize = null,
+    debug_name_override: ?[]const u8 = null,
+    pending_returns: ?[]Value = null,
 
     fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
         if (self.owns_varargs) allocator.free(self.varargs);
+        if (self.pending_returns) |returns| allocator.free(returns);
         self.varargs = &.{};
         self.owns_varargs = false;
+        self.pending_returns = null;
     }
 };
 
@@ -854,6 +863,13 @@ pub const State = struct {
 
     fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
         while (thread.frames.items.len > target_frame_count) {
+            if (thread.pending_unwind_error != null and thread.frames.items.len == thread.pending_unwind_resume_frame_count) {
+                const error_value = thread.pending_unwind_error.?;
+                const target = thread.pending_unwind_target_frame_count;
+                thread.pending_unwind_error = null;
+                try self.closeFramesTo(thread, target, error_value);
+                return self.throwValue(error_value);
+            }
             if (try self.completeReadyCallOneContinuation(thread)) continue;
             if (try self.completeReadyProtectedContinuation(thread)) continue;
             if (try self.completeReadyTailCallContinuation(thread)) continue;
@@ -998,6 +1014,7 @@ pub const State = struct {
     pub fn currentFunctionName(self: *State, thread: *Thread, level: i64) ?[]const u8 {
         _ = self;
         if (level == 2 and thread.protected_close_depth != 0) return "pcall";
+        if (level == 2 and thread.hook_running) if (thread.hook_return_name) |name| return name;
         if (level < 1) return null;
         const depth: usize = @intCast(level);
         if (depth > thread.frames.items.len) return null;
@@ -1009,7 +1026,7 @@ pub const State = struct {
             const value = thread.stack.items[frame.base + local.register];
             if (value == .string) return value.string;
         }
-        return frame.proto.debug_name;
+        return frame.debug_name_override orelse frame.proto.debug_name;
     }
 
     pub fn setThreadHook(self: *State, target: *Thread, hook: Value, mask: []const u8, count: u32) void {
@@ -1054,6 +1071,13 @@ pub const State = struct {
     fn callHook(self: *State, thread: *Thread, event: []const u8) !void {
         const args = [_]Value{.{ .string = try self.intern(event) }};
         try self.callHookWithArgs(thread, &args);
+    }
+
+    fn callReturnHook(self: *State, thread: *Thread, name: ?[]const u8) !void {
+        const previous = thread.hook_return_name;
+        thread.hook_return_name = name;
+        defer thread.hook_return_name = previous;
+        try self.callHook(thread, "return");
     }
 
     fn callHookWithArgs(self: *State, thread: *Thread, args: []const Value) !void {
@@ -1538,6 +1562,7 @@ pub const State = struct {
     }
 
     fn closeToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register, error_value: ?Value) anyerror!void {
+        const frame_count = thread.frames.items.len;
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const absolute_register = frame.base + register;
         const value = thread.stack.items[absolute_register];
@@ -1547,12 +1572,29 @@ pub const State = struct {
             thread.stack.items[absolute_register] = .nil;
             return self.fail("metamethod 'close'");
         };
+        const previous_call_name = thread.next_call_name;
+        thread.next_call_name = "close";
+        defer thread.next_call_name = previous_call_name;
         _ = (if (error_value) |err_value|
             self.callOneResult(thread, metamethod, &.{ value, err_value })
         else
             self.callOneResult(thread, metamethod, &.{value})) catch |err| {
+            if (err == error.CoroutineYield and error_value != null) {
+                thread.pending_unwind_error = error_value.?;
+                thread.pending_unwind_resume_frame_count = frame_count;
+                thread.pending_unwind_target_frame_count = if (frame_count == 0) 0 else frame_count - 1;
+            }
+            if (isRuntimeError(err)) {
+                var close_err = err;
+                self.closeFramesTo(thread, frame_count, self.currentErrorValue()) catch |unwind_err| {
+                    close_err = unwind_err;
+                    if (!isRuntimeError(unwind_err)) return unwind_err;
+                };
+                thread.stack.items[absolute_register] = .nil;
+                self.last_error_in_close = true;
+                return close_err;
+            }
             thread.stack.items[absolute_register] = .nil;
-            if (isRuntimeError(err)) self.last_error_in_close = true;
             return err;
         };
         thread.stack.items[absolute_register] = .nil;
@@ -1626,10 +1668,11 @@ pub const State = struct {
             if (!localActiveAt(local, source_pc) or localActiveAt(local, target_pc)) continue;
 
             self.closeToBeClosedRegister(thread, local.register, pending_error) catch |err| {
-                self.discardFramesTo(thread, frame_index + 1);
-                pending_error = self.currentErrorValue();
-                close_failed = close_failed or isRuntimeError(err);
-                if (!isRuntimeError(err)) return err;
+                if (isRuntimeError(err)) {
+                    self.discardFramesTo(thread, frame_index + 1);
+                    pending_error = self.currentErrorValue();
+                    close_failed = true;
+                } else return err;
             };
         }
 
@@ -1650,10 +1693,11 @@ pub const State = struct {
             if (!local.to_close or !localActiveAt(local, pc)) continue;
 
             self.closeToBeClosedRegister(thread, local.register, pending_error) catch |err| {
-                self.discardFramesTo(thread, frame_index + 1);
-                pending_error = self.currentErrorValue();
-                close_failed = close_failed or isRuntimeError(err);
-                if (!isRuntimeError(err)) return err;
+                if (isRuntimeError(err)) {
+                    self.discardFramesTo(thread, frame_index + 1);
+                    pending_error = self.currentErrorValue();
+                    close_failed = true;
+                } else return err;
             };
         }
 
@@ -1738,7 +1782,7 @@ pub const State = struct {
             else => if (thread) |active_thread|
                 try self.callOneResult(active_thread, metamethod, &.{ table_value, key })
             else
-                self.fail("attempt to call a non-function value"),
+                self.fail(callErrorMessage(metamethod)),
         };
     }
 
@@ -1818,7 +1862,7 @@ pub const State = struct {
             else => if (thread) |active_thread| {
                 _ = try self.callOneResult(active_thread, metamethod, &.{ table_value, key, value });
             } else {
-                return self.fail("attempt to call a non-function value");
+                return self.fail(callErrorMessage(metamethod));
             },
         }
     }
@@ -1877,10 +1921,12 @@ pub const State = struct {
         defer {
             if (entering_native) thread.native_call_depth -= 1;
         }
+        const call_name = thread.next_call_name;
+        thread.next_call_name = null;
         const hook_native = isNativeCallable(callee) and !thread.hook_running;
         if (hook_native and thread.hook_call) try self.callHook(thread, "call");
         switch (callee) {
-            .closure => |closure| try self.callClosure(thread, resolved, closure),
+            .closure => |closure| try self.callClosure(thread, resolved, closure, call_name),
             .native_print => {
                 for (0..resolved.arg_count) |index| {
                     if (index != 0) try self.stdout.append(self.allocator, '\t');
@@ -1954,12 +2000,12 @@ pub const State = struct {
             },
             .native => |native| try self.callNative(native, thread, resolved),
             else => {
-                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail("attempt to call a non-function value");
+                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail(callErrorMessage(callee));
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
                 try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
             },
         }
-        if (hook_native and thread.hook_return) try self.callHook(thread, "return");
+        if (hook_native and thread.hook_return) try self.callReturnHook(thread, call_name orelse nativeHookName(callee));
     }
 
     fn prependCallArgument(self: *State, thread: *Thread, resolved: bytecode.Call, metamethod: Value, receiver: Value) !void {
@@ -2149,18 +2195,20 @@ pub const State = struct {
 
     fn completeReadyProtectedContinuation(self: *State, thread: *Thread) !bool {
         const index = readyProtectedContinuationIndex(thread) orelse return false;
-        const continuation = thread.protected_continuations.orderedRemove(index);
+        const continuation = thread.protected_continuations.items[index];
         const values = try self.copyStackSlice(thread, thread.last_result_base, thread.last_result_count);
         defer self.allocator.free(values);
         _ = try self.restoreProtectedCall(thread, continuation.context, .nil);
+        _ = thread.protected_continuations.orderedRemove(index);
         try self.returnProtectedContinuationSuccess(thread, continuation, values);
         return true;
     }
 
     fn completeProtectedContinuationError(self: *State, thread: *Thread, error_value: Value) !bool {
         const index = errorProtectedContinuationIndex(thread) orelse return false;
-        const continuation = thread.protected_continuations.orderedRemove(index);
+        const continuation = thread.protected_continuations.items[index];
         const failure = try self.restoreProtectedCall(thread, continuation.context, error_value);
+        _ = thread.protected_continuations.orderedRemove(index);
         try self.returnProtectedContinuationFailure(thread, continuation, failure);
         return true;
     }
@@ -2392,12 +2440,13 @@ pub const State = struct {
         }
     }
 
-    fn callClosure(self: *State, thread: *Thread, op: bytecode.Call, closure: *Closure) !void {
+    fn callClosure(self: *State, thread: *Thread, op: bytecode.Call, closure: *Closure, debug_name_override: ?[]const u8) !void {
         if (thread.frames.items.len >= max_call_frames) return self.fail("stack overflow");
 
         const caller = thread.frames.items[thread.frames.items.len - 1];
         const base = caller.base + op.base;
         var frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
+        frame.debug_name_override = debug_name_override;
         errdefer frame.deinit(self.allocator);
         try thread.frames.append(self.allocator, frame);
         if (thread.hook_call and !thread.hook_running) try self.callHook(thread, "call");
@@ -2448,34 +2497,44 @@ pub const State = struct {
     }
 
     fn returnFromFrame(self: *State, thread: *Thread, first: bytecode.Register, count: u16) !void {
-        const frame = thread.frames.items[thread.frames.items.len - 1];
-        const source_start = frame.base + first;
-        const source_count = try self.resolveResultCount(thread, source_start, count);
-        const preserved = try self.allocator.alloc(Value, source_count);
-        defer self.allocator.free(preserved);
-        for (preserved, 0..) |*value, index| value.* = thread.stack.items[source_start + index];
-        if (thread.hook_return and !thread.hook_running) try self.callHook(thread, "return");
+        const frame_index = thread.frames.items.len - 1;
+        var frame = &thread.frames.items[frame_index];
+        const preserved = frame.pending_returns orelse blk: {
+            const source_start = frame.base + first;
+            const source_count = try self.resolveResultCount(thread, source_start, count);
+            const values = try self.allocator.alloc(Value, source_count);
+            for (values, 0..) |*value, index| value.* = thread.stack.items[source_start + index];
+            frame.pending_returns = values;
+            break :blk values;
+        };
         try self.closeActiveToBeClosedInTopFrame(thread, null);
+        frame = &thread.frames.items[frame_index];
+        if (thread.hook_return and !thread.hook_running) try self.callReturnHook(thread, frame.debug_name_override orelse frame.proto.debug_name);
+        frame = &thread.frames.items[frame_index];
+        frame.pending_returns = null;
         self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
-            try thread.ensureStack(self.allocator, source_start + source_count);
-            for (preserved, 0..) |value, index| thread.stack.items[source_start + index] = value;
-            thread.last_result_base = source_start;
-            thread.last_result_count = source_count;
-            thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
+            const result_start = frame.base + first;
+            try thread.ensureStack(self.allocator, result_start + preserved.len);
+            for (preserved, 0..) |value, index| thread.stack.items[result_start + index] = value;
+            thread.last_result_base = result_start;
+            thread.last_result_count = preserved.len;
+            self.allocator.free(preserved);
+            frame.deinit(self.allocator);
             thread.frames.items.len = 0;
             return;
         }
 
         const return_start = frame.return_start;
-        const return_count = try self.resolveReturnCount(frame.return_count, source_count);
-        thread.frames.items[thread.frames.items.len - 1].deinit(self.allocator);
+        const return_count = try self.resolveReturnCount(frame.return_count, preserved.len);
+        frame.deinit(self.allocator);
         thread.frames.items.len -= 1;
 
         try thread.ensureStack(self.allocator, return_start + return_count);
-        const copied = @min(return_count, source_count);
+        const copied = @min(return_count, preserved.len);
         for (preserved[0..copied], 0..) |value, index| thread.stack.items[return_start + index] = value;
         for (copied..return_count) |index| thread.stack.items[return_start + index] = .nil;
+        self.allocator.free(preserved);
         thread.last_result_base = return_start;
         thread.last_result_count = return_count;
     }
@@ -2629,7 +2688,8 @@ pub const State = struct {
 
         const level_index = std.math.cast(usize, level) orelse return self.throwValue(value);
         const line = self.lineForErrorLevel(thread, level_index) orelse return self.throwValue(value);
-        const message = try std.fmt.allocPrint(self.allocator, "zlua:{d}: {s}", .{ line, value.string });
+        const source = self.sourceForErrorLevel(thread, level_index) orelse "zlua";
+        const message = try std.fmt.allocPrint(self.allocator, "{s}:{d}: {s}", .{ source, line, value.string });
         defer self.allocator.free(message);
         return self.throwValue(.{ .string = try self.intern(message) });
     }
@@ -2904,7 +2964,11 @@ pub const State = struct {
                 error.CoroutineClose => return .{ .success = try self.copyValues(&.{}) },
                 error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
                     const error_value = self.currentErrorValue();
-                    if (try self.completeProtectedContinuationError(target, error_value)) continue;
+                    const completed = self.completeProtectedContinuationError(target, error_value) catch |continuation_err| switch (continuation_err) {
+                        error.CoroutineYield => return .{ .success = try self.copyValues(target.yield_values.items) },
+                        else => return continuation_err,
+                    };
+                    if (completed) continue;
                     var final_error = error_value;
                     if (try self.closeCoroutine(target, final_error)) |close_error_value| final_error = close_error_value;
                     target.close_error_value = final_error;
@@ -3008,6 +3072,14 @@ pub const State = struct {
         if (level == 0 or level > thread.frames.items.len) return null;
         const frame = thread.frames.items[thread.frames.items.len - level];
         return lineForFrame(frame);
+    }
+
+    fn sourceForErrorLevel(self: *State, thread: *Thread, level: usize) ?[]const u8 {
+        _ = self;
+        if (level == 0 or level > thread.frames.items.len) return null;
+        const source_name = thread.frames.items[thread.frames.items.len - level].proto.source_name;
+        if (source_name.len > 0 and (source_name[0] == '@' or source_name[0] == '=')) return source_name[1..];
+        return source_name;
     }
 
     fn collectArgs(self: *State, thread: *Thread, op: bytecode.Call, first: u16) ![]Value {
@@ -4403,6 +4475,59 @@ fn indexErrorMessage(value: Value) []const u8 {
     };
 }
 
+fn callErrorMessage(value: Value) []const u8 {
+    return switch (value) {
+        .integer, .number => "attempt to call a number value",
+        .string => "attempt to call a string value",
+        .boolean => "attempt to call a boolean value",
+        .nil => "attempt to call a nil value",
+        .table => "attempt to call a table value",
+        else => "attempt to call a non-function value",
+    };
+}
+
+fn nativeHookName(value: Value) ?[]const u8 {
+    return switch (value) {
+        .native_print => "print",
+        .native_tostring => "tostring",
+        .native_getmetatable => "getmetatable",
+        .native_setmetatable => "setmetatable",
+        .native_rawequal => "rawequal",
+        .native_rawget => "rawget",
+        .native_rawset => "rawset",
+        .native_rawlen => "rawlen",
+        .native_next => "next",
+        .native_pairs => "pairs",
+        .native_ipairs => "ipairs",
+        .native_ipairs_iter => "ipairs iterator",
+        .native_table_create => "create",
+        .native_select => "select",
+        .native_assert => "assert",
+        .native_error => "error",
+        .native_pcall => "pcall",
+        .native_xpcall => "xpcall",
+        .native_collectgarbage => "collectgarbage",
+        .native_debug_traceback => "traceback",
+        .native_coroutine_create => "create",
+        .native_coroutine_resume => "resume",
+        .native_coroutine_yield => "yield",
+        .native_coroutine_status => "status",
+        .native_coroutine_running => "running",
+        .native_coroutine_isyieldable => "isyieldable",
+        .native_coroutine_close => "close",
+        .native_coroutine_wrap => "wrap",
+        .native => |native| shortNativeName(native.name()),
+        else => null,
+    };
+}
+
+fn shortNativeName(name: []const u8) []const u8 {
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.');
+    const colon = std.mem.lastIndexOfScalar(u8, name, ':');
+    const start = if (dot) |dot_index| if (colon) |colon_index| @max(dot_index, colon_index) + 1 else dot_index + 1 else if (colon) |colon_index| colon_index + 1 else 0;
+    return name[start..];
+}
+
 const DebugStackSlot = struct {
     frame_index: usize,
     register: usize,
@@ -4861,7 +4986,7 @@ test "reports calls to non-functions" {
     defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a non-function value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a number value") != null);
 }
 
 test "debug errors dump stack state before unwinding" {

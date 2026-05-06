@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=22`, `categorized_failed=10`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=23`, `categorized_failed=9`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,7 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `db.lua` work verified with `just official-file db`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused `locals.lua` work verified with `just official-file locals`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
 
 Latest focused `db.lua` work:
 
@@ -83,7 +83,12 @@ Latest focused `locals.lua` / `nextvar.lua` work:
 - To-be-closed variables now receive the correct close arguments, clear slots after successful close, preserve pending return values across close handlers, and prevent tail-call compilation while close variables are active.
 - Generic `for` loops preserve the fourth iterator result as an implicit to-be-closed state value without displacing user loop variables.
 - Function literals assigned with simple assignment, such as `foo = function () ... end`, carry a debug name for `debug.getinfo`.
-- `locals.lua` still xfails later in the official error-unwinding/debug-frame checks; `nextvar.lua` still xfails later in table-length attack coverage, but the quick official dashboard no longer times out.
+- Calls to non-callable values now report typed messages such as `attempt to call a number value`, matching close-error assertions in `locals.lua`.
+- Runtime close unwinding now preserves nested close frames through errors and coroutine yields, keeps pending return values alive across yielding close handlers, and resumes protected-call error restoration after close-method yields.
+- Return hooks use the returning function's name, including `close`, `foo`, and native names such as `sethook`, for the debug hook checks in `locals.lua`.
+- `error()` prefixes use the active chunk source name instead of a fixed `zlua` label, matching official wrapped-coroutine close-error message checks.
+- `break` and `goto` out of generic `for` loops close implicit to-be-closed iterator state without detaching unrelated outer upvalues.
+- `locals.lua` now passes in the basic official dashboard. `nextvar.lua` still xfails later in table-length attack coverage, but the quick official dashboard no longer times out.
 
 Latest focused `math.lua` work:
 
@@ -164,7 +169,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `goto.lua` | Pass | XFail | `runtime` |
 | `heavy.lua` | Pass | Pass |  |
 | `literals.lua` | Pass | Pass |  |
-| `locals.lua` | Pass | XFail | `runtime` |
+| `locals.lua` | Pass | Pass |  |
 | `main.lua` | Pass | Pass |  |
 | `math.lua` | Pass | Pass |  |
 | `memerr.lua` | Pass | Pass |  |
@@ -188,7 +193,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 22 |
-| Categorized zlua failures | 10 |
+| zlua passes | 23 |
+| Categorized zlua failures | 9 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

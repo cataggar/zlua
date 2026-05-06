@@ -60,6 +60,7 @@ const PendingGoto = struct {
 
 const Loop = struct {
     break_start: usize,
+    close_register: bytecode.Register,
 };
 
 const FunctionCompiler = struct {
@@ -310,7 +311,7 @@ const FunctionCompiler = struct {
         const done = try self.emit(.{ .test_op = .{ .register = condition, .jump_if_truthy = false, .offset = 0 } });
         self.release(mark);
 
-        try self.enterLoop();
+        try self.enterLoop(self.registerMark());
         try self.compileScopedBlock(stmt.body);
         try self.leaveLoop(self.proto.pc() + 2);
 
@@ -324,7 +325,7 @@ const FunctionCompiler = struct {
 
     fn compileRepeat(self: *FunctionCompiler, stmt: ast.RepeatStmt) anyerror!void {
         const loop_start = self.proto.pc();
-        try self.enterLoop();
+        try self.enterLoop(self.registerMark());
         try self.enterScope();
         try self.compileBlock(stmt.body);
         const mark = self.registerMark();
@@ -360,7 +361,7 @@ const FunctionCompiler = struct {
 
         const prep = try self.emit(.{ .for_prep = .{ .base = base, .offset = 0 } });
         const body_start = self.proto.pc();
-        try self.enterLoop();
+        try self.enterLoop(base);
         try self.compileScopedBlock(stmt.body);
         _ = try self.emit(.{ .close = base });
         try self.leaveLoop(self.proto.pc() + 2);
@@ -402,7 +403,7 @@ const FunctionCompiler = struct {
 
         const loop_start = self.proto.pc();
         const prep = try self.emit(.{ .tfor_prep = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
-        try self.enterLoop();
+        try self.enterLoop(base);
         try self.compileScopedBlock(stmt.body);
         if (stmt.names.len != 0) _ = try self.emit(.{ .close = base + 4 });
         try self.leaveLoop(self.proto.pc() + 2);
@@ -418,12 +419,15 @@ const FunctionCompiler = struct {
 
     fn compileBreak(self: *FunctionCompiler) !void {
         if (self.loops.items.len == 0) return error.CompileError;
-        _ = try self.emit(.{ .close = 0 });
+        const loop = self.loops.items[self.loops.items.len - 1];
+        _ = try self.emit(.{ .close = loop.close_register });
         try self.breaks.append(self.allocator, try self.emit(.{ .jmp = 0 }));
     }
 
     fn compileGoto(self: *FunctionCompiler, name: ast.Identifier) !void {
-        _ = try self.emit(.{ .close = 0 });
+        try self.emitCloseActiveToCloseLocals();
+        const close_register = if (self.loops.items.len == 0) @as(bytecode.Register, 0) else self.loops.items[self.loops.items.len - 1].close_register;
+        _ = try self.emit(.{ .close = close_register });
         const pc = try self.emit(.{ .jmp = 0 });
         var label_index = self.labels.items.len;
         while (label_index > 0) {
@@ -448,6 +452,15 @@ const FunctionCompiler = struct {
             } else {
                 index += 1;
             }
+        }
+    }
+
+    fn emitCloseActiveToCloseLocals(self: *FunctionCompiler) !void {
+        var index = self.locals.items.len;
+        while (index > 0) {
+            index -= 1;
+            const local = self.locals.items[index];
+            if (local.to_close) _ = try self.emit(.{ .close_tbc = local.register });
         }
     }
 
@@ -929,8 +942,8 @@ const FunctionCompiler = struct {
         return register;
     }
 
-    fn enterLoop(self: *FunctionCompiler) !void {
-        try self.loops.append(self.allocator, .{ .break_start = self.breaks.items.len });
+    fn enterLoop(self: *FunctionCompiler, close_register: bytecode.Register) !void {
+        try self.loops.append(self.allocator, .{ .break_start = self.breaks.items.len, .close_register = close_register });
     }
 
     fn leaveLoop(self: *FunctionCompiler, target_pc: usize) !void {
