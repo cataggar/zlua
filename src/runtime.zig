@@ -525,12 +525,7 @@ const RuntimeAllocationStats = struct {
     }
 };
 
-pub const StdlibMode = enum {
-    none,
-    base,
-    safe,
-    full,
-};
+pub const StdlibMode = stdlib.LibrarySelection;
 
 pub const MemoryFile = struct {
     path: []const u8,
@@ -618,258 +613,10 @@ pub const State = struct {
             .options = options,
         };
         errdefer state.deinit();
-        try state.openLibraries(options.stdlib);
-        if (options.stdlib != .none) try state.installGlobalTable();
+        try stdlib.openLibraries(&state, options.stdlib);
+        if (!options.stdlib.isEmpty()) try stdlib.installGlobalTable(&state);
         state.resetAutoGcThreshold();
         return state;
-    }
-
-    fn openLibraries(state: *State, mode: StdlibMode) !void {
-        switch (mode) {
-            .none => return,
-            .base => try state.openBaseLibrary(),
-            .safe => {
-                try state.openBaseLibrary();
-                try state.openSafeLibraries();
-            },
-            .full => {
-                try state.openBaseLibrary();
-                try state.openSafeLibraries();
-                try state.openSystemLibraries();
-            },
-        }
-    }
-
-    fn installGlobalTable(state: *State) !void {
-        const global_value = try state.newTableWithHints(0, @intCast(state.globals.count() + 1));
-        const table = global_value.table;
-        state.global_table = table;
-
-        var globals = state.globals.iterator();
-        while (globals.next()) |entry| {
-            try table.set(state.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
-        }
-
-        const key = try state.intern("_G");
-        try state.globals.put(key, global_value);
-        try table.set(state.allocator, .{ .string = key }, global_value);
-    }
-
-    fn openBaseLibrary(state: *State) !void {
-        try state.globals.put(try state.intern("print"), .native_print);
-        try state.globals.put(try state.intern("tostring"), .native_tostring);
-        try state.globals.put(try state.intern("getmetatable"), .native_getmetatable);
-        try state.globals.put(try state.intern("setmetatable"), .native_setmetatable);
-        try state.globals.put(try state.intern("rawequal"), .native_rawequal);
-        try state.globals.put(try state.intern("rawget"), .native_rawget);
-        try state.globals.put(try state.intern("rawset"), .native_rawset);
-        try state.globals.put(try state.intern("rawlen"), .native_rawlen);
-        try state.globals.put(try state.intern("next"), .native_next);
-        try state.globals.put(try state.intern("pairs"), .native_pairs);
-        try state.globals.put(try state.intern("ipairs"), .native_ipairs);
-        try state.globals.put(try state.intern("select"), .native_select);
-        try state.globals.put(try state.intern("assert"), .native_assert);
-        try state.globals.put(try state.intern("error"), .native_error);
-        try state.globals.put(try state.intern("pcall"), .native_pcall);
-        try state.globals.put(try state.intern("xpcall"), .native_xpcall);
-        try state.globals.put(try state.intern("collectgarbage"), .native_collectgarbage);
-        try state.globals.put(try state.intern("load"), .{ .native = .load });
-        try state.globals.put(try state.intern("type"), .{ .native = .type });
-        try state.globals.put(try state.intern("tonumber"), .{ .native = .tonumber });
-        try state.globals.put(try state.intern("warn"), .{ .native = .warn });
-        try state.globals.put(try state.intern("_VERSION"), .{ .string = try state.intern("Lua 5.5") });
-    }
-
-    fn openSafeLibraries(state: *State) !void {
-        const table_lib = try state.newTableWithHints(0, 8);
-        try state.setTable(table_lib, .{ .string = try state.intern("concat") }, .{ .native = .table_concat });
-        try state.setTable(table_lib, .{ .string = try state.intern("insert") }, .{ .native = .table_insert });
-        try state.setTable(table_lib, .{ .string = try state.intern("move") }, .{ .native = .table_move });
-        try state.setTable(table_lib, .{ .string = try state.intern("pack") }, .{ .native = .table_pack });
-        try state.setTable(table_lib, .{ .string = try state.intern("remove") }, .{ .native = .table_remove });
-        try state.setTable(table_lib, .{ .string = try state.intern("sort") }, .{ .native = .table_sort });
-        try state.setTable(table_lib, .{ .string = try state.intern("unpack") }, .{ .native = .table_unpack });
-        try state.setTable(table_lib, .{ .string = try state.intern("create") }, .native_table_create);
-        try state.globals.put(try state.intern("table"), table_lib);
-
-        const string_lib = try state.newTableWithHints(0, 20);
-        try state.setTable(string_lib, .{ .string = try state.intern("byte") }, .{ .native = .string_byte });
-        try state.setTable(string_lib, .{ .string = try state.intern("char") }, .{ .native = .string_char });
-        try state.setTable(string_lib, .{ .string = try state.intern("dump") }, .{ .native = .string_dump });
-        try state.setTable(string_lib, .{ .string = try state.intern("find") }, .{ .native = .string_find });
-        try state.setTable(string_lib, .{ .string = try state.intern("format") }, .{ .native = .string_format });
-        try state.setTable(string_lib, .{ .string = try state.intern("gmatch") }, .{ .native = .string_gmatch });
-        try state.setTable(string_lib, .{ .string = try state.intern("gsub") }, .{ .native = .string_gsub });
-        try state.setTable(string_lib, .{ .string = try state.intern("len") }, .{ .native = .string_len });
-        try state.setTable(string_lib, .{ .string = try state.intern("lower") }, .{ .native = .string_lower });
-        try state.setTable(string_lib, .{ .string = try state.intern("match") }, .{ .native = .string_match });
-        try state.setTable(string_lib, .{ .string = try state.intern("pack") }, .{ .native = .string_pack });
-        try state.setTable(string_lib, .{ .string = try state.intern("packsize") }, .{ .native = .string_packsize });
-        try state.setTable(string_lib, .{ .string = try state.intern("rep") }, .{ .native = .string_rep });
-        try state.setTable(string_lib, .{ .string = try state.intern("reverse") }, .{ .native = .string_reverse });
-        try state.setTable(string_lib, .{ .string = try state.intern("sub") }, .{ .native = .string_sub });
-        try state.setTable(string_lib, .{ .string = try state.intern("unpack") }, .{ .native = .string_unpack });
-        try state.setTable(string_lib, .{ .string = try state.intern("upper") }, .{ .native = .string_upper });
-        try state.globals.put(try state.intern("string"), string_lib);
-
-        const string_metatable = try state.newTableWithHints(0, 1);
-        try state.setTable(string_metatable, .{ .string = try state.intern("__index") }, string_lib);
-        state.string_metatable = string_metatable.table;
-
-        const math_lib = try state.newTableWithHints(0, 32);
-        try state.setTable(math_lib, .{ .string = try state.intern("abs") }, .{ .native = .math_abs });
-        try state.setTable(math_lib, .{ .string = try state.intern("acos") }, .{ .native = .math_acos });
-        try state.setTable(math_lib, .{ .string = try state.intern("asin") }, .{ .native = .math_asin });
-        try state.setTable(math_lib, .{ .string = try state.intern("atan") }, .{ .native = .math_atan });
-        try state.setTable(math_lib, .{ .string = try state.intern("ceil") }, .{ .native = .math_ceil });
-        try state.setTable(math_lib, .{ .string = try state.intern("cos") }, .{ .native = .math_cos });
-        try state.setTable(math_lib, .{ .string = try state.intern("deg") }, .{ .native = .math_deg });
-        try state.setTable(math_lib, .{ .string = try state.intern("exp") }, .{ .native = .math_exp });
-        try state.setTable(math_lib, .{ .string = try state.intern("floor") }, .{ .native = .math_floor });
-        try state.setTable(math_lib, .{ .string = try state.intern("fmod") }, .{ .native = .math_fmod });
-        try state.setTable(math_lib, .{ .string = try state.intern("frexp") }, .{ .native = .math_frexp });
-        try state.setTable(math_lib, .{ .string = try state.intern("huge") }, .{ .number = std.math.inf(f64) });
-        try state.setTable(math_lib, .{ .string = try state.intern("ldexp") }, .{ .native = .math_ldexp });
-        try state.setTable(math_lib, .{ .string = try state.intern("log") }, .{ .native = .math_log });
-        try state.setTable(math_lib, .{ .string = try state.intern("maxinteger") }, .{ .integer = std.math.maxInt(i64) });
-        try state.setTable(math_lib, .{ .string = try state.intern("max") }, .{ .native = .math_max });
-        try state.setTable(math_lib, .{ .string = try state.intern("mininteger") }, .{ .integer = std.math.minInt(i64) });
-        try state.setTable(math_lib, .{ .string = try state.intern("min") }, .{ .native = .math_min });
-        try state.setTable(math_lib, .{ .string = try state.intern("modf") }, .{ .native = .math_modf });
-        try state.setTable(math_lib, .{ .string = try state.intern("pi") }, .{ .number = std.math.pi });
-        try state.setTable(math_lib, .{ .string = try state.intern("rad") }, .{ .native = .math_rad });
-        try state.setTable(math_lib, .{ .string = try state.intern("random") }, .{ .native = .math_random });
-        try state.setTable(math_lib, .{ .string = try state.intern("randomseed") }, .{ .native = .math_randomseed });
-        try state.setTable(math_lib, .{ .string = try state.intern("sin") }, .{ .native = .math_sin });
-        try state.setTable(math_lib, .{ .string = try state.intern("sqrt") }, .{ .native = .math_sqrt });
-        try state.setTable(math_lib, .{ .string = try state.intern("tan") }, .{ .native = .math_tan });
-        try state.setTable(math_lib, .{ .string = try state.intern("tointeger") }, .{ .native = .math_tointeger });
-        try state.setTable(math_lib, .{ .string = try state.intern("type") }, .{ .native = .math_type });
-        try state.setTable(math_lib, .{ .string = try state.intern("ult") }, .{ .native = .math_ult });
-        try state.globals.put(try state.intern("math"), math_lib);
-
-        const utf8_lib = try state.newTableWithHints(0, 6);
-        try state.setTable(utf8_lib, .{ .string = try state.intern("char") }, .{ .native = .utf8_char });
-        try state.setTable(utf8_lib, .{ .string = try state.intern("charpattern") }, .{ .string = try state.intern("[\x00-\x7F\xC2-\xFD][\x80-\xBF]*") });
-        try state.setTable(utf8_lib, .{ .string = try state.intern("codepoint") }, .{ .native = .utf8_codepoint });
-        try state.setTable(utf8_lib, .{ .string = try state.intern("codes") }, .{ .native = .utf8_codes });
-        try state.setTable(utf8_lib, .{ .string = try state.intern("len") }, .{ .native = .utf8_len });
-        try state.setTable(utf8_lib, .{ .string = try state.intern("offset") }, .{ .native = .utf8_offset });
-        try state.globals.put(try state.intern("utf8"), utf8_lib);
-
-        const coroutine_lib = try state.newTableWithHints(0, 8);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("create") }, .native_coroutine_create);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("resume") }, .native_coroutine_resume);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("yield") }, .native_coroutine_yield);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("status") }, .native_coroutine_status);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("running") }, .native_coroutine_running);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("isyieldable") }, .native_coroutine_isyieldable);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("close") }, .native_coroutine_close);
-        try state.setTable(coroutine_lib, .{ .string = try state.intern("wrap") }, .native_coroutine_wrap);
-        try state.globals.put(try state.intern("coroutine"), coroutine_lib);
-    }
-
-    fn openSystemLibraries(state: *State) !void {
-        try state.globals.put(try state.intern("loadfile"), .{ .native = .loadfile });
-        try state.globals.put(try state.intern("dofile"), .{ .native = .dofile });
-        try state.globals.put(try state.intern("require"), .{ .native = .require });
-
-        const io_lib = try state.newTableWithHints(0, 16);
-        const stdin = try state.newStandardFile("stdin", "r");
-        const stdout = try state.newStandardFile("stdout", "w");
-        const stderr = try state.newStandardFile("stderr", "w");
-        try state.setTable(io_lib, .{ .string = try state.intern("read") }, .{ .native = .io_read });
-        try state.setTable(io_lib, .{ .string = try state.intern("write") }, .{ .native = .io_write });
-        try state.setTable(io_lib, .{ .string = try state.intern("open") }, .{ .native = .io_open });
-        try state.setTable(io_lib, .{ .string = try state.intern("input") }, .{ .native = .io_input });
-        try state.setTable(io_lib, .{ .string = try state.intern("output") }, .{ .native = .io_output });
-        try state.setTable(io_lib, .{ .string = try state.intern("close") }, .{ .native = .io_close });
-        try state.setTable(io_lib, .{ .string = try state.intern("flush") }, .{ .native = .io_flush });
-        try state.setTable(io_lib, .{ .string = try state.intern("lines") }, .{ .native = .io_lines });
-        try state.setTable(io_lib, .{ .string = try state.intern("tmpfile") }, .{ .native = .io_tmpfile });
-        try state.setTable(io_lib, .{ .string = try state.intern("type") }, .{ .native = .io_type });
-        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, stdin);
-        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, stdout);
-        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, stderr);
-        try state.setTable(io_lib, .{ .string = try state.intern("__zlua_input") }, stdin);
-        try state.setTable(io_lib, .{ .string = try state.intern("__zlua_output") }, stdout);
-        try state.globals.put(try state.intern("io"), io_lib);
-
-        const os_lib = try state.newTableWithHints(0, 12);
-        try state.setTable(os_lib, .{ .string = try state.intern("time") }, .{ .native = .os_time });
-        try state.setTable(os_lib, .{ .string = try state.intern("clock") }, .{ .native = .os_clock });
-        try state.setTable(os_lib, .{ .string = try state.intern("date") }, .{ .native = .os_date });
-        try state.setTable(os_lib, .{ .string = try state.intern("getenv") }, .{ .native = .os_getenv });
-        try state.setTable(os_lib, .{ .string = try state.intern("setlocale") }, .{ .native = .os_setlocale });
-        try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
-        try state.setTable(os_lib, .{ .string = try state.intern("remove") }, .{ .native = .os_remove });
-        try state.setTable(os_lib, .{ .string = try state.intern("rename") }, .{ .native = .os_rename });
-        try state.setTable(os_lib, .{ .string = try state.intern("tmpname") }, .{ .native = .os_tmpname });
-        try state.setTable(os_lib, .{ .string = try state.intern("difftime") }, .{ .native = .os_difftime });
-        try state.globals.put(try state.intern("os"), os_lib);
-
-        const debug_lib = try state.newTableWithHints(0, 10);
-        try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
-        try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
-        try state.setTable(debug_lib, .{ .string = try state.intern("getupvalue") }, .{ .native = .debug_getupvalue });
-        try state.setTable(debug_lib, .{ .string = try state.intern("setupvalue") }, .{ .native = .debug_setupvalue });
-        try state.setTable(debug_lib, .{ .string = try state.intern("upvalueid") }, .{ .native = .debug_upvalueid });
-        try state.setTable(debug_lib, .{ .string = try state.intern("upvaluejoin") }, .{ .native = .debug_upvaluejoin });
-        try state.setTable(debug_lib, .{ .string = try state.intern("getlocal") }, .{ .native = .debug_getlocal });
-        try state.setTable(debug_lib, .{ .string = try state.intern("setlocal") }, .{ .native = .debug_setlocal });
-        try state.setTable(debug_lib, .{ .string = try state.intern("getregistry") }, .{ .native = .debug_getregistry });
-        try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
-        try state.setTable(debug_lib, .{ .string = try state.intern("gethook") }, .{ .native = .debug_gethook });
-        try state.setTable(debug_lib, .{ .string = try state.intern("setmetatable") }, .{ .native = .debug_setmetatable });
-        try state.setTable(debug_lib, .{ .string = try state.intern("setuservalue") }, .{ .native = .debug_setuservalue });
-        try state.setTable(debug_lib, .{ .string = try state.intern("getuservalue") }, .{ .native = .debug_getuservalue });
-        try state.globals.put(try state.intern("debug"), debug_lib);
-
-        const package_lib = try state.newTableWithHints(0, 8);
-        const loaded = try state.newTableWithHints(0, 8);
-        const preload = try state.newTableWithHints(0, 4);
-        const searchers = try state.newTableWithHints(2, 0);
-        try searchers.table.set(state.allocator, .{ .integer = 1 }, .{ .native = .package_searcher_preload });
-        try searchers.table.set(state.allocator, .{ .integer = 2 }, .{ .native = .package_searcher_lua });
-        try state.setTable(loaded, .{ .string = try state.intern("coroutine") }, state.getGlobal("coroutine"));
-        try state.setTable(loaded, .{ .string = try state.intern("debug") }, debug_lib);
-        try state.setTable(loaded, .{ .string = try state.intern("io") }, io_lib);
-        try state.setTable(loaded, .{ .string = try state.intern("math") }, state.getGlobal("math"));
-        try state.setTable(loaded, .{ .string = try state.intern("os") }, os_lib);
-        try state.setTable(loaded, .{ .string = try state.intern("package") }, package_lib);
-        try state.setTable(loaded, .{ .string = try state.intern("string") }, state.getGlobal("string"));
-        try state.setTable(loaded, .{ .string = try state.intern("table") }, state.getGlobal("table"));
-        try state.setTable(loaded, .{ .string = try state.intern("utf8") }, state.getGlobal("utf8"));
-        try state.setTable(package_lib, .{ .string = try state.intern("loaded") }, loaded);
-        try state.setTable(package_lib, .{ .string = try state.intern("preload") }, preload);
-        try state.setTable(package_lib, .{ .string = try state.intern("searchers") }, searchers);
-        try state.setTable(package_lib, .{ .string = try state.intern("searchpath") }, .{ .native = .package_searchpath });
-        try state.setTable(package_lib, .{ .string = try state.intern("path") }, .{ .string = try state.intern("./?.lua;./?/init.lua") });
-        try state.setTable(package_lib, .{ .string = try state.intern("cpath") }, .{ .string = try state.intern("") });
-        try state.setTable(package_lib, .{ .string = try state.intern("config") }, .{ .string = try state.intern("/\n;\n?\n!\n-\n") });
-        try state.globals.put(try state.intern("package"), package_lib);
-    }
-
-    fn newStandardFile(state: *State, path: []const u8, mode: []const u8) !Value {
-        const value = try state.newTableWithHints(0, 10);
-        const file = value.table;
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file") }, .{ .boolean = true });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_path") }, .{ .string = try state.intern(path) });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_mode") }, .{ .string = try state.intern(mode) });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern("") });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_standard") }, .{ .boolean = true });
-        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_buffer_mode") }, .{ .string = try state.intern("full") });
-        try file.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .io_file_read });
-        try file.set(state.allocator, .{ .string = try state.intern("write") }, .{ .native = .io_file_write });
-        try file.set(state.allocator, .{ .string = try state.intern("close") }, .{ .native = .io_file_close });
-        try file.set(state.allocator, .{ .string = try state.intern("seek") }, .{ .native = .io_file_seek });
-        try file.set(state.allocator, .{ .string = try state.intern("flush") }, .{ .native = .io_file_flush });
-        try file.set(state.allocator, .{ .string = try state.intern("lines") }, .{ .native = .io_file_lines });
-        try file.set(state.allocator, .{ .string = try state.intern("setvbuf") }, .{ .native = .io_file_setvbuf });
-        file.metatable = try state.fileMetatable();
-        return value;
     }
 
     pub fn fileMetatable(state: *State) !*Table {
@@ -5914,6 +5661,16 @@ test "safe stdlib omits host-facing libraries" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "nil\tnil\tnil\tnil\n"));
+}
+
+test "granular stdlib loads selected libraries only" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\print(type(string), type(table), string.upper("ok"))
+    , .{ .state = .{ .stdlib = .{ .libraries = .{ .base = true, .string = true } } } });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "table\tnil\tOK\n"));
 }
 
 test "full stdlib can use memory-backed filesystem and fixed clock" {

@@ -193,10 +193,50 @@ fn parseCliOptions(allocator: std.mem.Allocator, args: []const []const u8) !CliO
 }
 
 fn parseStdlibMode(value: []const u8) !zlua.runtime.StdlibMode {
-    inline for (@typeInfo(zlua.runtime.StdlibMode).@"enum".fields) |field| {
-        if (std.mem.eql(u8, value, field.name)) return @field(zlua.runtime.StdlibMode, field.name);
+    if (std.mem.eql(u8, value, "none")) return .none;
+    if (std.mem.eql(u8, value, "base")) return .base;
+    if (std.mem.eql(u8, value, "safe")) return .safe;
+    if (std.mem.eql(u8, value, "full")) return .full;
+
+    var libraries: zlua.stdlib.LibrarySet = .{};
+    var start: usize = 0;
+    for (value, 0..) |byte, index| {
+        if (byte == ',' or byte == '+') {
+            try parseStdlibLibrary(value[start..index], &libraries);
+            start = index + 1;
+        }
     }
-    return error.InvalidStdlibMode;
+    try parseStdlibLibrary(value[start..], &libraries);
+
+    if (libraries.isEmpty()) return error.InvalidStdlibMode;
+    return .{ .libraries = libraries };
+}
+
+fn parseStdlibLibrary(name: []const u8, libraries: *zlua.stdlib.LibrarySet) !void {
+    if (name.len == 0) return error.InvalidStdlibMode;
+    if (std.mem.eql(u8, name, "base")) {
+        libraries.base = true;
+    } else if (std.mem.eql(u8, name, "table")) {
+        libraries.table = true;
+    } else if (std.mem.eql(u8, name, "string")) {
+        libraries.string = true;
+    } else if (std.mem.eql(u8, name, "math")) {
+        libraries.math = true;
+    } else if (std.mem.eql(u8, name, "utf8")) {
+        libraries.utf8 = true;
+    } else if (std.mem.eql(u8, name, "coroutine")) {
+        libraries.coroutine = true;
+    } else if (std.mem.eql(u8, name, "io")) {
+        libraries.io = true;
+    } else if (std.mem.eql(u8, name, "os")) {
+        libraries.os = true;
+    } else if (std.mem.eql(u8, name, "debug")) {
+        libraries.debug = true;
+    } else if (std.mem.eql(u8, name, "package")) {
+        libraries.package = true;
+    } else {
+        return error.InvalidStdlibMode;
+    }
 }
 
 fn runDumpMode(allocator: std.mem.Allocator, io: std.Io, options: *const CliOptions) !u8 {
@@ -548,7 +588,7 @@ fn printUsage(io: std.Io) !void {
         \\Options:
         \\  --version, -v
         \\  --debug-errors
-        \\  --stdlib=none|base|safe|full
+        \\  --stdlib=none|base|safe|full|LIB[,LIB...]
         \\  -e 'chunk'
         \\  -i
         \\  --dump-ast [script]
@@ -609,6 +649,18 @@ test "CLI parser accepts milestone 20 options" {
     try std.testing.expectEqual(@as(usize, 1), options.evals.items.len);
     try std.testing.expectEqualStrings("script.lua", options.script_path.?);
     try std.testing.expectEqual(@as(usize, 6), options.script_index.?);
+}
+
+test "CLI parser accepts granular stdlib libraries" {
+    const args = [_][]const u8{ "zlua", "--stdlib=base,string", "-e", "print('ok')" };
+    var options = try parseCliOptions(std.testing.allocator, &args);
+    defer options.deinit(std.testing.allocator);
+
+    const libraries = options.stdlib.libraries;
+    try std.testing.expect(libraries.base);
+    try std.testing.expect(libraries.string);
+    try std.testing.expect(!libraries.table);
+    try std.testing.expect(!libraries.io);
 }
 
 test "CLI arg table indexing matches Lua script position" {

@@ -1,3 +1,4 @@
+const std = @import("std");
 const compile = @import("compile.zig");
 const runtime = @import("runtime.zig");
 
@@ -15,6 +16,330 @@ pub const os = @import("stdlib/os.zig");
 const bytecode = compile.bytecode;
 const State = runtime.State;
 const Thread = runtime.Thread;
+const Value = runtime.Value;
+
+pub const LibrarySelection = union(enum) {
+    none,
+    base,
+    safe,
+    full,
+    libraries: LibrarySet,
+
+    pub fn toSet(self: LibrarySelection) LibrarySet {
+        return switch (self) {
+            .none => .{},
+            .base => .{ .base = true },
+            .safe => LibrarySet.safe(),
+            .full => LibrarySet.full(),
+            .libraries => |libraries| libraries,
+        };
+    }
+
+    pub fn isEmpty(self: LibrarySelection) bool {
+        return self.toSet().isEmpty();
+    }
+};
+
+pub const LibrarySet = struct {
+    base: bool = false,
+    table: bool = false,
+    string: bool = false,
+    math: bool = false,
+    utf8: bool = false,
+    coroutine: bool = false,
+    io: bool = false,
+    os: bool = false,
+    debug: bool = false,
+    package: bool = false,
+
+    pub fn safe() LibrarySet {
+        return .{
+            .base = true,
+            .table = true,
+            .string = true,
+            .math = true,
+            .utf8 = true,
+            .coroutine = true,
+        };
+    }
+
+    pub fn full() LibrarySet {
+        var libraries = safe();
+        libraries.io = true;
+        libraries.os = true;
+        libraries.debug = true;
+        libraries.package = true;
+        return libraries;
+    }
+
+    pub fn isEmpty(self: LibrarySet) bool {
+        return !self.base and !self.table and !self.string and !self.math and !self.utf8 and !self.coroutine and !self.io and !self.os and !self.debug and !self.package;
+    }
+};
+
+pub fn openLibraries(state: *State, selection: LibrarySelection) !void {
+    const libraries = selection.toSet();
+    if (libraries.base) try openBase(state);
+    if (libraries.table) try openTable(state);
+    if (libraries.string) try openString(state);
+    if (libraries.math) try openMath(state);
+    if (libraries.utf8) try openUtf8(state);
+    if (libraries.coroutine) try openCoroutine(state);
+    if (libraries.io) try openIo(state);
+    if (libraries.os) try openOs(state);
+    if (libraries.debug) try openDebug(state);
+    if (libraries.package) try openPackage(state, libraries);
+}
+
+pub fn installGlobalTable(state: *State) !void {
+    const global_value = try state.newTableWithHints(0, @intCast(state.globals.count() + 1));
+    const table_value = global_value.table;
+    state.global_table = table_value;
+
+    var globals = state.globals.iterator();
+    while (globals.next()) |entry| {
+        try table_value.set(state.allocator, .{ .string = entry.key_ptr.* }, entry.value_ptr.*);
+    }
+
+    const key = try state.intern("_G");
+    try state.globals.put(key, global_value);
+    try table_value.set(state.allocator, .{ .string = key }, global_value);
+}
+
+fn openBase(state: *State) !void {
+    try state.globals.put(try state.intern("print"), .native_print);
+    try state.globals.put(try state.intern("tostring"), .native_tostring);
+    try state.globals.put(try state.intern("getmetatable"), .native_getmetatable);
+    try state.globals.put(try state.intern("setmetatable"), .native_setmetatable);
+    try state.globals.put(try state.intern("rawequal"), .native_rawequal);
+    try state.globals.put(try state.intern("rawget"), .native_rawget);
+    try state.globals.put(try state.intern("rawset"), .native_rawset);
+    try state.globals.put(try state.intern("rawlen"), .native_rawlen);
+    try state.globals.put(try state.intern("next"), .native_next);
+    try state.globals.put(try state.intern("pairs"), .native_pairs);
+    try state.globals.put(try state.intern("ipairs"), .native_ipairs);
+    try state.globals.put(try state.intern("select"), .native_select);
+    try state.globals.put(try state.intern("assert"), .native_assert);
+    try state.globals.put(try state.intern("error"), .native_error);
+    try state.globals.put(try state.intern("pcall"), .native_pcall);
+    try state.globals.put(try state.intern("xpcall"), .native_xpcall);
+    try state.globals.put(try state.intern("collectgarbage"), .native_collectgarbage);
+    try state.globals.put(try state.intern("load"), .{ .native = .load });
+    try state.globals.put(try state.intern("type"), .{ .native = .type });
+    try state.globals.put(try state.intern("tonumber"), .{ .native = .tonumber });
+    try state.globals.put(try state.intern("warn"), .{ .native = .warn });
+    try state.globals.put(try state.intern("_VERSION"), .{ .string = try state.intern("Lua 5.5") });
+}
+
+fn openTable(state: *State) !void {
+    const table_lib = try state.newTableWithHints(0, 8);
+    try setField(state, table_lib, "concat", .{ .native = .table_concat });
+    try setField(state, table_lib, "insert", .{ .native = .table_insert });
+    try setField(state, table_lib, "move", .{ .native = .table_move });
+    try setField(state, table_lib, "pack", .{ .native = .table_pack });
+    try setField(state, table_lib, "remove", .{ .native = .table_remove });
+    try setField(state, table_lib, "sort", .{ .native = .table_sort });
+    try setField(state, table_lib, "unpack", .{ .native = .table_unpack });
+    try setField(state, table_lib, "create", .native_table_create);
+    try state.globals.put(try state.intern("table"), table_lib);
+}
+
+fn openString(state: *State) !void {
+    const string_lib = try state.newTableWithHints(0, 20);
+    try setField(state, string_lib, "byte", .{ .native = .string_byte });
+    try setField(state, string_lib, "char", .{ .native = .string_char });
+    try setField(state, string_lib, "dump", .{ .native = .string_dump });
+    try setField(state, string_lib, "find", .{ .native = .string_find });
+    try setField(state, string_lib, "format", .{ .native = .string_format });
+    try setField(state, string_lib, "gmatch", .{ .native = .string_gmatch });
+    try setField(state, string_lib, "gsub", .{ .native = .string_gsub });
+    try setField(state, string_lib, "len", .{ .native = .string_len });
+    try setField(state, string_lib, "lower", .{ .native = .string_lower });
+    try setField(state, string_lib, "match", .{ .native = .string_match });
+    try setField(state, string_lib, "pack", .{ .native = .string_pack });
+    try setField(state, string_lib, "packsize", .{ .native = .string_packsize });
+    try setField(state, string_lib, "rep", .{ .native = .string_rep });
+    try setField(state, string_lib, "reverse", .{ .native = .string_reverse });
+    try setField(state, string_lib, "sub", .{ .native = .string_sub });
+    try setField(state, string_lib, "unpack", .{ .native = .string_unpack });
+    try setField(state, string_lib, "upper", .{ .native = .string_upper });
+    try state.globals.put(try state.intern("string"), string_lib);
+
+    const string_metatable = try state.newTableWithHints(0, 1);
+    try setField(state, string_metatable, "__index", string_lib);
+    state.string_metatable = string_metatable.table;
+}
+
+fn openMath(state: *State) !void {
+    const math_lib = try state.newTableWithHints(0, 32);
+    try setField(state, math_lib, "abs", .{ .native = .math_abs });
+    try setField(state, math_lib, "acos", .{ .native = .math_acos });
+    try setField(state, math_lib, "asin", .{ .native = .math_asin });
+    try setField(state, math_lib, "atan", .{ .native = .math_atan });
+    try setField(state, math_lib, "ceil", .{ .native = .math_ceil });
+    try setField(state, math_lib, "cos", .{ .native = .math_cos });
+    try setField(state, math_lib, "deg", .{ .native = .math_deg });
+    try setField(state, math_lib, "exp", .{ .native = .math_exp });
+    try setField(state, math_lib, "floor", .{ .native = .math_floor });
+    try setField(state, math_lib, "fmod", .{ .native = .math_fmod });
+    try setField(state, math_lib, "frexp", .{ .native = .math_frexp });
+    try setField(state, math_lib, "huge", .{ .number = std.math.inf(f64) });
+    try setField(state, math_lib, "ldexp", .{ .native = .math_ldexp });
+    try setField(state, math_lib, "log", .{ .native = .math_log });
+    try setField(state, math_lib, "maxinteger", .{ .integer = std.math.maxInt(i64) });
+    try setField(state, math_lib, "max", .{ .native = .math_max });
+    try setField(state, math_lib, "mininteger", .{ .integer = std.math.minInt(i64) });
+    try setField(state, math_lib, "min", .{ .native = .math_min });
+    try setField(state, math_lib, "modf", .{ .native = .math_modf });
+    try setField(state, math_lib, "pi", .{ .number = std.math.pi });
+    try setField(state, math_lib, "rad", .{ .native = .math_rad });
+    try setField(state, math_lib, "random", .{ .native = .math_random });
+    try setField(state, math_lib, "randomseed", .{ .native = .math_randomseed });
+    try setField(state, math_lib, "sin", .{ .native = .math_sin });
+    try setField(state, math_lib, "sqrt", .{ .native = .math_sqrt });
+    try setField(state, math_lib, "tan", .{ .native = .math_tan });
+    try setField(state, math_lib, "tointeger", .{ .native = .math_tointeger });
+    try setField(state, math_lib, "type", .{ .native = .math_type });
+    try setField(state, math_lib, "ult", .{ .native = .math_ult });
+    try state.globals.put(try state.intern("math"), math_lib);
+}
+
+fn openUtf8(state: *State) !void {
+    const utf8_lib = try state.newTableWithHints(0, 6);
+    try setField(state, utf8_lib, "char", .{ .native = .utf8_char });
+    try setField(state, utf8_lib, "charpattern", .{ .string = try state.intern("[\x00-\x7F\xC2-\xFD][\x80-\xBF]*") });
+    try setField(state, utf8_lib, "codepoint", .{ .native = .utf8_codepoint });
+    try setField(state, utf8_lib, "codes", .{ .native = .utf8_codes });
+    try setField(state, utf8_lib, "len", .{ .native = .utf8_len });
+    try setField(state, utf8_lib, "offset", .{ .native = .utf8_offset });
+    try state.globals.put(try state.intern("utf8"), utf8_lib);
+}
+
+fn openCoroutine(state: *State) !void {
+    const coroutine_lib = try state.newTableWithHints(0, 8);
+    try setField(state, coroutine_lib, "create", .native_coroutine_create);
+    try setField(state, coroutine_lib, "resume", .native_coroutine_resume);
+    try setField(state, coroutine_lib, "yield", .native_coroutine_yield);
+    try setField(state, coroutine_lib, "status", .native_coroutine_status);
+    try setField(state, coroutine_lib, "running", .native_coroutine_running);
+    try setField(state, coroutine_lib, "isyieldable", .native_coroutine_isyieldable);
+    try setField(state, coroutine_lib, "close", .native_coroutine_close);
+    try setField(state, coroutine_lib, "wrap", .native_coroutine_wrap);
+    try state.globals.put(try state.intern("coroutine"), coroutine_lib);
+}
+
+fn openIo(state: *State) !void {
+    const io_lib = try state.newTableWithHints(0, 16);
+    const stdin = try newStandardFile(state, "stdin", "r");
+    const stdout = try newStandardFile(state, "stdout", "w");
+    const stderr = try newStandardFile(state, "stderr", "w");
+    try setField(state, io_lib, "read", .{ .native = .io_read });
+    try setField(state, io_lib, "write", .{ .native = .io_write });
+    try setField(state, io_lib, "open", .{ .native = .io_open });
+    try setField(state, io_lib, "input", .{ .native = .io_input });
+    try setField(state, io_lib, "output", .{ .native = .io_output });
+    try setField(state, io_lib, "close", .{ .native = .io_close });
+    try setField(state, io_lib, "flush", .{ .native = .io_flush });
+    try setField(state, io_lib, "lines", .{ .native = .io_lines });
+    try setField(state, io_lib, "tmpfile", .{ .native = .io_tmpfile });
+    try setField(state, io_lib, "type", .{ .native = .io_type });
+    try setField(state, io_lib, "stdin", stdin);
+    try setField(state, io_lib, "stdout", stdout);
+    try setField(state, io_lib, "stderr", stderr);
+    try setField(state, io_lib, "__zlua_input", stdin);
+    try setField(state, io_lib, "__zlua_output", stdout);
+    try state.globals.put(try state.intern("io"), io_lib);
+}
+
+fn openOs(state: *State) !void {
+    const os_lib = try state.newTableWithHints(0, 12);
+    try setField(state, os_lib, "time", .{ .native = .os_time });
+    try setField(state, os_lib, "clock", .{ .native = .os_clock });
+    try setField(state, os_lib, "date", .{ .native = .os_date });
+    try setField(state, os_lib, "getenv", .{ .native = .os_getenv });
+    try setField(state, os_lib, "setlocale", .{ .native = .os_setlocale });
+    try setField(state, os_lib, "execute", .{ .native = .os_execute });
+    try setField(state, os_lib, "remove", .{ .native = .os_remove });
+    try setField(state, os_lib, "rename", .{ .native = .os_rename });
+    try setField(state, os_lib, "tmpname", .{ .native = .os_tmpname });
+    try setField(state, os_lib, "difftime", .{ .native = .os_difftime });
+    try state.globals.put(try state.intern("os"), os_lib);
+}
+
+fn openDebug(state: *State) !void {
+    const debug_lib = try state.newTableWithHints(0, 10);
+    try setField(state, debug_lib, "traceback", .native_debug_traceback);
+    try setField(state, debug_lib, "getinfo", .{ .native = .debug_getinfo });
+    try setField(state, debug_lib, "getupvalue", .{ .native = .debug_getupvalue });
+    try setField(state, debug_lib, "setupvalue", .{ .native = .debug_setupvalue });
+    try setField(state, debug_lib, "upvalueid", .{ .native = .debug_upvalueid });
+    try setField(state, debug_lib, "upvaluejoin", .{ .native = .debug_upvaluejoin });
+    try setField(state, debug_lib, "getlocal", .{ .native = .debug_getlocal });
+    try setField(state, debug_lib, "setlocal", .{ .native = .debug_setlocal });
+    try setField(state, debug_lib, "getregistry", .{ .native = .debug_getregistry });
+    try setField(state, debug_lib, "sethook", .{ .native = .debug_sethook });
+    try setField(state, debug_lib, "gethook", .{ .native = .debug_gethook });
+    try setField(state, debug_lib, "setmetatable", .{ .native = .debug_setmetatable });
+    try setField(state, debug_lib, "setuservalue", .{ .native = .debug_setuservalue });
+    try setField(state, debug_lib, "getuservalue", .{ .native = .debug_getuservalue });
+    try state.globals.put(try state.intern("debug"), debug_lib);
+}
+
+fn openPackage(state: *State, libraries: LibrarySet) !void {
+    try state.globals.put(try state.intern("loadfile"), .{ .native = .loadfile });
+    try state.globals.put(try state.intern("dofile"), .{ .native = .dofile });
+    try state.globals.put(try state.intern("require"), .{ .native = .require });
+
+    const package_lib = try state.newTableWithHints(0, 8);
+    const loaded = try state.newTableWithHints(0, 8);
+    const preload = try state.newTableWithHints(0, 4);
+    const searchers = try state.newTableWithHints(2, 0);
+    try searchers.table.set(state.allocator, .{ .integer = 1 }, .{ .native = .package_searcher_preload });
+    try searchers.table.set(state.allocator, .{ .integer = 2 }, .{ .native = .package_searcher_lua });
+    if (libraries.coroutine) try setField(state, loaded, "coroutine", state.getGlobal("coroutine"));
+    if (libraries.debug) try setField(state, loaded, "debug", state.getGlobal("debug"));
+    if (libraries.io) try setField(state, loaded, "io", state.getGlobal("io"));
+    if (libraries.math) try setField(state, loaded, "math", state.getGlobal("math"));
+    if (libraries.os) try setField(state, loaded, "os", state.getGlobal("os"));
+    if (libraries.string) try setField(state, loaded, "string", state.getGlobal("string"));
+    if (libraries.table) try setField(state, loaded, "table", state.getGlobal("table"));
+    if (libraries.utf8) try setField(state, loaded, "utf8", state.getGlobal("utf8"));
+    try setField(state, loaded, "package", package_lib);
+    try setField(state, package_lib, "loaded", loaded);
+    try setField(state, package_lib, "preload", preload);
+    try setField(state, package_lib, "searchers", searchers);
+    try setField(state, package_lib, "searchpath", .{ .native = .package_searchpath });
+    try setField(state, package_lib, "path", .{ .string = try state.intern("./?.lua;./?/init.lua") });
+    try setField(state, package_lib, "cpath", .{ .string = try state.intern("") });
+    try setField(state, package_lib, "config", .{ .string = try state.intern("/\n;\n?\n!\n-\n") });
+    try state.globals.put(try state.intern("package"), package_lib);
+}
+
+fn newStandardFile(state: *State, path: []const u8, mode: []const u8) !Value {
+    const value = try state.newTableWithHints(0, 10);
+    const file = value.table;
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file") }, .{ .boolean = true });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_path") }, .{ .string = try state.intern(path) });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_mode") }, .{ .string = try state.intern(mode) });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern("") });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_standard") }, .{ .boolean = true });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_buffer_mode") }, .{ .string = try state.intern("full") });
+    try file.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .io_file_read });
+    try file.set(state.allocator, .{ .string = try state.intern("write") }, .{ .native = .io_file_write });
+    try file.set(state.allocator, .{ .string = try state.intern("close") }, .{ .native = .io_file_close });
+    try file.set(state.allocator, .{ .string = try state.intern("seek") }, .{ .native = .io_file_seek });
+    try file.set(state.allocator, .{ .string = try state.intern("flush") }, .{ .native = .io_file_flush });
+    try file.set(state.allocator, .{ .string = try state.intern("lines") }, .{ .native = .io_file_lines });
+    try file.set(state.allocator, .{ .string = try state.intern("setvbuf") }, .{ .native = .io_file_setvbuf });
+    file.metatable = try state.fileMetatable();
+    return value;
+}
+
+fn setField(state: *State, table_value: Value, name: []const u8, value: Value) !void {
+    try table_value.table.set(state.allocator, .{ .string = try state.intern(name) }, value);
+}
 
 pub const NativeFn = enum {
     load,
