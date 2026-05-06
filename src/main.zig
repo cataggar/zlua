@@ -22,17 +22,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (std.mem.eql(u8, command, "test-diff")) {
-        const exit_code = try zlua.testing.diff_runner.runCli(init.gpa, io, init.environ_map, args[2..]);
-        std.process.exit(exit_code);
-    }
-
-    if (std.mem.eql(u8, command, "test-official")) {
-        const exit_code = try zlua.testing.official_suite.runCli(init.gpa, io, init.environ_map, args[0], args[2..]);
-        std.process.exit(exit_code);
-    }
-
-    if (std.mem.eql(u8, command, "--debug-errors") or std.mem.eql(u8, command, "-e") or std.mem.startsWith(u8, command, "-e")) {
+    if (std.mem.eql(u8, command, "--debug-errors") or std.mem.eql(u8, command, "--") or std.mem.eql(u8, command, "-e") or std.mem.startsWith(u8, command, "-e")) {
         const exit_code = try runCliProgram(arena_allocator, io, init.environ_map, args[1..]);
         std.process.exit(exit_code);
     }
@@ -180,11 +170,10 @@ fn printVersion(io: std.Io) !void {
 
 fn printUsage(io: std.Io) !void {
     try stdoutPrint(io,
-        \\Usage: zlua [--version] <command|script>
+        \\Usage: zlua [options] [script [args...]]
         \\
-        \\Commands:
-        \\  test-diff [path] [--stage=name] [--feature=name] [--gc-stress] [--debug-errors] [--show-clua] [--show-zlua]
-        \\  test-official [--quick] [--mode=basic|complete|internal] [--memory-limit-mb=n] [--debug-errors] [--show-clua] [--show-zlua]
+        \\Options:
+        \\  --version, -v
         \\  --debug-errors <script>
         \\  -e 'chunk' [script [args...]]
         \\

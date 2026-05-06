@@ -42,7 +42,7 @@ clua-version: build
 
 # Run the differential harness with the vendored CLua oracle.
 diff *args:
-    {{zig}} build --summary all run -- test-diff --clua {{clua}} --debug-errors {{args}}
+    {{zig}} build --summary all run-test-diff -- --debug-errors {{args}}
 
 # Run parse-stage differential tests.
 diff-parse *args:
@@ -70,11 +70,11 @@ official-ci:
 
 # Run the full official Lua 5.5 suite dashboard, including memory-stress files.
 official-heavy:
-    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors --memory-limit-mb=256
+    {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256
 
 # Run the official Lua 5.5 suite dashboard.
 official *args:
-    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors {{args}}
+    {{zig}} build --summary all run-test-official -- --debug-errors {{args}}
 
 # Run the official basic suite dashboard.
 official-basic *args:

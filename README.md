@@ -10,8 +10,8 @@ Current dashboard commands:
 
 ```text
 zig build test-official
-zig build run -- test-official --mode=basic
-zig build run -- test-official --mode=complete
+zig build run-test-official -- --mode=basic
+zig build run-test-official -- --mode=complete
 ```
 
 Current status: `zig build test-official` runs each top-level official Lua test file individually, using the vendored CLua baseline for each file and reporting zlua gaps as categorized expected failures. The aggregate `all.lua` harness is not used for the dashboard breakdown. The complete mode is runnable as a local compatibility dashboard; zlua is not expected to pass the official suite yet.
