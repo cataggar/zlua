@@ -85,6 +85,8 @@ pub const Options = struct {
 
 pub const LoadMode = enum {
     source_only,
+    binary_only,
+    source_or_binary,
 };
 
 pub const LoadOptions = struct {
@@ -270,14 +272,26 @@ pub const State = struct {
     }
 
     pub fn loadString(self: *State, source: []const u8, options: LoadOptions) !Function {
-        try validateLoadOptions(options);
-        const loaded = self.raw_state.loadSourceAsClosureNamed(source, options.name) catch |err| return self.captureLuaError(err);
+        const environment = try self.loadEnvironment(options);
+        const loaded = self.loadBuffer(source, options.name, environment, options.mode) catch |err| return self.captureLuaError(err);
         return Function.fromRuntime(self, loaded);
     }
 
     pub fn loadFile(self: *State, path: []const u8, options: LoadOptions) !Function {
-        try validateLoadOptions(options);
-        const loaded = self.raw_state.loadFileAsClosureNamed(path, options.name) catch |err| return self.captureLuaError(err);
+        const source = self.raw_state.readFileAlloc(path) catch |err| return self.captureLuaError(err);
+        var keep_source = false;
+        defer if (!keep_source) self.allocator().free(source);
+
+        const allocated_source_name = if (options.name == null) try std.fmt.allocPrint(self.allocator(), "@{s}", .{path}) else null;
+        defer if (allocated_source_name) |name| self.allocator().free(name);
+
+        const environment = try self.loadEnvironment(options);
+        const source_name = options.name orelse allocated_source_name.?;
+        const loaded = self.loadBuffer(source, source_name, environment, options.mode) catch |err| return self.captureLuaError(err);
+        if (!looksLikeBinaryChunk(source)) {
+            try self.raw_state.source_allocations.append(self.allocator(), source);
+            keep_source = true;
+        }
         return Function.fromRuntime(self, loaded);
     }
 
@@ -315,6 +329,24 @@ pub const State = struct {
     fn lastErrorValue(self: *State) runtime.Value {
         if (self.last_error_root) |index| return self.raw_state.rootedValue(index);
         return self.raw_state.currentErrorValue();
+    }
+
+    fn loadEnvironment(self: *State, options: LoadOptions) !runtime.Value {
+        return if (options.environment) |environment| try environment.rawValue() else if (self.raw_state.global_table) |table| .{ .table = table } else self.raw_state.getGlobal("_G");
+    }
+
+    fn loadBuffer(self: *State, source: []const u8, source_name: ?[]const u8, environment: runtime.Value, mode: LoadMode) !runtime.Value {
+        const binary = looksLikeBinaryChunk(source);
+        switch (mode) {
+            .source_only => if (binary) return self.raw_state.fail("attempt to load a binary chunk"),
+            .binary_only => if (!binary) return self.raw_state.fail("attempt to load a text chunk"),
+            .source_or_binary => {},
+        }
+
+        return if (binary)
+            self.raw_state.loadBinaryDump(source, environment)
+        else
+            self.raw_state.loadSourceAsClosureNamedEnv(source, source_name, environment);
     }
 
     fn captureLuaError(self: *State, err: anyerror) anyerror {
@@ -811,6 +843,8 @@ fn runtimeOptions(options: Options) runtime.StateOptions {
         .process = options.capabilities.process,
         .stdin = options.capabilities.io.stdin,
         .max_memory = options.limits.max_memory,
+        .max_stack_values = options.limits.max_stack_values,
+        .max_call_frames = options.limits.max_call_frames,
         .max_instructions = options.limits.max_instructions,
         .debug_errors = options.debug.errors,
         .trace_vm = options.debug.trace_vm,
@@ -827,10 +861,17 @@ fn toRuntimeStdlib(mode: Stdlib) runtime.StdlibMode {
 }
 
 fn validateLoadOptions(options: LoadOptions) UnsupportedOption!void {
-    if (options.environment != null) return error.UnsupportedOption;
     switch (options.mode) {
         .source_only => {},
+        .binary_only => {},
+        .source_or_binary => {},
     }
+}
+
+fn looksLikeBinaryChunk(source: []const u8) bool {
+    return (source.len > 0 and source[0] == 0x1b) or
+        std.mem.startsWith(u8, source, runtime.binary_chunk_signature) or
+        (source.len > 0 and std.mem.startsWith(u8, runtime.binary_chunk_signature, source));
 }
 
 fn apiCallbackDispatch(raw: *runtime.ApiCallbackContext) anyerror!void {
@@ -1752,6 +1793,80 @@ test "api instruction limit returns a protected Lua error" {
             const message = try err.message();
             defer lua.allocator().free(message);
             try std.testing.expect(std.mem.indexOf(u8, message, "instruction limit exceeded") != null);
+        },
+    }
+}
+
+test "api load options support environments and binary modes" {
+    var lua = try State.init(std.testing.allocator, .{ .stdlib = .full });
+    defer lua.deinit();
+
+    var env = try lua.createTable(.{ .hash_hint = 1 });
+    defer env.deinit();
+    try env.set("secret", 42);
+
+    var source_chunk = try lua.loadString("return secret", .{ .name = "=api-21.6-env", .environment = env });
+    defer source_chunk.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try source_chunk.call(.{}, i64));
+
+    var dumper = try lua.loadString("return string.dump(function() return secret end)", .{ .name = "=api-21.6-dump" });
+    defer dumper.deinit();
+    const dumped = try dumper.call(.{}, []const u8);
+
+    var binary_chunk = try lua.loadString(dumped, .{ .mode = .source_or_binary, .environment = env });
+    defer binary_chunk.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try binary_chunk.call(.{}, i64));
+
+    try std.testing.expectError(error.LuaError, lua.loadString(dumped, .{ .mode = .source_only }));
+    try std.testing.expectError(error.LuaError, lua.loadString("return 1", .{ .mode = .binary_only }));
+}
+
+test "api stack value limit returns a protected Lua error" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_stack_values = 4 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString("local a, b, c, d, e = 1, 2, 3, 4, 5; return a", .{ .name = "=api-21.6-stack-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "stack overflow") != null);
+        },
+    }
+}
+
+test "api call frame limit returns a protected Lua error" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_call_frames = 8 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local function recurse()
+        \\  local value = recurse()
+        \\  return value
+        \\end
+        \\recurse()
+    , .{ .name = "=api-21.6-call-frame-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "stack overflow") != null);
         },
     }
 }

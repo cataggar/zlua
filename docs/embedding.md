@@ -80,12 +80,14 @@ try lua.doString("assert(require('mathx').double(21) == 42)", .{ .name = "=requi
 
 ## Limits
 
-Public options currently include memory and instruction limits:
+Public options include memory, instruction, stack value, and call frame limits:
 
 ```zig
 var lua = try zlua.State.init(allocator, .{
     .limits = .{
         .max_memory = 16 * 1024 * 1024,
+        .max_stack_values = 4096,
+        .max_call_frames = 128,
         .max_instructions = 1_000_000,
     },
 });
@@ -101,6 +103,21 @@ Use `doString` or `doFile` for one-shot scripts:
 try lua.doString("answer = 21 * 2", .{ .name = "=setup" });
 try lua.doFile("plugin.lua", .{ .name = "@plugin.lua" });
 ```
+
+`LoadOptions.environment` can run a chunk with a host-provided `_ENV` table:
+
+```zig
+var env = try lua.createTable(.{ .hash_hint = 1 });
+defer env.deinit();
+try env.set("answer", 42);
+
+var chunk = try lua.loadString("return answer", .{ .environment = env });
+defer chunk.deinit();
+
+const answer = try chunk.call(.{}, i64);
+```
+
+`LoadOptions.mode` accepts `source_only`, `binary_only`, and `source_or_binary`. Binary loading supports zlua binary chunks produced in the same state lifetime, such as data from Lua `string.dump`; it does not promise PUC Lua binary chunk compatibility.
 
 Use `loadString` or `loadFile` when you want a reusable, rooted function handle:
 
@@ -405,9 +422,6 @@ If you need a low-level operation that is not available through `zlua.State`, pr
 These areas are reserved or incomplete in the current embedding surface:
 
 ```text
-LoadOptions.environment is parsed but returns error.UnsupportedOption.
-LoadMode currently supports source_only only.
-Limits.max_stack_values and Limits.max_call_frames are accepted options but not enforced by the public facade yet.
 GcOptions is reserved for future tuning.
 There is no State.callGlobal or State.protectedCallGlobal convenience method; get a Function and call it.
 There is no stable zlua.api.Raw wrapper.
