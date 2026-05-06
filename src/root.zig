@@ -17,6 +17,7 @@ pub const Table = api.Table;
 pub const Function = api.Function;
 pub const Context = api.Context;
 pub const Error = api.Error;
+pub const Tuple = api.Tuple;
 
 test {
     _ = frontend;

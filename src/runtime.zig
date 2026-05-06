@@ -578,6 +578,7 @@ pub const State = struct {
     thread_allocations: std.ArrayList(*Thread) = .empty,
     proto_allocations: std.ArrayList(*proto_mod.Proto) = .empty,
     source_allocations: std.ArrayList([]const u8) = .empty,
+    api_roots: std.ArrayList(Value) = .empty,
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     options: StateOptions,
@@ -642,6 +643,7 @@ pub const State = struct {
         }
         for (self.source_allocations.items) |source| self.allocator.free(source);
         for (self.string_allocations.items) |allocation| self.allocator.free(allocation.bytes);
+        self.api_roots.deinit(self.allocator);
         self.source_allocations.deinit(self.allocator);
         self.proto_allocations.deinit(self.allocator);
         self.thread_allocations.deinit(self.allocator);
@@ -1028,6 +1030,36 @@ pub const State = struct {
         try self.setGlobal(name, value);
     }
 
+    pub fn rootValue(self: *State, value: Value) !usize {
+        for (self.api_roots.items, 0..) |root, index| {
+            if (root == .nil) {
+                self.api_roots.items[index] = value;
+                self.markValue(value);
+                return index;
+            }
+        }
+        try self.api_roots.append(self.allocator, value);
+        self.markValue(value);
+        return self.api_roots.items.len - 1;
+    }
+
+    pub fn unrootValue(self: *State, index: usize) void {
+        if (index < self.api_roots.items.len) self.api_roots.items[index] = .nil;
+    }
+
+    pub fn rootedValue(self: *State, index: usize) Value {
+        if (index >= self.api_roots.items.len) return .nil;
+        return self.api_roots.items[index];
+    }
+
+    pub fn activeRootCount(self: State) usize {
+        var count: usize = 0;
+        for (self.api_roots.items) |root| {
+            if (root != .nil) count += 1;
+        }
+        return count;
+    }
+
     pub fn readFileAlloc(self: *State, path: []const u8) ![]const u8 {
         switch (self.options.filesystem) {
             .disabled => return self.fail("filesystem access disabled"),
@@ -1155,8 +1187,12 @@ pub const State = struct {
     }
 
     fn setRootThreadArgs(self: *State, thread: *Thread, args: []const Value) !void {
-        if (args.len == 0) return;
-        const owned_args = try self.allocator.dupe(Value, args);
+        const proto = thread.frames.items[0].proto;
+        const param_count = @min(args.len, proto.param_count);
+        for (args[0..param_count], 0..) |arg, index| thread.stack.items[index] = arg;
+
+        if (!proto.is_vararg or args.len <= proto.param_count) return;
+        const owned_args = try self.allocator.dupe(Value, args[proto.param_count..]);
         thread.frames.items[0].varargs = owned_args;
         thread.frames.items[0].owns_varargs = true;
     }
@@ -1672,6 +1708,10 @@ pub const State = struct {
         return self.getTableDepth(null, table_value, key_value, 0);
     }
 
+    pub fn getTableValue(self: *State, table_value: Value, key_value: Value) !Value {
+        return self.getTable(table_value, key_value);
+    }
+
     pub fn getTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value) !Value {
         return self.getTableDepth(thread, table_value, key_value, 0);
     }
@@ -1740,6 +1780,10 @@ pub const State = struct {
 
     fn setTable(self: *State, table_value: Value, key_value: Value, value: Value) !void {
         try self.setTableDepth(null, table_value, key_value, value, 0);
+    }
+
+    pub fn setTableValue(self: *State, table_value: Value, key_value: Value, value: Value) !void {
+        try self.setTable(table_value, key_value, value);
     }
 
     pub fn setTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
@@ -3694,6 +3738,7 @@ pub const State = struct {
             self.markString(entry.key_ptr.*);
             self.markValue(entry.value_ptr.*);
         }
+        for (self.api_roots.items) |root| self.markValue(root);
         self.markRuntimeErrorPayload(self.last_error);
         if (self.current_thread) |thread| self.markThread(thread);
         if (self.string_metatable) |metatable| if (self.isTrackedTable(metatable)) self.markTable(metatable);

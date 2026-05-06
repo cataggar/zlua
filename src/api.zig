@@ -4,6 +4,12 @@ const stdlib = @import("stdlib.zig");
 
 pub const Error = error{LuaError};
 pub const UnsupportedOption = error{UnsupportedOption};
+pub const ConversionError = error{
+    TypeMismatch,
+    IntegerOutOfRange,
+    UnsupportedType,
+    ArityMismatch,
+};
 
 pub const Stdlib = enum {
     none,
@@ -84,7 +90,7 @@ pub const GcStepResult = enum {
 
 pub const State = struct {
     raw_state: runtime.State,
-    last_error_value: ?runtime.Value = null,
+    last_error_root: ?usize = null,
 
     pub fn init(state_allocator: std.mem.Allocator, options: Options) !State {
         return .{
@@ -116,6 +122,14 @@ pub const State = struct {
         return .complete;
     }
 
+    pub fn push(self: *State, value: anytype) !Value {
+        return Value.fromRuntime(self, try toRuntimeValue(self, value));
+    }
+
+    pub fn read(self: *State, value: Value, comptime T: type) !T {
+        return fromRuntimeValue(self, try value.toRuntime(), T);
+    }
+
     pub fn loadString(self: *State, source: []const u8, options: LoadOptions) !Function {
         try validateLoadOptions(options);
         const loaded = self.raw_state.loadSourceAsClosureNamed(source, options.name) catch |err| return self.captureLuaError(err);
@@ -141,7 +155,7 @@ pub const State = struct {
     }
 
     pub fn errorMessage(self: *State) ![]const u8 {
-        const value = self.last_error_value orelse self.raw_state.currentErrorValue();
+        const value = self.lastErrorValue();
         var out = std.ArrayList(u8).empty;
         defer out.deinit(self.allocator());
         try runtime.appendValue(self.allocator(), &out, value);
@@ -149,76 +163,140 @@ pub const State = struct {
     }
 
     pub fn takeErrorValue(self: *State) ?ErrorRef {
-        const value = self.last_error_value orelse return null;
-        self.last_error_value = null;
-        return .{ .state = self, .raw_value = value };
+        const index = self.last_error_root orelse return null;
+        self.last_error_root = null;
+        return .{ .ref = .{ .state = self, .index = index } };
+    }
+
+    fn setLastErrorValue(self: *State, value: runtime.Value) !void {
+        if (self.last_error_root) |index| self.raw_state.unrootValue(index);
+        self.last_error_root = try self.raw_state.rootValue(value);
+    }
+
+    fn lastErrorValue(self: *State) runtime.Value {
+        if (self.last_error_root) |index| return self.raw_state.rootedValue(index);
+        return self.raw_state.currentErrorValue();
     }
 
     fn captureLuaError(self: *State, err: anyerror) anyerror {
         switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
-                self.last_error_value = self.raw_state.currentErrorValue();
+                self.setLastErrorValue(self.raw_state.currentErrorValue()) catch |root_err| return root_err;
                 return error.LuaError;
             },
             else => return err,
         }
     }
+
+    fn rootCountForTest(self: *State) usize {
+        return self.raw_state.activeRootCount();
+    }
 };
 
 pub const Ref = struct {
+    state: *State,
+    index: usize,
+
+    fn fromRuntime(state: *State, raw: runtime.Value) !Ref {
+        return .{ .state = state, .index = try state.raw_state.rootValue(raw) };
+    }
+
     pub fn deinit(self: *Ref) void {
+        self.state.raw_state.unrootValue(self.index);
         self.* = undefined;
     }
 
-    pub fn value(self: Ref) Value {
-        _ = self;
-        return .nil;
+    pub fn value(self: Ref) !Value {
+        return Value.fromRuntime(self.state, self.rawValue());
+    }
+
+    fn rawValue(self: Ref) runtime.Value {
+        return self.state.raw_state.rootedValue(self.index);
     }
 };
 
 pub const Table = struct {
-    raw_table: *runtime.Table,
+    ref: Ref,
+
+    fn fromRuntime(state: *State, value: runtime.Value) !Table {
+        return switch (value) {
+            .table => .{ .ref = try Ref.fromRuntime(state, value) },
+            else => error.TypeMismatch,
+        };
+    }
+
+    pub fn deinit(self: *Table) void {
+        self.ref.deinit();
+        self.* = undefined;
+    }
+
+    pub fn get(self: Table, key: anytype, comptime T: type) !T {
+        const raw = try self.rawValue();
+        const raw_key = try toRuntimeValue(self.ref.state, key);
+        const raw_value = self.ref.state.raw_state.getTableValue(raw, raw_key) catch |err| return self.ref.state.captureLuaError(err);
+        return fromRuntimeValue(self.ref.state, raw_value, T);
+    }
+
+    pub fn set(self: Table, key: anytype, value: anytype) !void {
+        const raw = try self.rawValue();
+        const raw_key = try toRuntimeValue(self.ref.state, key);
+        const raw_value = try toRuntimeValue(self.ref.state, value);
+        self.ref.state.raw_state.setTableValue(raw, raw_key, raw_value) catch |err| return self.ref.state.captureLuaError(err);
+    }
+
+    fn rawValue(self: Table) !runtime.Value {
+        const raw = self.ref.rawValue();
+        if (raw != .table) return error.TypeMismatch;
+        return raw;
+    }
 };
 
 pub const Function = struct {
-    state: *State,
-    raw_closure: *runtime.Closure,
+    ref: Ref,
 
     fn fromRuntime(state: *State, value: runtime.Value) !Function {
         return switch (value) {
-            .closure => |closure| .{ .state = state, .raw_closure = closure },
+            .closure => .{ .ref = try Ref.fromRuntime(state, value) },
             else => error.TypeMismatch,
         };
     }
 
     pub fn deinit(self: *Function) void {
+        self.ref.deinit();
         self.* = undefined;
     }
 
     pub fn call(self: Function, args: anytype, comptime R: type) !R {
-        requireEmptyArgs(args);
-        if (R != void) @compileError("phase 21.1 Function.call only supports void results");
+        const raw_args = try convertArgs(self.ref.state, args);
+        defer self.ref.state.allocator().free(raw_args);
 
-        const results = self.state.raw_state.callLoadedClosure(self.raw_closure, &.{}) catch |err| return self.state.captureLuaError(err);
-        defer self.state.allocator().free(results);
-        return {};
+        const results = self.ref.state.raw_state.callLoadedClosure(try self.rawClosure(), raw_args) catch |err| return self.ref.state.captureLuaError(err);
+        defer self.ref.state.allocator().free(results);
+        return fromRuntimeResults(self.ref.state, results, R);
     }
 
     pub fn protectedCall(self: Function, args: anytype, comptime R: type) !CallResult(R) {
-        requireEmptyArgs(args);
-        if (R != void) @compileError("phase 21.1 Function.protectedCall only supports void results");
+        const raw_args = try convertArgs(self.ref.state, args);
+        defer self.ref.state.allocator().free(raw_args);
 
-        const result = try self.state.raw_state.protectedCallLoadedClosure(self.raw_closure, &.{});
+        const result = try self.ref.state.raw_state.protectedCallLoadedClosure(try self.rawClosure(), raw_args);
         switch (result) {
             .success => |values| {
-                self.state.allocator().free(values);
-                return .{ .ok = {} };
+                defer self.ref.state.allocator().free(values);
+                return .{ .ok = try fromRuntimeResults(self.ref.state, values, R) };
             },
             .failure => |value| {
-                self.state.last_error_value = value;
-                return .{ .lua_error = .{ .state = self.state, .raw_value = value } };
+                try self.ref.state.setLastErrorValue(value);
+                return .{ .lua_error = try ErrorRef.fromRuntime(self.ref.state, value) };
             },
         }
+    }
+
+    fn rawClosure(self: Function) !*runtime.Closure {
+        return switch (self.ref.rawValue()) {
+            .closure => |closure| closure,
+            else => error.TypeMismatch,
+        };
     }
 };
 
@@ -230,22 +308,26 @@ pub fn CallResult(comptime R: type) type {
 }
 
 pub const ErrorRef = struct {
-    state: *State,
-    raw_value: runtime.Value,
+    ref: Ref,
+
+    fn fromRuntime(state: *State, raw: runtime.Value) !ErrorRef {
+        return .{ .ref = try Ref.fromRuntime(state, raw) };
+    }
 
     pub fn deinit(self: *ErrorRef) void {
+        self.ref.deinit();
         self.* = undefined;
     }
 
-    pub fn value(self: ErrorRef) Value {
-        return Value.fromRuntime(self.state, self.raw_value);
+    pub fn value(self: ErrorRef) !Value {
+        return self.ref.value();
     }
 
     pub fn message(self: ErrorRef) ![]const u8 {
         var out = std.ArrayList(u8).empty;
-        defer out.deinit(self.state.allocator());
-        try runtime.appendValue(self.state.allocator(), &out, self.raw_value);
-        return self.state.allocator().dupe(u8, out.items);
+        defer out.deinit(self.ref.state.allocator());
+        try runtime.appendValue(self.ref.state.allocator(), &out, self.ref.rawValue());
+        return self.ref.state.allocator().dupe(u8, out.items);
     }
 };
 
@@ -259,19 +341,59 @@ pub const Value = union(enum) {
     function: Function,
     unsupported,
 
-    fn fromRuntime(state: *State, value: runtime.Value) Value {
+    fn fromRuntime(state: *State, value: runtime.Value) !Value {
         return switch (value) {
             .nil => .nil,
             .boolean => |boolean| .{ .boolean = boolean },
             .integer => |integer| .{ .integer = integer },
             .number => |number| .{ .number = number },
             .string => |string| .{ .string = string },
-            .table => |table| .{ .table = .{ .raw_table = table } },
-            .closure => |closure| .{ .function = .{ .state = state, .raw_closure = closure } },
+            .table => .{ .table = try Table.fromRuntime(state, value) },
+            .closure => .{ .function = try Function.fromRuntime(state, value) },
             else => .unsupported,
         };
     }
+
+    pub fn deinit(self: *Value) void {
+        switch (self.*) {
+            .table => |*table| table.deinit(),
+            .function => |*function| function.deinit(),
+            else => {},
+        }
+        self.* = undefined;
+    }
+
+    fn toRuntime(self: Value) !runtime.Value {
+        return switch (self) {
+            .nil => .nil,
+            .boolean => |boolean| .{ .boolean = boolean },
+            .integer => |integer| .{ .integer = integer },
+            .number => |number| .{ .number = number },
+            .string => |string| .{ .string = string },
+            .table => |table| table.rawValue(),
+            .function => |function| .{ .closure = try function.rawClosure() },
+            .unsupported => error.UnsupportedType,
+        };
+    }
 };
+
+pub fn Tuple(comptime types: []const type) type {
+    return struct {
+        pub const is_zlua_tuple = true;
+        pub const field_types = types;
+
+        values: std.meta.Tuple(types),
+
+        pub fn deinit(self: *@This()) void {
+            inline for (types, 0..) |Field, index| deinitIfOwned(Field, &self.values[index]);
+            self.* = undefined;
+        }
+
+        pub fn get(self: *const @This(), comptime index: usize) types[index] {
+            return self.values[index];
+        }
+    };
+}
 
 pub const Context = opaque {};
 pub const AnyUserdata = opaque {};
@@ -312,11 +434,126 @@ fn validateLoadOptions(options: LoadOptions) UnsupportedOption!void {
     }
 }
 
-fn requireEmptyArgs(args: anytype) void {
+fn convertArgs(state: *State, args: anytype) ![]runtime.Value {
     const Args = @TypeOf(args);
     const info = @typeInfo(Args);
-    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("phase 21.1 calls require an empty tuple argument list: .{}");
-    if (info.@"struct".fields.len != 0) @compileError("phase 21.1 calls do not support arguments yet");
+    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("calls require tuple arguments: .{ ... }");
+
+    const fields = info.@"struct".fields;
+    const raw_args = try state.allocator().alloc(runtime.Value, fields.len);
+    errdefer state.allocator().free(raw_args);
+    inline for (fields, 0..) |_, index| raw_args[index] = try toRuntimeValue(state, args[index]);
+    return raw_args;
+}
+
+fn toRuntimeValue(state: *State, value: anytype) !runtime.Value {
+    const T = @TypeOf(value);
+    if (T == Value) return value.toRuntime();
+    if (T == Ref) return value.rawValue();
+    if (T == Table) return value.rawValue();
+    if (T == Function) return .{ .closure = try value.rawClosure() };
+
+    return switch (@typeInfo(T)) {
+        .null => .nil,
+        .optional => if (value) |payload| toRuntimeValue(state, payload) else .nil,
+        .bool => .{ .boolean = value },
+        .int, .comptime_int => .{ .integer = std.math.cast(i64, value) orelse return error.IntegerOutOfRange },
+        .float, .comptime_float => .{ .number = @floatCast(value) },
+        .pointer => |pointer| pointerToRuntimeValue(state, value, pointer),
+        .array => |array| if (array.child == u8)
+            .{ .string = try state.raw_state.intern(value[0..]) }
+        else
+            error.UnsupportedType,
+        else => error.UnsupportedType,
+    };
+}
+
+fn pointerToRuntimeValue(state: *State, value: anytype, comptime pointer: std.builtin.Type.Pointer) !runtime.Value {
+    switch (pointer.size) {
+        .slice => {
+            if (pointer.child != u8) return error.UnsupportedType;
+            return .{ .string = try state.raw_state.intern(value) };
+        },
+        .one => switch (@typeInfo(pointer.child)) {
+            .array => |array| {
+                if (array.child != u8) return error.UnsupportedType;
+                return .{ .string = try state.raw_state.intern(value[0..]) };
+            },
+            else => return error.UnsupportedType,
+        },
+        else => return error.UnsupportedType,
+    }
+}
+
+fn fromRuntimeResults(state: *State, results: []const runtime.Value, comptime R: type) !R {
+    if (R == void) return {};
+    if (comptime isTupleResult(R)) {
+        var values: std.meta.Tuple(R.field_types) = undefined;
+        inline for (R.field_types, 0..) |Field, index| {
+            const raw = if (index < results.len) results[index] else runtime.Value.nil;
+            values[index] = try fromRuntimeValue(state, raw, Field);
+        }
+        return .{ .values = values };
+    }
+
+    const raw = if (results.len == 0) runtime.Value.nil else results[0];
+    return fromRuntimeValue(state, raw, R);
+}
+
+fn fromRuntimeValue(state: *State, raw: runtime.Value, comptime T: type) !T {
+    if (T == Value) return Value.fromRuntime(state, raw);
+    if (T == Ref) return Ref.fromRuntime(state, raw);
+    if (T == Table) return Table.fromRuntime(state, raw);
+    if (T == Function) return Function.fromRuntime(state, raw);
+    if (T == void) return {};
+
+    return switch (@typeInfo(T)) {
+        .bool => switch (raw) {
+            .boolean => |value| value,
+            else => error.TypeMismatch,
+        },
+        .int, .comptime_int => switch (raw) {
+            .integer => |value| std.math.cast(T, value) orelse return error.IntegerOutOfRange,
+            .number => |value| if (integerFromFloat(value)) |integer|
+                std.math.cast(T, integer) orelse return error.IntegerOutOfRange
+            else
+                error.TypeMismatch,
+            else => error.TypeMismatch,
+        },
+        .float, .comptime_float => switch (raw) {
+            .integer => |value| @as(T, @floatFromInt(value)),
+            .number => |value| @as(T, @floatCast(value)),
+            else => error.TypeMismatch,
+        },
+        .pointer => |pointer| switch (pointer.size) {
+            .slice => if (pointer.child == u8) switch (raw) {
+                .string => |value| value,
+                else => error.TypeMismatch,
+            } else error.UnsupportedType,
+            else => error.UnsupportedType,
+        },
+        else => error.UnsupportedType,
+    };
+}
+
+fn integerFromFloat(value: f64) ?i64 {
+    if (!std.math.isFinite(value)) return null;
+    if (@trunc(value) != value) return null;
+    if (value < @as(f64, @floatFromInt(std.math.minInt(i64))) or value > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return null;
+    return @intFromFloat(value);
+}
+
+fn isTupleResult(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "is_zlua_tuple") and T.is_zlua_tuple,
+        else => false,
+    };
+}
+
+fn deinitIfOwned(comptime T: type, value: *T) void {
+    if (T == Value or T == Ref or T == Table or T == Function or T == ErrorRef) {
+        value.deinit();
+    }
 }
 
 test "api state initializes with safe defaults" {
@@ -371,4 +608,80 @@ test "api do file uses memory filesystem and reports source names" {
     const message = try lua.errorMessage();
     defer lua.allocator().free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "bad.lua") != null);
+}
+
+test "api primitive values round trip through calls and conversion" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var identity = try lua.loadString("return ...", .{ .name = "=identity" });
+    defer identity.deinit();
+
+    try std.testing.expectEqual(true, try identity.call(.{true}, bool));
+    try std.testing.expectEqual(@as(i64, -42), try identity.call(.{-42}, i64));
+    try std.testing.expectEqual(@as(u8, 42), try identity.call(.{42}, u8));
+    try std.testing.expectEqual(@as(f64, 1.5), try identity.call(.{1.5}, f64));
+    try std.testing.expectEqualStrings("hello", try identity.call(.{"hello"}, []const u8));
+
+    const pushed = try lua.push(@as(i64, 123));
+    try std.testing.expectEqual(@as(i64, 123), try lua.read(pushed, i64));
+}
+
+test "api tuple helper reads multiple returns" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var chunk = try lua.loadString("return true, 42, 'ok'", .{ .name = "=tuple" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ bool, i64, []const u8 });
+    var result = try chunk.call(.{}, Result);
+    defer result.deinit();
+
+    try std.testing.expectEqual(true, result.get(0));
+    try std.testing.expectEqual(@as(i64, 42), result.get(1));
+    try std.testing.expectEqualStrings("ok", result.get(2));
+}
+
+test "api table and function handles round trip and survive forced GC" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local t = { answer = 42 }
+        \\local function f(x) return x + 1 end
+        \\return t, f
+    , .{ .name = "=handles" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ Table, Function });
+    var result = try chunk.call(.{}, Result);
+    defer result.deinit();
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 42), try result.get(0).get("answer", i64));
+    try std.testing.expectEqual(@as(i64, 42), try result.get(1).call(.{41}, i64));
+}
+
+test "api released handles remove runtime roots" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), lua.rootCountForTest());
+
+    var chunk = try lua.loadString("return { alive = true }", .{ .name = "=root-count" });
+    try std.testing.expectEqual(@as(usize, 1), lua.rootCountForTest());
+
+    var table = try chunk.call(.{}, Table);
+    try std.testing.expectEqual(@as(usize, 2), lua.rootCountForTest());
+
+    try lua.collect();
+    try std.testing.expectEqual(true, try table.get("alive", bool));
+
+    table.deinit();
+    try std.testing.expectEqual(@as(usize, 1), lua.rootCountForTest());
+    chunk.deinit();
+    try std.testing.expectEqual(@as(usize, 0), lua.rootCountForTest());
+
+    try lua.collect();
 }
