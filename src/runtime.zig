@@ -563,6 +563,7 @@ pub const StateOptions = struct {
     process: ProcessCapability = .disabled,
     stdin: []const u8 = "",
     debug_errors: bool = false,
+    trace_vm: bool = false,
 };
 
 pub const ExecuteOptions = struct {
@@ -958,8 +959,10 @@ pub const State = struct {
                 try self.returnFromFrame(thread, 0, 0);
                 continue;
             }
-            const instruction = proto.instructions.items[frame.pc];
+            const pc = frame.pc;
+            const instruction = proto.instructions.items[pc];
             frame.pc += 1;
+            if (self.options.trace_vm) try self.traceInstruction(frame.*, pc, instruction);
             try self.callLineHook(thread);
             try self.callCountHook(thread);
 
@@ -1023,6 +1026,11 @@ pub const State = struct {
 
             if (self.gc_running and (self.collect_after_instruction or self.shouldRunAutoGc())) try self.collectGarbageConservatively(thread);
         }
+    }
+
+    fn traceInstruction(self: *State, frame: CallFrame, pc: usize, instruction: bytecode.Instruction) !void {
+        const line = if (pc < frame.proto.line_info.items.len) frame.proto.line_info.items[pc].line else 0;
+        try appendFmt(self.allocator, &self.stderr, "[trace-vm] {s}:{d} pc={d} op={s}\n", .{ frame.proto.source_name, line, pc, @tagName(instruction) });
     }
 
     fn get(_: *State, thread: *Thread, register: bytecode.Register) Value {

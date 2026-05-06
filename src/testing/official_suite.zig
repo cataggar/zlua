@@ -11,7 +11,6 @@ const Options = struct {
     clua: ?[]const u8 = null,
     zlua: ?[]const u8 = null,
     mode: Mode = .basic,
-    quick: bool = false,
     show_clua: bool = false,
     show_zlua: bool = false,
     debug_errors: bool = false,
@@ -63,7 +62,7 @@ pub fn runCli(
     const discovery = try clua.detect(allocator, io, environ_map, options.clua);
     defer discovery.deinit(allocator);
 
-    const clua_exe = switch (discovery) {
+    const detected_clua_exe = switch (discovery) {
         .found => |path| path,
         .missing => |message| {
             try out.print("clua: missing ({s})\n", .{message});
@@ -71,13 +70,25 @@ pub fn runCli(
             return 1;
         },
     };
+    const clua_exe = try stableExecutablePath(allocator, io, detected_clua_exe);
+    defer allocator.free(clua_exe);
+    const selected_zlua_exe = try stableExecutablePath(allocator, io, options.zlua orelse zlua_exe);
+    defer allocator.free(selected_zlua_exe);
 
     var counts: Counts = .{};
-    try runIndividualSuite(allocator, io, out, clua_exe, options.zlua orelse zlua_exe, options, &counts);
+    try runIndividualSuite(allocator, io, out, clua_exe, selected_zlua_exe, options, &counts);
 
     try printSummary(out, counts);
     try out.flush();
     return if (counts.unexpected_failed == 0) 0 else 1;
+}
+
+fn stableExecutablePath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, path, '/') == null) return allocator.dupe(u8, path);
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    const cwd = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd);
+    return std.fs.path.join(allocator, &.{ cwd, path });
 }
 
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
@@ -88,9 +99,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--quick")) {
-            options.quick = true;
-        } else if (std.mem.eql(u8, arg, "--show-clua")) {
+        if (std.mem.eql(u8, arg, "--show-clua")) {
             options.show_clua = true;
         } else if (std.mem.eql(u8, arg, "--show-zlua")) {
             options.show_zlua = true;
@@ -164,11 +173,7 @@ fn runIndividualSuite(
         return;
     }
 
-    if (options.quick) {
-        try out.print("mode: quick {s} official files (excluding heavy.lua)\n", .{@tagName(options.mode)});
-    } else {
-        try out.print("mode: {s} official files\n", .{@tagName(options.mode)});
-    }
+    try out.print("mode: {s} official files\n", .{@tagName(options.mode)});
     if (options.memory_limit_mb != 0) {
         try out.print("memory-limit: {d} MiB per child process\n", .{options.memory_limit_mb});
     }
@@ -182,12 +187,6 @@ fn runIndividualSuite(
     std.mem.sort([]u8, files.items, {}, lessThanString);
 
     for (files.items) |file| {
-        if (options.quick and std.mem.eql(u8, std.fs.path.basename(file), "heavy.lua")) {
-            counts.skipped += 1;
-            try out.print("skip heavy.lua (memory-stress test; omit --quick for full run)\n", .{});
-            continue;
-        }
-
         var clua_result = try runOfficialFile(allocator, io, clua_exe, file, options, .clua);
         defer clua_result.deinit(allocator);
         var zlua_result = try runOfficialFile(allocator, io, zlua_exe, file, options, .zlua);
@@ -339,11 +338,10 @@ fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try writer.interface.flush();
 }
 
-test "argument parser accepts quick and complete mode" {
-    const args = [_][]const u8{ "--quick", "--mode=complete", "--debug-errors", "--timeout-ms=10", "--memory-limit-mb=256" };
+test "argument parser accepts complete mode and limits" {
+    const args = [_][]const u8{ "--mode=complete", "--debug-errors", "--timeout-ms=10", "--memory-limit-mb=256" };
     const options = try parseArgs(std.testing.allocator, &args);
     defer std.testing.allocator.free(options.file_args);
-    try std.testing.expect(options.quick);
     try std.testing.expect(options.debug_errors);
     try std.testing.expectEqual(Mode.complete, options.mode);
     try std.testing.expectEqual(@as(u64, 10), options.timeout_ms);
