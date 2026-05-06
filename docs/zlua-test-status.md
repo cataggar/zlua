@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=19`, `categorized_failed=13`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=20`, `categorized_failed=12`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,7 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, `just official-file coroutine`, `just official-file closure`, `just official-file literals`, and `just official-file strings`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused coroutine work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, and `just official-file coroutine`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
 
 Latest focused `coroutine.lua` work:
 
@@ -35,7 +35,10 @@ Latest focused `coroutine.lua` work:
 - `pcall`/`xpcall` no longer count as unyieldable native boundaries, and protected-call close handlers expose the expected C frame to `debug.getinfo(2)` for the covered close-unwind check.
 - Protected-call continuations now survive coroutine yields far enough to recover from yielded `pcall` close-unwind errors, including the official nested close-handler error ordering case.
 - `coroutine.close()` on the running coroutine no longer tries to return through frames it just closed when a close handler errors, avoiding the previous panic in the self-closing coroutine block.
-- `coroutine.lua` still xfails later in yielded generic-`for` iterator continuation under `pcall`/`xpcall`; the next missing piece is restoring the resumed iterator result correctly before the protected-call chain continues.
+- Native tail calls that yield now use frame-count keyed continuations, so the yielded generic-`for` iterator under `pcall`/`xpcall` resumes before the protected-call chain continues.
+- Basic `debug.sethook` call/line/return tracing, closure line ranges, collected-coroutine open-upvalue closing, and resume-chain stack overflow guards now cover the next official coroutine blocks.
+- Yielded single-result metamethod calls now restore their results into the suspended opcode before execution continues, covering arithmetic, bitwise, comparison, length, concat, and table access/update continuations.
+- `coroutine.lua` now passes in the basic official dashboard.
 
 Latest focused `strings.lua` work:
 
@@ -125,7 +128,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `closure.lua` | Pass | Pass |  |
 | `code.lua` | Pass | Pass |  |
 | `constructs.lua` | Pass | Pass |  |
-| `coroutine.lua` | Pass | XFail | `runtime` |
+| `coroutine.lua` | Pass | Pass |  |
 | `cstack.lua` | Pass | XFail | `runtime` |
 | `db.lua` | Pass | XFail | `runtime` |
 | `errors.lua` | Pass | XFail | `runtime` |
@@ -160,7 +163,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 19 |
-| Categorized zlua failures | 13 |
+| zlua passes | 20 |
+| Categorized zlua failures | 12 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

@@ -101,6 +101,7 @@ pub const NativeFn = enum {
     debug_setupvalue,
     debug_upvalueid,
     debug_upvaluejoin,
+    debug_sethook,
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
@@ -188,6 +189,7 @@ pub const NativeFn = enum {
             .debug_setupvalue => "debug.setupvalue",
             .debug_upvalueid => "debug.upvalueid",
             .debug_upvaluejoin => "debug.upvaluejoin",
+            .debug_sethook => "debug.sethook",
         };
     }
 };
@@ -278,6 +280,7 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_setupvalue => try debug.setupvalue(state, thread, op),
         .debug_upvalueid => try debug.upvalueid(state, thread, op),
         .debug_upvaluejoin => try debug.upvaluejoin(state, thread, op),
+        .debug_sethook => try debug.sethook(state, thread, op),
     }
 }
 

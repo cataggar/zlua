@@ -12,10 +12,11 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const value = try state.newTableWithHints(0, 8);
     const table = value.table;
     const source_name = if (target == .closure) target.closure.proto.source_name else "zlua";
+    const line_range = if (target == .closure) closureLineRange(target.closure.proto) else null;
     try table.set(state.allocator, .{ .string = try state.intern("source") }, .{ .string = try state.intern(source_name) });
     try table.set(state.allocator, .{ .string = try state.intern("short_src") }, .{ .string = try state.intern(source_name) });
-    try table.set(state.allocator, .{ .string = try state.intern("linedefined") }, .{ .integer = 0 });
-    try table.set(state.allocator, .{ .string = try state.intern("lastlinedefined") }, .{ .integer = 0 });
+    try table.set(state.allocator, .{ .string = try state.intern("linedefined") }, .{ .integer = if (line_range) |range| @intCast(range.defined) else 0 });
+    try table.set(state.allocator, .{ .string = try state.intern("lastlinedefined") }, .{ .integer = if (line_range) |range| @intCast(range.last) else 0 });
     try table.set(state.allocator, .{ .string = try state.intern("nups") }, .{ .integer = 0 });
     try table.set(state.allocator, .{ .string = try state.intern("nparams") }, .{ .integer = 0 });
     try table.set(state.allocator, .{ .string = try state.intern("isvararg") }, .{ .boolean = false });
@@ -95,10 +96,42 @@ pub fn upvaluejoin(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{});
 }
 
+pub fn sethook(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    if (op.arg_count == 0) return state.fail("bad argument #1 to 'sethook'");
+
+    const first = runtime.argValue(state, thread, op, 0);
+    const target, const hook_index: u16 = if (first == .thread) .{ first.thread, 1 } else .{ thread, 0 };
+    const hook = runtime.argValue(state, thread, op, hook_index);
+    const mask_value = runtime.argValue(state, thread, op, hook_index + 1);
+    const mask = if (hook == .nil) "" else try state.expectString(mask_value);
+
+    state.setThreadHook(target, hook, mask);
+    try state.returnValues(thread, op.base, op.return_count, &.{});
+}
+
 fn upvalueIndex(value: Value) ?usize {
     const integer = runtime.toInteger(value) orelse return null;
     if (integer <= 0) return null;
     return @intCast(integer - 1);
+}
+
+const ClosureLineRange = struct {
+    defined: usize,
+    last: usize,
+};
+
+fn closureLineRange(proto: *const compile.proto.Proto) ?ClosureLineRange {
+    if (proto.line_info.items.len == 0) return null;
+    var min_line = proto.line_info.items[0].line;
+    var max_line = min_line;
+    for (proto.line_info.items[1..]) |info| {
+        min_line = @min(min_line, info.line);
+        max_line = @max(max_line, info.line);
+    }
+    return .{
+        .defined = if (min_line == max_line or min_line == 0) min_line else min_line - 1,
+        .last = max_line,
+    };
 }
 
 fn nativeUpvalueId(value: Value, index: usize) ?[]const u8 {

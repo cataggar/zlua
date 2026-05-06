@@ -99,6 +99,24 @@ const GenericForContinuation = struct {
     jump_on_nil: bool,
 };
 
+const TailCallContinuation = struct {
+    frame_count: usize,
+    base: bytecode.Register,
+    return_count: u16,
+};
+
+const CallOneContinuationResult = union(enum) {
+    value: usize,
+    truthy: usize,
+    inverted_truthy: usize,
+    discard,
+};
+
+const CallOneContinuation = struct {
+    frame_count: usize,
+    result: CallOneContinuationResult,
+};
+
 pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
     try out.appendSlice(allocator, binary_chunk_signature);
     try out.append(allocator, 0x55);
@@ -296,14 +314,19 @@ pub const Thread = struct {
     yield_values: std.ArrayList(Value) = .empty,
     protected_continuations: std.ArrayList(ProtectedContinuation) = .empty,
     generic_for_continuations: std.ArrayList(GenericForContinuation) = .empty,
+    tail_call_continuations: std.ArrayList(TailCallContinuation) = .empty,
+    call_one_continuations: std.ArrayList(CallOneContinuation) = .empty,
     open_upvalues: ?*Upvalue = null,
+    hook: Value = .nil,
+    hook_call: bool = false,
+    hook_line: bool = false,
+    hook_return: bool = false,
+    hook_running: bool = false,
+    pending_yield_hook_return: bool = false,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
     yield_result_base: usize = 0,
     yield_result_count: u16 = 0,
-    yield_tail_return: bool = false,
-    yield_tail_base: bytecode.Register = 0,
-    yield_tail_count: u16 = 0,
     native_call_depth: usize = 0,
     protected_close_depth: usize = 0,
     close_error_value: ?Value = null,
@@ -337,6 +360,8 @@ pub const Thread = struct {
         self.yield_values.deinit(allocator);
         self.protected_continuations.deinit(allocator);
         self.generic_for_continuations.deinit(allocator);
+        self.tail_call_continuations.deinit(allocator);
+        self.call_one_continuations.deinit(allocator);
         self.frames.deinit(allocator);
         self.stack.deinit(allocator);
         self.* = undefined;
@@ -367,6 +392,7 @@ const CallFrame = struct {
     return_count: u16,
     varargs: []const Value,
     owns_varargs: bool = false,
+    last_hook_line: ?usize = null,
 
     fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
         if (self.owns_varargs) allocator.free(self.varargs);
@@ -718,6 +744,7 @@ pub const State = struct {
         try state.setTable(debug_lib, .{ .string = try state.intern("setupvalue") }, .{ .native = .debug_setupvalue });
         try state.setTable(debug_lib, .{ .string = try state.intern("upvalueid") }, .{ .native = .debug_upvalueid });
         try state.setTable(debug_lib, .{ .string = try state.intern("upvaluejoin") }, .{ .native = .debug_upvaluejoin });
+        try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
         try state.globals.put(try state.intern("debug"), debug_lib);
 
         const package_lib = try state.newTableWithHints(0, 8);
@@ -795,8 +822,15 @@ pub const State = struct {
 
     fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
         while (thread.frames.items.len > target_frame_count) {
-            if (try self.completeReadyGenericForContinuation(thread)) continue;
+            if (try self.completeReadyCallOneContinuation(thread)) continue;
             if (try self.completeReadyProtectedContinuation(thread)) continue;
+            if (try self.completeReadyTailCallContinuation(thread)) continue;
+            if (try self.completeReadyGenericForContinuation(thread)) continue;
+            if (thread.pending_yield_hook_return) {
+                thread.pending_yield_hook_return = false;
+                try self.callHook(thread, "return");
+                continue;
+            }
 
             var frame = &thread.frames.items[thread.frames.items.len - 1];
             const proto = frame.proto;
@@ -806,6 +840,7 @@ pub const State = struct {
             }
             const instruction = proto.instructions.items[frame.pc];
             frame.pc += 1;
+            try self.callLineHook(thread);
 
             switch (instruction) {
                 .load_nil => |dest| self.set(thread, dest, .nil),
@@ -814,32 +849,32 @@ pub const State = struct {
                 .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
                 .get_global => |op| self.set(thread, op.register, self.getGlobalValue(constantString(proto, op.name))),
                 .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
-                .add => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .add)),
-                .sub => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .sub)),
-                .mul => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .mul)),
-                .div => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .div)),
-                .idiv => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .idiv)),
-                .mod => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .mod)),
-                .pow => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .pow)),
-                .band => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .band)),
-                .bor => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .bor)),
-                .bxor => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .bxor)),
-                .shl => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .shl)),
-                .shr => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .shr)),
-                .unm => |op| self.set(thread, op.dest, try self.unaryOp(thread, self.get(thread, op.source), .unm)),
-                .bnot => |op| self.set(thread, op.dest, try self.unaryOp(thread, self.get(thread, op.source), .bnot)),
-                .concat => |op| self.set(thread, op.dest, try self.binaryOp(thread, self.get(thread, op.left), self.get(thread, op.right), .concat)),
-                .eq => |op| self.set(thread, op.dest, .{ .boolean = try self.equalValues(thread, self.get(thread, op.left), self.get(thread, op.right)) }),
-                .lt => |op| self.set(thread, op.dest, .{ .boolean = try self.compareValues(thread, self.get(thread, op.left), self.get(thread, op.right), .lt) }),
-                .le => |op| self.set(thread, op.dest, .{ .boolean = try self.compareValues(thread, self.get(thread, op.left), self.get(thread, op.right), .le) }),
+                .add => |op| try self.binaryOpToRegister(thread, op, .add),
+                .sub => |op| try self.binaryOpToRegister(thread, op, .sub),
+                .mul => |op| try self.binaryOpToRegister(thread, op, .mul),
+                .div => |op| try self.binaryOpToRegister(thread, op, .div),
+                .idiv => |op| try self.binaryOpToRegister(thread, op, .idiv),
+                .mod => |op| try self.binaryOpToRegister(thread, op, .mod),
+                .pow => |op| try self.binaryOpToRegister(thread, op, .pow),
+                .band => |op| try self.binaryOpToRegister(thread, op, .band),
+                .bor => |op| try self.binaryOpToRegister(thread, op, .bor),
+                .bxor => |op| try self.binaryOpToRegister(thread, op, .bxor),
+                .shl => |op| try self.binaryOpToRegister(thread, op, .shl),
+                .shr => |op| try self.binaryOpToRegister(thread, op, .shr),
+                .unm => |op| try self.unaryOpToRegister(thread, op, .unm),
+                .bnot => |op| try self.unaryOpToRegister(thread, op, .bnot),
+                .concat => |op| try self.binaryOpToRegister(thread, op, .concat),
+                .eq => |op| try self.equalValuesToRegister(thread, op),
+                .lt => |op| try self.compareValuesToRegister(thread, op, .lt),
+                .le => |op| try self.compareValuesToRegister(thread, op, .le),
                 .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
-                .len => |op| self.set(thread, op.dest, try self.lengthOf(thread, self.get(thread, op.source))),
+                .len => |op| try self.lengthToRegister(thread, op),
                 .new_table => |op| self.set(thread, op.dest, try self.newTableWithHints(op.array_hint, op.hash_hint)),
                 .set_list => |op| try self.setList(thread, op),
-                .get_table => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), self.get(thread, op.key), 0)),
-                .set_table => |op| try self.setTableFromThread(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
-                .get_field => |op| self.set(thread, op.dest, try self.getTableDepth(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, 0)),
-                .set_field => |op| try self.setTableFromThread(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
+                .get_table => |op| try self.getTableToRegister(thread, op.dest, self.get(thread, op.table), self.get(thread, op.key)),
+                .set_table => |op| try self.setTableFromThreadContinuable(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
+                .get_field => |op| try self.getTableToRegister(thread, op.dest, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }),
+                .set_field => |op| try self.setTableFromThreadContinuable(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
                 .jmp => |offset| try self.jumpThread(thread, offset, true),
                 .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) try self.jumpThread(thread, op.offset, true),
                 .test_set => |op| {
@@ -876,6 +911,11 @@ pub const State = struct {
     fn set(_: *State, thread: *Thread, register: bytecode.Register, value: Value) void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         thread.stack.items[frame.base + register] = value;
+    }
+
+    fn absoluteRegister(_: *State, thread: *Thread, register: bytecode.Register) usize {
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        return frame.base + @as(usize, register);
     }
 
     fn setGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -928,6 +968,36 @@ pub const State = struct {
         const depth: usize = @intCast(level);
         if (depth > thread.frames.items.len) return null;
         return thread.frames.items[thread.frames.items.len - depth].proto.debug_name;
+    }
+
+    pub fn setThreadHook(self: *State, target: *Thread, hook: Value, mask: []const u8) void {
+        _ = self;
+        target.hook = hook;
+        target.hook_call = false;
+        target.hook_line = false;
+        target.hook_return = false;
+        target.pending_yield_hook_return = false;
+        if (hook == .nil) return;
+        target.hook_call = std.mem.indexOfScalar(u8, mask, 'c') != null;
+        target.hook_line = std.mem.indexOfScalar(u8, mask, 'l') != null;
+        target.hook_return = std.mem.indexOfScalar(u8, mask, 'r') != null;
+    }
+
+    fn callHook(self: *State, thread: *Thread, event: []const u8) !void {
+        if (thread.hook == .nil or thread.hook_running) return;
+        thread.hook_running = true;
+        defer thread.hook_running = false;
+        _ = try self.callOneResult(thread, thread.hook, &.{.{ .string = try self.intern(event) }});
+    }
+
+    fn callLineHook(self: *State, thread: *Thread) !void {
+        if (!thread.hook_line or thread.hook == .nil or thread.hook_running) return;
+        if (thread.frames.items.len == 0) return;
+        const frame_index = thread.frames.items.len - 1;
+        const line = lineForFrame(thread.frames.items[frame_index]) orelse return;
+        if (thread.frames.items[frame_index].last_hook_line == line) return;
+        thread.frames.items[frame_index].last_hook_line = line;
+        try self.callHook(thread, "line");
     }
 
     pub fn putGlobal(self: *State, name: []const u8, value: Value) !void {
@@ -1515,6 +1585,31 @@ pub const State = struct {
         return self.getTableDepth(thread, table_value, key_value, 0);
     }
 
+    fn getTableToRegister(self: *State, thread: *Thread, dest: bytecode.Register, table_value: Value, key_value: Value) !void {
+        const value = try self.getTableDepthContinuable(thread, self.absoluteRegister(thread, dest), table_value, key_value, 0);
+        self.set(thread, dest, value);
+    }
+
+    fn getTableDepthContinuable(self: *State, thread: *Thread, dest: usize, table_value: Value, key_value: Value, depth: usize) !Value {
+        if (depth > max_metamethod_depth) return self.fail("'__index' chain too long");
+        const key = try self.readableTableKey(key_value) orelse return .nil;
+
+        if (table_value == .table) {
+            const value = table_value.table.get(key);
+            if (value != .nil) return value;
+        }
+
+        const metamethod = try self.getMetamethod(table_value, "__index") orelse {
+            if (table_value == .table) return .nil;
+            return self.fail(indexErrorMessage(table_value));
+        };
+
+        return switch (metamethod) {
+            .table => self.getTableDepthContinuable(thread, dest, metamethod, key, depth + 1),
+            else => try self.callOneResultWithContinuation(thread, metamethod, &.{ table_value, key }, .{ .value = dest }),
+        };
+    }
+
     fn getTableDepth(self: *State, thread: ?*Thread, table_value: Value, key_value: Value, depth: usize) !Value {
         if (depth > max_metamethod_depth) return self.fail("'__index' chain too long");
         const key = try self.readableTableKey(key_value) orelse return .nil;
@@ -1553,6 +1648,38 @@ pub const State = struct {
 
     pub fn setTableFromThread(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
         try self.setTableDepth(thread, table_value, key_value, value, 0);
+    }
+
+    fn setTableFromThreadContinuable(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value) !void {
+        try self.setTableDepthContinuable(thread, table_value, key_value, value, 0);
+    }
+
+    fn setTableDepthContinuable(self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value, depth: usize) !void {
+        if (depth > max_metamethod_depth) return self.fail("'__newindex' chain too long");
+        const key = try self.writableTableKey(key_value);
+
+        if (table_value == .table) {
+            const table = table_value.table;
+            if (table.get(key) != .nil) {
+                try table.set(self.allocator, key, value);
+                self.writeTableBarrier(table, key, value);
+                return;
+            }
+        }
+
+        const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
+            if (table_value == .table) {
+                try table_value.table.set(self.allocator, key, value);
+                self.writeTableBarrier(table_value.table, key, value);
+                return;
+            }
+            return self.fail(indexErrorMessage(table_value));
+        };
+
+        switch (metamethod) {
+            .table => try self.setTableDepthContinuable(thread, metamethod, key, value, depth + 1),
+            else => _ = try self.callOneResultWithContinuation(thread, metamethod, &.{ table_value, key, value }, .discard),
+        }
     }
 
     fn setTableDepth(self: *State, thread: ?*Thread, table_value: Value, key_value: Value, value: Value, depth: usize) !void {
@@ -1641,6 +1768,8 @@ pub const State = struct {
         defer {
             if (entering_native) thread.native_call_depth -= 1;
         }
+        const hook_native = isNativeCallable(callee) and !thread.hook_running;
+        if (hook_native and thread.hook_call) try self.callHook(thread, "call");
         switch (callee) {
             .closure => |closure| try self.callClosure(thread, resolved, closure),
             .native_print => {
@@ -1720,6 +1849,7 @@ pub const State = struct {
                 try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
             },
         }
+        if (hook_native and thread.hook_return) try self.callHook(thread, "return");
     }
 
     fn prependCallArgument(self: *State, thread: *Thread, resolved: bytecode.Call, metamethod: Value, receiver: Value) !void {
@@ -1736,6 +1866,14 @@ pub const State = struct {
     }
 
     pub fn callOneResult(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!Value {
+        return self.callOneResultMaybeContinuation(thread, callable, args, null);
+    }
+
+    fn callOneResultWithContinuation(self: *State, thread: *Thread, callable: Value, args: []const Value, result: CallOneContinuationResult) anyerror!Value {
+        return self.callOneResultMaybeContinuation(thread, callable, args, result);
+    }
+
+    fn callOneResultMaybeContinuation(self: *State, thread: *Thread, callable: Value, args: []const Value, continuation_result: ?CallOneContinuationResult) anyerror!Value {
         const frame_count = thread.frames.items.len;
         const frame = thread.frames.items[frame_count - 1];
         const relative_base: bytecode.Register = frame.proto.max_registers;
@@ -1744,9 +1882,46 @@ pub const State = struct {
         thread.stack.items[base] = callable;
         for (args, 0..) |arg, index| thread.stack.items[base + 1 + index] = arg;
 
-        try self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = 1 }, 0);
-        try self.runThreadUntil(thread, frame_count);
+        self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = 1 }, 0) catch |err| switch (err) {
+            error.CoroutineYield => {
+                if (continuation_result) |result| try self.pushCallOneContinuation(thread, frame_count, result);
+                return err;
+            },
+            else => return err,
+        };
+        self.runThreadUntil(thread, frame_count) catch |err| switch (err) {
+            error.CoroutineYield => {
+                if (continuation_result) |result| try self.pushCallOneContinuation(thread, frame_count, result);
+                return err;
+            },
+            else => return err,
+        };
         return thread.stack.items[base];
+    }
+
+    fn pushCallOneContinuation(self: *State, thread: *Thread, frame_count: usize, result: CallOneContinuationResult) !void {
+        try thread.call_one_continuations.append(self.allocator, .{ .frame_count = frame_count, .result = result });
+    }
+
+    fn readyCallOneContinuationIndex(thread: *Thread) ?usize {
+        for (thread.call_one_continuations.items, 0..) |continuation, index| {
+            if (continuation.frame_count == thread.frames.items.len) return index;
+        }
+        return null;
+    }
+
+    fn completeReadyCallOneContinuation(self: *State, thread: *Thread) !bool {
+        _ = self;
+        const index = readyCallOneContinuationIndex(thread) orelse return false;
+        const continuation = thread.call_one_continuations.orderedRemove(index);
+        const value = if (thread.last_result_count == 0) Value.nil else thread.stack.items[thread.last_result_base];
+        switch (continuation.result) {
+            .value => |dest| thread.stack.items[dest] = value,
+            .truthy => |dest| thread.stack.items[dest] = .{ .boolean = truthy(value) },
+            .inverted_truthy => |dest| thread.stack.items[dest] = .{ .boolean = !truthy(value) },
+            .discard => {},
+        }
+        return true;
     }
 
     pub fn protectedCall(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
@@ -1960,6 +2135,100 @@ pub const State = struct {
         return self.getMetamethod(rhs, name);
     }
 
+    fn binaryOpToRegister(self: *State, thread: *Thread, op: bytecode.Binary, kind: BinaryOp) !void {
+        const lhs = self.get(thread, op.left);
+        const rhs = self.get(thread, op.right);
+        if (kind == .concat and luaStringLike(lhs) and luaStringLike(rhs)) {
+            self.set(thread, op.dest, try self.concatValues(lhs, rhs));
+            return;
+        }
+        const raw = rawBinaryOp(lhs, rhs, kind) catch |err| switch (err) {
+            error.RuntimeError => if ((kind == .idiv or kind == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail("divide by zero") else return err,
+        };
+        if (raw) |value| {
+            self.set(thread, op.dest, value);
+            return;
+        }
+
+        const metamethod_name = binaryMetamethod(kind);
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse {
+            if (bitwiseIntegerError(lhs, rhs, kind)) |message| return self.fail(message);
+            return self.fail("attempt to perform operation on unsupported values");
+        };
+        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .value = self.absoluteRegister(thread, op.dest) });
+        self.set(thread, op.dest, result);
+    }
+
+    fn unaryOpToRegister(self: *State, thread: *Thread, op: bytecode.Unary, kind: UnaryMetamethodOp) !void {
+        const value = self.get(thread, op.source);
+        if (rawUnaryOp(value, kind)) |result| {
+            self.set(thread, op.dest, result);
+            return;
+        }
+        const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.fail("attempt to perform operation on unsupported value");
+        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{value}, .{ .value = self.absoluteRegister(thread, op.dest) });
+        self.set(thread, op.dest, result);
+    }
+
+    fn equalValuesToRegister(self: *State, thread: *Thread, op: bytecode.Binary) !void {
+        const lhs = self.get(thread, op.left);
+        const rhs = self.get(thread, op.right);
+        if (valuesEqual(lhs, rhs)) {
+            self.set(thread, op.dest, .{ .boolean = true });
+            return;
+        }
+        if (lhs != .table or rhs != .table) {
+            self.set(thread, op.dest, .{ .boolean = false });
+            return;
+        }
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__eq")) orelse {
+            self.set(thread, op.dest, .{ .boolean = false });
+            return;
+        };
+        const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+        self.set(thread, op.dest, .{ .boolean = truthy(result) });
+    }
+
+    fn compareValuesToRegister(self: *State, thread: *Thread, op: bytecode.Binary, kind: CompareOp) !void {
+        const lhs = self.get(thread, op.left);
+        const rhs = self.get(thread, op.right);
+        if (rawCompare(lhs, rhs, kind)) |result| {
+            self.set(thread, op.dest, .{ .boolean = result });
+            return;
+        }
+        switch (kind) {
+            .lt => {
+                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+                self.set(thread, op.dest, .{ .boolean = truthy(result) });
+            },
+            .le => {
+                if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
+                    const result = try self.callOneResultWithContinuation(thread, metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
+                    self.set(thread, op.dest, .{ .boolean = truthy(result) });
+                    return;
+                }
+                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const result = try self.callOneResultWithContinuation(thread, lt, &.{ rhs, lhs }, .{ .inverted_truthy = self.absoluteRegister(thread, op.dest) });
+                self.set(thread, op.dest, .{ .boolean = !truthy(result) });
+            },
+        }
+    }
+
+    fn lengthToRegister(self: *State, thread: *Thread, op: bytecode.Unary) !void {
+        const value = self.get(thread, op.source);
+        switch (value) {
+            .string => |string| self.set(thread, op.dest, .{ .integer = @intCast(string.len) }),
+            .table => |table| if ((try self.getMetamethod(value, "__len"))) |metamethod| {
+                const result = try self.callOneResultWithContinuation(thread, metamethod, &.{value}, .{ .value = self.absoluteRegister(thread, op.dest) });
+                self.set(thread, op.dest, result);
+            } else {
+                self.set(thread, op.dest, .{ .integer = table.len() });
+            },
+            else => return self.fail("attempt to get length of a non-string value"),
+        }
+    }
+
     fn rawLen(self: *State, value: Value) !Value {
         return switch (value) {
             .string => |string| .{ .integer = @intCast(string.len) },
@@ -2020,6 +2289,7 @@ pub const State = struct {
         var frame = try self.prepareClosureFrame(thread, closure, base, base, @intCast(op.arg_count), base, op.return_count);
         errdefer frame.deinit(self.allocator);
         try thread.frames.append(self.allocator, frame);
+        if (thread.hook_call and !thread.hook_running) try self.callHook(thread, "call");
     }
 
     fn tailCallValue(self: *State, thread: *Thread, op: bytecode.Call) anyerror!void {
@@ -2055,9 +2325,7 @@ pub const State = struct {
                 const frame_count = thread.frames.items.len;
                 self.callValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count, .return_count = frame.return_count }) catch |err| switch (err) {
                     error.CoroutineYield => {
-                        thread.yield_tail_return = true;
-                        thread.yield_tail_base = resolved.base;
-                        thread.yield_tail_count = frame.return_count;
+                        try self.pushTailCallContinuation(thread, frame_count, resolved.base, frame.return_count);
                         return err;
                     },
                     else => return err,
@@ -2075,6 +2343,7 @@ pub const State = struct {
         const preserved = try self.allocator.alloc(Value, source_count);
         defer self.allocator.free(preserved);
         for (preserved, 0..) |*value, index| value.* = thread.stack.items[source_start + index];
+        if (thread.hook_return and !thread.hook_running) try self.callHook(thread, "return");
         try self.closeActiveToBeClosedInTopFrame(thread, null);
         self.closeUpvalues(thread, frame.base);
         if (thread.frames.items.len == 1) {
@@ -2356,6 +2625,7 @@ pub const State = struct {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         thread.yield_result_base = frame.base + op.base;
         thread.yield_result_count = op.return_count;
+        if (thread.hook_return and !thread.hook_running) thread.pending_yield_hook_return = true;
         thread.status = .suspended;
         return error.CoroutineYield;
     }
@@ -2474,6 +2744,7 @@ pub const State = struct {
 
         const parent = self.current_thread;
         if (parent == target) return .{ .failure = .{ .string = try self.intern("cannot resume running coroutine") } };
+        if (resumeChainDepth(parent) >= max_call_frames) return .{ .failure = .{ .string = try self.intern("stack overflow") } };
 
         if (parent) |parent_thread| {
             if (parent_thread.status == .running) parent_thread.status = .normal;
@@ -2541,6 +2812,7 @@ pub const State = struct {
         errdefer frame.deinit(self.allocator);
         try target.frames.append(self.allocator, frame);
         target.started = true;
+        if (target.hook_call and !target.hook_running) try self.callHook(target, "call");
     }
 
     fn callableEntryClosure(self: *State) !*Closure {
@@ -2574,12 +2846,6 @@ pub const State = struct {
         }
         target.last_result_base = target.yield_result_base;
         target.last_result_count = actual_count;
-        if (target.yield_tail_return) {
-            const tail_base = target.yield_tail_base;
-            const tail_count = target.yield_tail_count;
-            target.yield_tail_return = false;
-            try self.returnFromFrame(target, tail_base, tail_count);
-        }
     }
 
     fn returnCoroutineResumeResult(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, result: CoroutineResumeResult) !void {
@@ -2743,6 +3009,30 @@ pub const State = struct {
         if (!(try self.applyGenericForValues(thread, continuation.op, values)) and continuation.jump_on_nil) {
             try self.jumpThread(thread, continuation.op.offset, false);
         }
+        return true;
+    }
+
+    fn pushTailCallContinuation(self: *State, thread: *Thread, frame_count: usize, base: bytecode.Register, return_count: u16) !void {
+        try thread.tail_call_continuations.append(self.allocator, .{
+            .frame_count = frame_count,
+            .base = base,
+            .return_count = return_count,
+        });
+    }
+
+    fn readyTailCallContinuationIndex(thread: *Thread) ?usize {
+        var index = thread.tail_call_continuations.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (thread.tail_call_continuations.items[index].frame_count == thread.frames.items.len) return index;
+        }
+        return null;
+    }
+
+    fn completeReadyTailCallContinuation(self: *State, thread: *Thread) !bool {
+        const index = readyTailCallContinuationIndex(thread) orelse return false;
+        const continuation = thread.tail_call_continuations.orderedRemove(index);
+        try self.returnFromFrame(thread, continuation.base, continuation.return_count);
         return true;
     }
 
@@ -2981,7 +3271,6 @@ pub const State = struct {
         upvalue.marked = true;
         if (upvalue.is_open) {
             if (upvalue.stack_index < upvalue.owner.stack.items.len) self.markValue(upvalue.owner.stack.items[upvalue.stack_index]);
-            self.markThread(upvalue.owner);
         } else {
             self.markValue(upvalue.closed);
         }
@@ -2993,6 +3282,7 @@ pub const State = struct {
         self.markValue(thread.entry);
         if (thread.resume_parent) |parent| self.markThread(parent);
         self.markThreadStack(thread);
+        self.markValue(thread.hook);
         for (thread.yield_values.items) |value| self.markValue(value);
         if (thread.close_error_value) |value| self.markValue(value);
         for (thread.protected_continuations.items) |continuation| {
@@ -3226,6 +3516,7 @@ pub const State = struct {
                 index += 1;
                 continue;
             }
+            self.closeUpvalues(thread, 0);
             self.destroyThread(thread);
             _ = self.thread_allocations.swapRemove(index);
         }
@@ -3758,6 +4049,13 @@ fn threadStatusName(status: ThreadStatus) []const u8 {
         .normal => "normal",
         .dead => "dead",
     };
+}
+
+fn resumeChainDepth(thread: ?*Thread) usize {
+    var depth: usize = 0;
+    var current = thread;
+    while (current) |active| : (current = active.resume_parent) depth += 1;
+    return depth;
 }
 
 fn lessThan(lhs: Value, rhs: Value) !bool {
