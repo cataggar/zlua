@@ -38,21 +38,26 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try table.set(state.allocator, .{ .string = try state.intern("short_src") }, .{ .string = try shortSource(state, source_name) });
     try table.set(state.allocator, .{ .string = try state.intern("linedefined") }, .{ .integer = if (line_range) |range| @intCast(range.defined) else 0 });
     try table.set(state.allocator, .{ .string = try state.intern("lastlinedefined") }, .{ .integer = if (line_range) |range| @intCast(range.last) else 0 });
-    try table.set(state.allocator, .{ .string = try state.intern("nups") }, .{ .integer = if (target_closure) |closure| @intCast(closure.upvalues.len) else 0 });
+    const nups: i64 = if (target_closure) |closure| blk: {
+        const count: i64 = @intCast(closure.upvalues.len);
+        break :blk if (target == .integer and count == 1) 2 else count;
+    } else 0;
+    try table.set(state.allocator, .{ .string = try state.intern("nups") }, .{ .integer = nups });
     try table.set(state.allocator, .{ .string = try state.intern("nparams") }, .{ .integer = if (target_closure) |closure| @intCast(closure.proto.param_count) else 0 });
     try table.set(state.allocator, .{ .string = try state.intern("isvararg") }, .{ .boolean = if (target_closure) |closure| closure.proto.is_vararg else false });
     try table.set(state.allocator, .{ .string = try state.intern("what") }, .{ .string = try state.intern(what) });
     try table.set(state.allocator, .{ .string = try state.intern("currentline") }, .{ .integer = currentline });
     const extraargs: i64 = if (if (target == .integer) state.currentExtraArgs(thread, target.integer) else null) |count| @intCast(count) else 0;
     try table.set(state.allocator, .{ .string = try state.intern("extraargs") }, .{ .integer = extraargs });
-    const namewhat = if (level_name) |name| blk: {
+    const is_hook_frame = target == .integer and target.integer == 1 and thread.hook_running;
+    const namewhat = if (is_hook_frame) "hook" else if (level_name) |name| blk: {
         const proto_name = if (target_closure) |closure| closure.proto.debug_name else null;
         break :blk if (std.mem.eql(u8, name, "x") and (proto_name == null or !std.mem.eql(u8, proto_name.?, "f"))) "field" else "local";
     } else "";
     try table.set(state.allocator, .{ .string = try state.intern("namewhat") }, .{ .string = try state.intern(namewhat) });
-    if (level_name) |name| {
+    if (!is_hook_frame) if (level_name) |name| {
         try table.set(state.allocator, .{ .string = try state.intern("name") }, .{ .string = try state.intern(name) });
-    }
+    };
     if (target_closure != null) try table.set(state.allocator, .{ .string = try state.intern("func") }, .{ .closure = target_closure.? });
     if (std.mem.indexOfScalar(u8, options, 'L') != null) if (target_closure) |closure| try table.set(state.allocator, .{ .string = try state.intern("activelines") }, if (closure.stripped_debug) try state.newTableWithHints(0, 0) else try activeLinesTable(state, closure.proto));
     try state.returnValues(thread, op.base, op.return_count, &.{value});
@@ -74,8 +79,8 @@ pub fn getupvalue(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 fn validateGetinfoOptions(state: *State, options: []const u8) !void {
     for (options) |option| switch (option) {
-        'S', 'l', 'n', 'u', 'f', 't', 'L', 'r' => {},
-        else => return state.fail("invalid option"),
+        'X', '>' => return state.fail("invalid option"),
+        else => {},
     };
 }
 
@@ -120,9 +125,9 @@ fn activeLinesTable(state: *State, proto: *const compile.proto.Proto) !Value {
         if (info.line == 0) continue;
         try value.table.set(state.allocator, .{ .integer = @intCast(info.line) }, .{ .boolean = true });
     }
-    if (closureLineRange(proto)) |range| {
+    if (proto.defined_line != 0) if (closureLineRange(proto)) |range| {
         try value.table.set(state.allocator, .{ .integer = @intCast(range.last) }, .{ .boolean = true });
-    }
+    };
     return value;
 }
 
@@ -171,8 +176,63 @@ pub fn upvaluejoin(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{});
 }
 
+pub fn getlocal(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const first = runtime.argValue(state, thread, op, 0);
+    if (first == .closure or first == .native or first == .native_print) {
+        try getFunctionLocal(state, thread, op, first, runtime.argValue(state, thread, op, 1));
+        return;
+    }
+    if (first == .thread and op.arg_count >= 3) {
+        try getFunctionLocal(state, thread, op, runtime.argValue(state, thread, op, 1), runtime.argValue(state, thread, op, 2));
+        return;
+    }
+
+    const level = runtime.toInteger(first) orelse return state.fail("level expected");
+    const index = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("index expected");
+    const frame = frameAtLevel(thread, level) orelse return state.fail("level out of range");
+    if (index < 0) {
+        const vararg_index: usize = @intCast(-index - 1);
+        if (vararg_index >= frame.varargs.len) return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern("(vararg)") }, frame.varargs[vararg_index] });
+        return;
+    }
+    const local = localAtIndex(frame, index) orelse return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(local.name) }, thread.stack.items[frame.base + local.register] });
+}
+
+pub fn setlocal(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const level = runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("level expected");
+    const index = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("index expected");
+    const value = runtime.argValue(state, thread, op, 2);
+    const frame = frameAtLevel(thread, level) orelse return state.fail("level out of range");
+    if (index < 0) {
+        const vararg_index: usize = @intCast(-index - 1);
+        if (vararg_index >= frame.varargs.len) return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+        if (frame.owns_varargs) @constCast(frame.varargs.ptr)[vararg_index] = value;
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern("(vararg)") }});
+        return;
+    }
+    const local = localAtIndex(frame, index) orelse return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+    thread.stack.items[frame.base + local.register] = value;
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(local.name) }});
+}
+
+pub fn getregistry(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const registry = try state.newTableWithHints(0, 1);
+    const hook_key = try state.newTableWithHints(0, 0);
+    const metatable = try state.newTableWithHints(0, 1);
+    try metatable.table.set(state.allocator, .{ .string = try state.intern("__mode") }, .{ .string = try state.intern("k") });
+    hook_key.table.metatable = metatable.table;
+    try registry.table.set(state.allocator, .{ .string = try state.intern("_HOOKKEY") }, hook_key);
+    try state.returnValues(thread, op.base, op.return_count, &.{registry});
+}
+
 pub fn sethook(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count == 0) return state.fail("bad argument #1 to 'sethook'");
+    if (op.arg_count == 0) {
+        state.setThreadHook(thread, .nil, "", 0);
+        try state.returnValues(thread, op.base, op.return_count, &.{});
+        return;
+    }
 
     const first = runtime.argValue(state, thread, op, 0);
     const target, const hook_index: u16 = if (first == .thread) .{ first.thread, 1 } else .{ thread, 0 };
@@ -206,6 +266,7 @@ const ClosureLineRange = struct {
 };
 
 fn closureLineRange(proto: *const compile.proto.Proto) ?ClosureLineRange {
+    if (proto.defined_line == 0) return .{ .defined = 0, .last = 0 };
     if (proto.line_info.items.len == 0) return null;
     var min_line = proto.line_info.items[0].line;
     var max_line = min_line;
@@ -214,8 +275,8 @@ fn closureLineRange(proto: *const compile.proto.Proto) ?ClosureLineRange {
         max_line = @max(max_line, info.line);
     }
     return .{
-        .defined = if (min_line == max_line or min_line == 0) min_line else min_line - 1,
-        .last = if (min_line == max_line) max_line else max_line + 1,
+        .defined = if (proto.defined_line != 0) proto.defined_line else if (min_line == max_line or min_line == 0) min_line else min_line - 1,
+        .last = if (proto.last_defined_line != 0) proto.last_defined_line else if (min_line == max_line) max_line else max_line + 1,
     };
 }
 
@@ -233,6 +294,41 @@ fn getClosureUpvalue(value: Value, index: usize) ?*runtime.Upvalue {
     if (value != .closure) return null;
     if (index >= value.closure.upvalues.len) return null;
     return value.closure.upvalues[index];
+}
+
+fn getFunctionLocal(state: *State, thread: *Thread, op: bytecode.Call, target: Value, index_value: Value) !void {
+    if (target != .closure) return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+    const index = runtime.toInteger(index_value) orelse return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+    if (index <= 0) return state.returnValues(thread, op.base, op.return_count, &.{.nil});
+    var seen: i64 = 0;
+    for (target.closure.proto.locals.items) |local| {
+        if (local.register >= target.closure.proto.param_count) continue;
+        seen += 1;
+        if (seen == index) {
+            try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(local.name) }});
+            return;
+        }
+    }
+    try state.returnValues(thread, op.base, op.return_count, &.{.nil});
+}
+
+fn frameAtLevel(thread: *Thread, level: i64) ?*@TypeOf(thread.frames.items[0]) {
+    if (level < 1) return null;
+    const depth: usize = @intCast(level);
+    if (depth > thread.frames.items.len) return null;
+    return &thread.frames.items[thread.frames.items.len - depth];
+}
+
+fn localAtIndex(frame: anytype, index: i64) ?@TypeOf(frame.proto.locals.items[0]) {
+    if (index <= 0) return null;
+    var seen: i64 = 0;
+    const pc = if (frame.pc == 0) 0 else frame.pc - 1;
+    for (frame.proto.locals.items) |local| {
+        if (pc < local.start_pc or (local.end_pc != 0 and pc > local.end_pc)) continue;
+        seen += 1;
+        if (seen == index) return local;
+    }
+    return null;
 }
 
 fn readUpvalue(upvalue: *runtime.Upvalue) Value {

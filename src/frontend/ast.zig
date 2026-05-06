@@ -89,6 +89,7 @@ pub const IfBranch = struct {
 pub const WhileStmt = struct {
     condition: *Expr,
     body: Block,
+    end_line: usize,
 };
 
 pub const RepeatStmt = struct {
@@ -102,15 +103,18 @@ pub const NumericFor = struct {
     limit: *Expr,
     step: ?*Expr,
     body: Block,
+    end_line: usize,
 };
 
 pub const GenericFor = struct {
     names: []const Identifier,
     iterators: []const *Expr,
     body: Block,
+    end_line: usize,
 };
 
 pub const ReturnStmt = struct {
+    line: usize,
     values: []const *Expr,
 };
 
@@ -119,6 +123,8 @@ pub const FunctionBody = struct {
     is_vararg: bool,
     vararg_name: ?Identifier,
     body: Block,
+    defined_line: usize,
+    end_line: usize,
 };
 
 pub const Expr = union(enum) {
@@ -229,6 +235,7 @@ pub const BinaryOp = enum {
 
 pub const BinaryExpr = struct {
     op: BinaryOp,
+    op_line: usize,
     left: *Expr,
     right: *Expr,
 };

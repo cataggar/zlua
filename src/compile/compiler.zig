@@ -74,6 +74,7 @@ const FunctionCompiler = struct {
     loops: std.ArrayList(Loop) = .empty,
     next_register: bytecode.Register = 0,
     current_line: usize = 1,
+    forced_line: ?usize = null,
 
     fn init(allocator: std.mem.Allocator, proto: *proto_mod.Proto, parent: ?*FunctionCompiler) FunctionCompiler {
         return .{ .allocator = allocator, .proto = proto, .parent = parent };
@@ -94,9 +95,11 @@ const FunctionCompiler = struct {
         try self.enterScope();
         const env = try self.declareLocal("_ENV");
         const env_upvalue = try self.proto.addUpvalue(.{ .name = "_ENV", .in_stack = false, .index = 0 });
+        self.current_line = 0;
         _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = env_upvalue } });
         try self.compileBlock(block);
         if (!blockEndsWithReturn(block)) {
+            self.current_line = 0;
             _ = try self.emit(.{ .ret = .{ .first = 0, .count = 0 } });
         }
         try self.patchPendingGotos();
@@ -109,6 +112,8 @@ const FunctionCompiler = struct {
         child.* = proto_mod.Proto.init(self.allocator);
         errdefer child.deinit();
         if (debug_name) |name| try child.setDebugName(name);
+        child.defined_line = body.defined_line;
+        child.last_defined_line = body.end_line;
 
         var child_context = FunctionCompiler.init(self.allocator, child, self);
         errdefer child_context.deinit();
@@ -123,6 +128,7 @@ const FunctionCompiler = struct {
         }
         try child_context.compileBlock(body.body);
         if (!blockEndsWithReturn(body.body)) {
+            child_context.current_line = body.end_line;
             _ = try child_context.emit(.{ .ret = .{ .first = 0, .count = 0 } });
         }
         try child_context.patchPendingGotos();
@@ -240,6 +246,7 @@ const FunctionCompiler = struct {
         const closure_reg = try self.allocReg();
         const child = try self.compileFunctionBody(decl.body, decl.name.method != null, functionDeclDebugName(decl.name));
         const child_index = try self.proto.addChild(child);
+        self.current_line = decl.body.end_line;
         _ = try self.emit(.{ .closure = .{ .dest = closure_reg, .proto = child_index } });
 
         if (decl.name.fields.len == 0 and decl.name.method == null) {
@@ -266,12 +273,14 @@ const FunctionCompiler = struct {
         const register = try self.declareLocal(decl.name.name);
         const child = try self.compileFunctionBody(decl.body, false, decl.name.name);
         const child_index = try self.proto.addChild(child);
+        self.current_line = decl.body.end_line;
         _ = try self.emit(.{ .closure = .{ .dest = register, .proto = child_index } });
     }
 
     fn compileIf(self: *FunctionCompiler, stmt: ast.IfStmt) anyerror!void {
         var end_jumps = std.ArrayList(usize).empty;
         defer end_jumps.deinit(self.allocator);
+        const end_line = ifEndLine(stmt);
 
         for (stmt.branches) |branch| {
             const mark = self.registerMark();
@@ -281,15 +290,19 @@ const FunctionCompiler = struct {
             self.release(mark);
 
             try self.compileScopedBlock(branch.body);
+            self.current_line = end_line;
             try end_jumps.append(self.allocator, try self.emit(.{ .jmp = 0 }));
             try self.proto.patchJump(skip, self.proto.pc());
         }
 
         if (stmt.else_block) |else_block| try self.compileScopedBlock(else_block);
+        self.current_line = end_line;
+        _ = try self.emit(.{ .jmp = 0 });
         for (end_jumps.items) |jump| try self.proto.patchJump(jump, self.proto.pc());
     }
 
     fn compileWhile(self: *FunctionCompiler, stmt: ast.WhileStmt) anyerror!void {
+        const end_line = stmt.end_line;
         const loop_start = self.proto.pc();
         const mark = self.registerMark();
         const condition = try self.allocReg();
@@ -299,11 +312,14 @@ const FunctionCompiler = struct {
 
         try self.enterLoop();
         try self.compileScopedBlock(stmt.body);
-        try self.leaveLoop(self.proto.pc() + 1);
+        try self.leaveLoop(self.proto.pc() + 2);
 
         const back = try self.emit(.{ .jmp = 0 });
         try self.proto.patchJump(back, loop_start);
-        try self.proto.patchJump(done, self.proto.pc());
+        const end_marker = self.proto.pc();
+        self.current_line = end_line;
+        _ = try self.emit(.{ .jmp = 0 });
+        try self.proto.patchJump(done, end_marker);
     }
 
     fn compileRepeat(self: *FunctionCompiler, stmt: ast.RepeatStmt) anyerror!void {
@@ -324,6 +340,8 @@ const FunctionCompiler = struct {
     }
 
     fn compileNumericFor(self: *FunctionCompiler, stmt: ast.NumericFor) anyerror!void {
+        const loop_line = stmt.name.span.start.line;
+        const end_line = stmt.end_line;
         try self.enterScope();
         const base = try self.allocReg();
         try self.compileExpr(stmt.start, base);
@@ -345,14 +363,19 @@ const FunctionCompiler = struct {
         try self.enterLoop();
         try self.compileScopedBlock(stmt.body);
         _ = try self.emit(.{ .close = base });
-        try self.leaveLoop(self.proto.pc() + 1);
+        try self.leaveLoop(self.proto.pc() + 2);
+        self.current_line = loop_line;
         const loop = try self.emit(.{ .for_loop = .{ .base = base, .offset = 0 } });
         try self.proto.patchJump(loop, body_start);
-        try self.proto.patchJump(prep, self.proto.pc());
+        const end_marker = self.proto.pc();
+        self.current_line = end_line;
+        _ = try self.emit(.{ .jmp = 0 });
+        try self.proto.patchJump(prep, end_marker);
         try self.leaveScope();
     }
 
     fn compileGenericFor(self: *FunctionCompiler, stmt: ast.GenericFor) anyerror!void {
+        const end_line = stmt.end_line;
         try self.enterScope();
         const base = self.registerMark();
 
@@ -382,10 +405,14 @@ const FunctionCompiler = struct {
         try self.enterLoop();
         try self.compileScopedBlock(stmt.body);
         if (stmt.names.len != 0) _ = try self.emit(.{ .close = base + 4 });
-        try self.leaveLoop(self.proto.pc() + 1);
+        try self.leaveLoop(self.proto.pc() + 2);
+        self.current_line = 0;
         const loop = try self.emit(.{ .tfor_loop = .{ .base = base, .variable_count = @intCast(stmt.names.len), .offset = 0 } });
         try self.proto.patchJump(loop, loop_start);
-        try self.proto.patchJump(prep, self.proto.pc());
+        const end_marker = self.proto.pc();
+        self.current_line = end_line;
+        _ = try self.emit(.{ .jmp = 0 });
+        try self.proto.patchJump(prep, end_marker);
         try self.leaveScope();
     }
 
@@ -486,6 +513,7 @@ const FunctionCompiler = struct {
     fn compileFunctionLiteral(self: *FunctionCompiler, body: ast.FunctionBody, dest: bytecode.Register, debug_name: ?[]const u8) !void {
         const child = try self.compileFunctionBody(body, false, debug_name);
         const child_index = try self.proto.addChild(child);
+        self.current_line = body.end_line;
         _ = try self.emit(.{ .closure = .{ .dest = dest, .proto = child_index } });
     }
 
@@ -563,15 +591,25 @@ const FunctionCompiler = struct {
         const mark = self.registerMark();
         const left = try self.allocReg();
         const right = try self.allocReg();
-        try self.compileExpr(binary.left, left);
+        try self.compileExprForcedLine(binary.left, left, binary.op_line);
         try self.compileExpr(binary.right, right);
+        const right_line = exprLine(binary.right.*);
+        self.current_line = binary.op_line;
         if (binary.op == .ne) {
             _ = try self.emit(.{ .eq = .{ .dest = dest, .left = left, .right = right } });
             _ = try self.emit(.{ .not = .{ .dest = dest, .source = dest } });
         } else {
             _ = try self.emit(binaryInstruction(binary.op, dest, left, right));
         }
+        self.current_line = right_line;
         self.release(mark);
+    }
+
+    fn compileExprForcedLine(self: *FunctionCompiler, expr: *const ast.Expr, dest: bytecode.Register, line: usize) anyerror!void {
+        const previous = self.forced_line;
+        self.forced_line = line;
+        defer self.forced_line = previous;
+        try self.compileExpr(expr, dest);
     }
 
     fn compileCallInto(self: *FunctionCompiler, expr: *const ast.Expr, returns: u16, dest: bytecode.Register, tail: bool) anyerror!bytecode.Register {
@@ -939,7 +977,7 @@ const FunctionCompiler = struct {
     }
 
     fn emit(self: *FunctionCompiler, instruction: bytecode.Instruction) !usize {
-        return self.proto.emit(instruction, self.current_line);
+        return self.proto.emit(instruction, self.forced_line orelse self.current_line);
     }
 
     fn nameConstant(self: *FunctionCompiler, name: []const u8) !bytecode.ConstantIndex {
@@ -1031,8 +1069,39 @@ fn stmtLine(statement: ast.Stmt) usize {
         .goto_stmt => |name| name.span.start.line,
         .label_stmt => |name| name.span.start.line,
         .do_block => |block| if (block.len > 0) stmtLine(block[0]) else 1,
-        .return_stmt => |stmt| if (stmt.values.len > 0) exprLine(stmt.values[0].*) else 1,
+        .return_stmt => |stmt| if (stmt.values.len > 0) exprLine(stmt.values[0].*) else stmt.line,
         .call_stmt => |call| exprLine(call.*),
+    };
+}
+
+fn ifEndLine(stmt: ast.IfStmt) usize {
+    var last_line: usize = if (stmt.branches.len > 0) exprLine(stmt.branches[0].condition.*) else 1;
+    for (stmt.branches) |branch| {
+        last_line = @max(last_line, exprLine(branch.condition.*));
+        last_line = @max(last_line, blockLastLine(branch.body));
+    }
+    if (stmt.else_block) |else_block| last_line = @max(last_line, blockLastLine(else_block));
+    return last_line + 1;
+}
+
+fn blockLastLine(block: ast.Block) usize {
+    if (block.len == 0) return 1;
+    var last_line: usize = 1;
+    for (block) |statement| last_line = @max(last_line, stmtApproxEndLine(statement));
+    return last_line;
+}
+
+fn stmtApproxEndLine(statement: ast.Stmt) usize {
+    return switch (statement) {
+        .if_stmt => |stmt| ifEndLine(stmt),
+        .while_stmt => |stmt| stmt.end_line,
+        .repeat_stmt => |stmt| @max(blockLastLine(stmt.body), exprLine(stmt.condition.*)),
+        .numeric_for => |stmt| stmt.end_line,
+        .generic_for => |stmt| stmt.end_line,
+        .function_decl => |decl| decl.body.end_line,
+        .local_function_decl => |decl| decl.body.end_line,
+        .do_block => |block| blockLastLine(block) + 1,
+        else => stmtLine(statement),
     };
 }
 
@@ -1046,14 +1115,14 @@ fn exprLine(expr: ast.Expr) usize {
         .vararg => |span| span.start.line,
         .identifier => |identifier| identifier.span.start.line,
         .table_constructor => 1,
-        .function_literal => 1,
+        .function_literal => |body| body.end_line,
         .grouped => |inner| exprLine(inner.*),
         .index => |index| exprLine(index.receiver.*),
         .field => |field| exprLine(field.receiver.*),
         .call => |call| exprLine(call.callee.*),
         .method_call => |call| exprLine(call.receiver.*),
         .unary => |unary| exprLine(unary.operand.*),
-        .binary => |binary| exprLine(binary.left.*),
+        .binary => |binary| binary.op_line,
     };
 }
 

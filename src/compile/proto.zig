@@ -33,6 +33,8 @@ pub const Proto = struct {
     is_vararg: bool = false,
     source_name: []const u8 = "zlua",
     debug_name: ?[]const u8 = null,
+    defined_line: usize = 0,
+    last_defined_line: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Proto {
         return .{

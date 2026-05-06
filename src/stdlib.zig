@@ -101,6 +101,9 @@ pub const NativeFn = enum {
     debug_setupvalue,
     debug_upvalueid,
     debug_upvaluejoin,
+    debug_getlocal,
+    debug_setlocal,
+    debug_getregistry,
     debug_sethook,
     debug_gethook,
 
@@ -190,6 +193,9 @@ pub const NativeFn = enum {
             .debug_setupvalue => "debug.setupvalue",
             .debug_upvalueid => "debug.upvalueid",
             .debug_upvaluejoin => "debug.upvaluejoin",
+            .debug_getlocal => "debug.getlocal",
+            .debug_setlocal => "debug.setlocal",
+            .debug_getregistry => "debug.getregistry",
             .debug_sethook => "debug.sethook",
             .debug_gethook => "debug.gethook",
         };
@@ -282,6 +288,9 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_setupvalue => try debug.setupvalue(state, thread, op),
         .debug_upvalueid => try debug.upvalueid(state, thread, op),
         .debug_upvaluejoin => try debug.upvaluejoin(state, thread, op),
+        .debug_getlocal => try debug.getlocal(state, thread, op),
+        .debug_setlocal => try debug.setlocal(state, thread, op),
+        .debug_getregistry => try debug.getregistry(state, thread, op),
         .debug_sethook => try debug.sethook(state, thread, op),
         .debug_gethook => try debug.gethook(state, thread, op),
     }

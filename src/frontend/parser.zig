@@ -41,7 +41,7 @@ const Parser = struct {
         if (self.match(.keyword_function)) |_| return self.parseFunctionDeclaration();
         if (self.match(.keyword_local)) |_| return self.parseLocalStatement();
         if (self.match(.keyword_global)) |_| return self.parseGlobalDeclaration();
-        if (self.match(.keyword_return)) |_| return self.parseReturn();
+        if (self.match(.keyword_return)) |tok| return self.parseReturn(tok.span.start.line);
         return self.parseAssignmentOrCallStatement();
     }
 
@@ -61,8 +61,8 @@ const Parser = struct {
         const condition = try self.parseExpression(0);
         _ = try self.expect(.keyword_do);
         const body = try self.parseBlock(&.{.keyword_end});
-        _ = try self.expect(.keyword_end);
-        return .{ .while_stmt = .{ .condition = condition, .body = body } };
+        const end = try self.expect(.keyword_end);
+        return .{ .while_stmt = .{ .condition = condition, .body = body, .end_line = end.span.start.line } };
     }
 
     fn parseRepeat(self: *Parser) anyerror!ast.Stmt {
@@ -100,8 +100,8 @@ const Parser = struct {
             const step = if (self.match(.comma)) |_| try self.parseExpression(0) else null;
             _ = try self.expect(.keyword_do);
             const body = try self.parseBlock(&.{.keyword_end});
-            _ = try self.expect(.keyword_end);
-            return .{ .numeric_for = .{ .name = first_name, .start = start, .limit = limit, .step = step, .body = body } };
+            const end = try self.expect(.keyword_end);
+            return .{ .numeric_for = .{ .name = first_name, .start = start, .limit = limit, .step = step, .body = body, .end_line = end.span.start.line } };
         }
 
         var names = std.ArrayList(ast.Identifier).empty;
@@ -111,13 +111,13 @@ const Parser = struct {
         const iterators = try self.parseExpressionList();
         _ = try self.expect(.keyword_do);
         const body = try self.parseBlock(&.{.keyword_end});
-        _ = try self.expect(.keyword_end);
-        return .{ .generic_for = .{ .names = try names.toOwnedSlice(self.allocator), .iterators = iterators, .body = body } };
+        const end = try self.expect(.keyword_end);
+        return .{ .generic_for = .{ .names = try names.toOwnedSlice(self.allocator), .iterators = iterators, .body = body, .end_line = end.span.start.line } };
     }
 
     fn parseFunctionDeclaration(self: *Parser) anyerror!ast.Stmt {
         const name = try self.parseFunctionName();
-        const body = try self.parseFunctionBody();
+        const body = try self.parseFunctionBody(name.root.span.start.line);
         return .{ .function_decl = .{ .name = name, .body = body } };
     }
 
@@ -132,7 +132,7 @@ const Parser = struct {
     fn parseLocalStatement(self: *Parser) anyerror!ast.Stmt {
         if (self.match(.keyword_function)) |_| {
             const name = try self.expectIdentifier();
-            const body = try self.parseFunctionBody();
+            const body = try self.parseFunctionBody(name.span.start.line);
             return .{ .local_function_decl = .{ .name = name, .body = body } };
         }
 
@@ -163,7 +163,7 @@ const Parser = struct {
 
         if (self.match(.keyword_function)) |_| {
             const name = try self.expectIdentifier();
-            const body = try self.parseFunctionBody();
+            const body = try self.parseFunctionBody(name.span.start.line);
             const binding = ast.Binding{ .name = name, .attribute = attribute };
             const value = try self.newExpr(.{ .function_literal = body });
             return .{ .global_decl = .{
@@ -185,10 +185,10 @@ const Parser = struct {
         return .{ .global_decl = .{ .attribute = attribute, .all = false, .names = try names.toOwnedSlice(self.allocator), .values = values } };
     }
 
-    fn parseReturn(self: *Parser) anyerror!ast.Stmt {
+    fn parseReturn(self: *Parser, line: usize) anyerror!ast.Stmt {
         const values = if (self.canStartExpression()) try self.parseExpressionList() else &.{};
         _ = self.match(.semicolon);
-        return .{ .return_stmt = .{ .values = values } };
+        return .{ .return_stmt = .{ .line = line, .values = values } };
     }
 
     fn parseAssignmentOrCallStatement(self: *Parser) anyerror!ast.Stmt {
@@ -224,10 +224,10 @@ const Parser = struct {
 
         while (binaryInfo(self.peek().tag)) |info| {
             if (info.precedence < min_prec) break;
-            _ = self.advance();
+            const op = self.advance();
             const rhs_min = if (info.right_assoc) info.precedence else info.precedence + 1;
             const right = try self.parseExpression(rhs_min);
-            left = try self.newExpr(.{ .binary = .{ .op = info.op, .left = left, .right = right } });
+            left = try self.newExpr(.{ .binary = .{ .op = info.op, .op_line = op.span.start.line, .left = left, .right = right } });
         }
         return left;
     }
@@ -242,7 +242,7 @@ const Parser = struct {
         if (self.match(.string_literal)) |tok| return self.newExpr(.{ .string = .{ .lexeme = tok.lexeme, .span = tok.span } });
         if (self.match(.ellipsis)) |tok| return self.newExpr(.{ .vararg = tok.span });
         if (self.match(.left_brace)) |_| return self.newExpr(.{ .table_constructor = try self.parseTableConstructorAfterLeftBrace() });
-        if (self.match(.keyword_function)) |_| return self.newExpr(.{ .function_literal = try self.parseFunctionBody() });
+        if (self.match(.keyword_function)) |tok| return self.newExpr(.{ .function_literal = try self.parseFunctionBody(tok.span.start.line) });
         return error.ParseError;
     }
 
@@ -312,13 +312,13 @@ const Parser = struct {
         return .{ .array = try self.parseExpression(0) };
     }
 
-    fn parseFunctionBody(self: *Parser) anyerror!ast.FunctionBody {
+    fn parseFunctionBody(self: *Parser, defined_line: usize) anyerror!ast.FunctionBody {
         _ = try self.expect(.left_paren);
         const params = try self.parseParams();
         _ = try self.expect(.right_paren);
         const body = try self.parseBlock(&.{.keyword_end});
-        _ = try self.expect(.keyword_end);
-        return params.withBody(body);
+        const end = try self.expect(.keyword_end);
+        return params.withBody(body, defined_line, end.span.start.line);
     }
 
     const ParsedParams = struct {
@@ -326,8 +326,8 @@ const Parser = struct {
         is_vararg: bool,
         vararg_name: ?ast.Identifier,
 
-        fn withBody(self: ParsedParams, body: ast.Block) ast.FunctionBody {
-            return .{ .params = self.params, .is_vararg = self.is_vararg, .vararg_name = self.vararg_name, .body = body };
+        fn withBody(self: ParsedParams, body: ast.Block, defined_line: usize, end_line: usize) ast.FunctionBody {
+            return .{ .params = self.params, .is_vararg = self.is_vararg, .vararg_name = self.vararg_name, .body = body, .defined_line = defined_line, .end_line = end_line };
         }
     };
 

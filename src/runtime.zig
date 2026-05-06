@@ -741,13 +741,16 @@ pub const State = struct {
         try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
         try state.globals.put(try state.intern("os"), os_lib);
 
-        const debug_lib = try state.newTableWithHints(0, 6);
+        const debug_lib = try state.newTableWithHints(0, 9);
         try state.setTable(debug_lib, .{ .string = try state.intern("traceback") }, .native_debug_traceback);
         try state.setTable(debug_lib, .{ .string = try state.intern("getinfo") }, .{ .native = .debug_getinfo });
         try state.setTable(debug_lib, .{ .string = try state.intern("getupvalue") }, .{ .native = .debug_getupvalue });
         try state.setTable(debug_lib, .{ .string = try state.intern("setupvalue") }, .{ .native = .debug_setupvalue });
         try state.setTable(debug_lib, .{ .string = try state.intern("upvalueid") }, .{ .native = .debug_upvalueid });
         try state.setTable(debug_lib, .{ .string = try state.intern("upvaluejoin") }, .{ .native = .debug_upvaluejoin });
+        try state.setTable(debug_lib, .{ .string = try state.intern("getlocal") }, .{ .native = .debug_getlocal });
+        try state.setTable(debug_lib, .{ .string = try state.intern("setlocal") }, .{ .native = .debug_setlocal });
+        try state.setTable(debug_lib, .{ .string = try state.intern("getregistry") }, .{ .native = .debug_getregistry });
         try state.setTable(debug_lib, .{ .string = try state.intern("sethook") }, .{ .native = .debug_sethook });
         try state.setTable(debug_lib, .{ .string = try state.intern("gethook") }, .{ .native = .debug_gethook });
         try state.globals.put(try state.intern("debug"), debug_lib);
@@ -823,6 +826,11 @@ pub const State = struct {
 
     pub fn executeSourceChunk(self: *State, source: []const u8) !void {
         const loaded = try self.loadSourceAsClosure(source);
+        try self.executeClosure(loaded.closure);
+    }
+
+    pub fn executeSourceChunkNamed(self: *State, source: []const u8, source_name: []const u8) !void {
+        const loaded = try self.loadSourceAsClosureNamed(source, source_name);
         try self.executeClosure(loaded.closure);
     }
 
@@ -1529,7 +1537,10 @@ pub const State = struct {
         const target_pc = jumpTarget(source_pc, offset);
         try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, null);
         thread.frames.items[frame_index].pc = target_pc;
-        if (auto_gc and self.gc_running and target_pc < source_pc and !self.is_collecting) try self.collectGarbageWithFinalizers(thread);
+        if (target_pc < source_pc) {
+            thread.frames.items[frame_index].last_hook_line = null;
+            if (auto_gc and self.gc_running and !self.is_collecting) try self.collectGarbageWithFinalizers(thread);
+        }
     }
 
     fn forPrep(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
@@ -2674,7 +2685,7 @@ pub const State = struct {
             const line = lineForFrame(frame) orelse 0;
             try out.appendSlice(self.allocator, "\n\tzlua:");
             try appendFmt(self.allocator, &out, "{d}", .{line});
-            try out.appendSlice(self.allocator, ": in function");
+            try out.appendSlice(self.allocator, if (thread.hook_running and index == thread.frames.items.len - 1) ": in hook" else ": in function");
         }
 
         try self.returnValues(thread, op.base, op.return_count, &.{.{ .string = try self.intern(out.items) }});
@@ -4291,7 +4302,8 @@ fn lineForFrame(frame: CallFrame) ?usize {
     if (frame.proto.line_info.items.len == 0) return null;
     const pc = if (frame.pc == 0) 0 else frame.pc - 1;
     if (pc >= frame.proto.line_info.items.len) return null;
-    return frame.proto.line_info.items[pc].line;
+    const line = frame.proto.line_info.items[pc].line;
+    return if (line == 0) null else line;
 }
 
 fn setProtoSourceName(proto: *proto_mod.Proto, name: []const u8) !void {
