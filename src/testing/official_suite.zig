@@ -7,6 +7,7 @@ const archive_path = "vendor/lua-5.5.0-tests.tar.gz";
 
 const Options = struct {
     suite_path: []const u8 = "tests/official/lua-5.5.0-tests",
+    file_args: []const []const u8 = &.{},
     clua: ?[]const u8 = null,
     zlua: ?[]const u8 = null,
     mode: Mode = .basic,
@@ -41,10 +42,11 @@ pub fn runCli(
     zlua_exe: []const u8,
     args: []const []const u8,
 ) !u8 {
-    const options = parseArgs(args) catch |err| {
+    const options = parseArgs(allocator, args) catch |err| {
         try stderrPrint(io, "test-official: {s}\n", .{@errorName(err)});
         return 2;
     };
+    defer allocator.free(options.file_args);
 
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
@@ -78,8 +80,11 @@ pub fn runCli(
     return if (counts.unexpected_failed == 0) 0 else 1;
 }
 
-fn parseArgs(args: []const []const u8) !Options {
+fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
     var options: Options = .{};
+    var file_args = std.ArrayList([]const u8).empty;
+    errdefer file_args.deinit(allocator);
+
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -103,6 +108,12 @@ fn parseArgs(args: []const []const u8) !Options {
             options.zlua = args[index];
         } else if (std.mem.startsWith(u8, arg, "--zlua=")) {
             options.zlua = arg[7..];
+        } else if (std.mem.eql(u8, arg, "--suite-path")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            options.suite_path = args[index];
+        } else if (std.mem.startsWith(u8, arg, "--suite-path=")) {
+            options.suite_path = arg[13..];
         } else if (std.mem.startsWith(u8, arg, "--mode=")) {
             options.mode = try parseMode(arg[7..]);
         } else if (std.mem.startsWith(u8, arg, "--timeout-ms=")) {
@@ -112,9 +123,11 @@ fn parseArgs(args: []const []const u8) !Options {
         } else if (std.mem.startsWith(u8, arg, "--")) {
             return error.UnknownOption;
         } else {
-            options.suite_path = arg;
+            try file_args.append(allocator, arg);
         }
     }
+    options.file_args = try file_args.toOwnedSlice(allocator);
+    if (options.file_args.len != 0) options.show_zlua = true;
     return options;
 }
 
@@ -165,7 +178,7 @@ fn runIndividualSuite(
         files.deinit(allocator);
     }
 
-    try discoverOfficialFiles(allocator, io, options.suite_path, &files);
+    try collectOfficialFiles(allocator, io, options, &files);
     std.mem.sort([]u8, files.items, {}, lessThanString);
 
     for (files.items) |file| {
@@ -194,6 +207,7 @@ fn runIndividualSuite(
         if (zlua_result.success()) {
             counts.zlua_passed += 1;
             try out.print("pass {s}\n", .{std.fs.path.basename(file)});
+            try printProcess(out, "zlua", zlua_result, options.show_zlua);
         } else {
             counts.categorized_failed += 1;
             try out.print("xfail {s} feature={s}\n", .{ std.fs.path.basename(file), classifyFailure(zlua_result) });
@@ -201,6 +215,29 @@ fn runIndividualSuite(
         }
         try printProcess(out, "clua", clua_result, options.show_clua);
     }
+}
+
+fn collectOfficialFiles(allocator: std.mem.Allocator, io: std.Io, options: Options, files: *std.ArrayList([]u8)) !void {
+    if (options.file_args.len == 0) {
+        try discoverOfficialFiles(allocator, io, options.suite_path, files);
+        return;
+    }
+
+    for (options.file_args) |file_arg| {
+        try appendOfficialFile(allocator, options.suite_path, files, file_arg);
+    }
+}
+
+fn appendOfficialFile(allocator: std.mem.Allocator, suite_path: []const u8, files: *std.ArrayList([]u8), file_arg: []const u8) !void {
+    const basename = std.fs.path.basename(file_arg);
+    var allocated_filename: ?[]u8 = null;
+    defer if (allocated_filename) |filename| allocator.free(filename);
+
+    const filename = if (std.mem.endsWith(u8, basename, ".lua")) basename else blk: {
+        allocated_filename = try std.fmt.allocPrint(allocator, "{s}.lua", .{basename});
+        break :blk allocated_filename.?;
+    };
+    try files.append(allocator, try std.fs.path.join(allocator, &.{ suite_path, filename }));
 }
 
 fn discoverOfficialFiles(allocator: std.mem.Allocator, io: std.Io, suite_path: []const u8, files: *std.ArrayList([]u8)) !void {
@@ -304,12 +341,24 @@ fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 
 test "argument parser accepts quick and complete mode" {
     const args = [_][]const u8{ "--quick", "--mode=complete", "--debug-errors", "--timeout-ms=10", "--memory-limit-mb=256" };
-    const options = try parseArgs(&args);
+    const options = try parseArgs(std.testing.allocator, &args);
+    defer std.testing.allocator.free(options.file_args);
     try std.testing.expect(options.quick);
     try std.testing.expect(options.debug_errors);
     try std.testing.expectEqual(Mode.complete, options.mode);
     try std.testing.expectEqual(@as(u64, 10), options.timeout_ms);
     try std.testing.expectEqual(@as(u64, 256), options.memory_limit_mb);
+}
+
+test "argument parser collects official file args" {
+    const args = [_][]const u8{ "attrib", "calls.lua", "--suite-path=custom-suite" };
+    const options = try parseArgs(std.testing.allocator, &args);
+    defer std.testing.allocator.free(options.file_args);
+    try std.testing.expect(options.show_zlua);
+    try std.testing.expectEqualStrings("custom-suite", options.suite_path);
+    try std.testing.expectEqual(@as(usize, 2), options.file_args.len);
+    try std.testing.expectEqualStrings("attrib", options.file_args[0]);
+    try std.testing.expectEqualStrings("calls.lua", options.file_args[1]);
 }
 
 test "failure classifier maps frontend errors" {

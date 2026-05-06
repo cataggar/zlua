@@ -44,14 +44,9 @@ clua-version: build
 diff *args:
     {{zig}} build --summary all run-test-diff -- --debug-errors {{args}}
 
-# Run the official Lua 5.5 suite dashboard.
+# Run all official Lua 5.5 files, or selected files by name.
 official *args:
     {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 {{args}}
-
-# Run one official Lua 5.5 test file by name, e.g. `just official-file attrib`.
-official-file name *args:
-    {{zig}} build --summary all
-    file="{{name}}"; if [[ "$file" != *.lua ]]; then file="$file.lua"; fi; cd tests/official/lua-5.5.0-tests; ../../../{{zlua}} --debug-errors -e "_U=true; _soft=true; _port=true; _nomsg=true; T=nil; ARG=arg" "$file" {{args}}
 
 # Remove build outputs and Zig cache directories.
 clean:

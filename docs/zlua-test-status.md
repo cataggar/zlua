@@ -10,9 +10,8 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff` | Pass | `just diff` accepts paths and filters for targeted runs. Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 dashboard | `zig build test-official` or `just official` | Pass | Runs every per-file official test, including memory-stress `heavy.lua`, under the default memory cap. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=31`, `categorized_failed=1`, `skipped=1`, `timed_out=0`, `unexpected_failed=0` before the heavy-by-default wiring change. |
+| Official Lua 5.5 dashboard | `zig build test-official` or `just official [files...]` | Pass | Runs every per-file official test with no file args, or selected official files by name/path. Includes memory-stress `heavy.lua` under the default memory cap. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=31`, `categorized_failed=1`, `skipped=1`, `timed_out=0`, `unexpected_failed=0` before the heavy-by-default wiring change. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the full official dashboard. |
-| Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
 
 ## Status Meanings
 
@@ -24,13 +23,13 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `calls.lua`, `db.lua`, and `nextvar.lua` work verified with `just official-file calls`, `just official-file db`, `just official-file locals`, `just official-file nextvar`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. The official dashboard reported `zlua_passed=31` and `categorized_failed=1` before the heavy-by-default wiring change.
+Latest focused `calls.lua`, `db.lua`, and `nextvar.lua` work verified with `just official calls db locals nextvar`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. The official dashboard reported `zlua_passed=31` and `categorized_failed=1` before the heavy-by-default wiring change.
 
 - Generic `for` resolver checks now match Lua 5.5's position-specific rule: the first visible control variable is read-only, while later variables remain assignable.
 - `string.dump` now emits string constants once in its zlua debug payload, preserving the official string reuse count for dumped closure families.
 - `calls.lua`, `db.lua`, `locals.lua`, and `nextvar.lua` now pass in the basic official dashboard.
 
-Previous focused `files.lua` work verified with `just official-file files`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during that focused work.
+Previous focused `files.lua` work verified with `just official files`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during that focused work.
 
 - Generic `for` loops now expose the generator, state, and to-be-closed handle as `"(for state)"` debug locals, so `io.lines(file)` close-state inspection matches official Lua.
 - `io.flush()` mirrors file-handle flush failure for `/dev/full`, and write/append opens materialize the host file immediately while preserving buffered write visibility through flush/close.
@@ -38,7 +37,7 @@ Previous focused `files.lua` work verified with `just official-file files`, `zig
 - `os.date` rejects malformed conversion specifiers, and `os.time` reports official-compatible integer and field-bound errors for the covered date-table cases.
 - `files.lua` now passes in the basic official dashboard.
 
-Latest focused `events.lua` work verified with `just official-file events`, `just official-file cstack`, `just official-file attrib`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. The official dashboard reported `zlua_passed=29` and `categorized_failed=3` before the heavy-by-default wiring change.
+Latest focused `events.lua` work verified with `just official events cstack attrib`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. The official dashboard reported `zlua_passed=29` and `categorized_failed=3` before the heavy-by-default wiring change.
 
 - Unary metamethod calls (`__unm`, `__bnot`, and `__len`) now pass the operand twice, matching Lua's official call convention covered by `events.lua`.
 - `rawlen` rejects zlua file-handle tables so `rawlen(io.stdin)` behaves like official userdata-backed file handles.
@@ -46,20 +45,20 @@ Latest focused `events.lua` work verified with `just official-file events`, `jus
 - Pattern matching uses a plain-literal fast path and a lower recursive-pattern guard, preserving long literal searches while reporting `pattern too complex` before native stack overflow in the official `cstack.lua` recursive pattern case.
 - `events.lua` now passes in the basic official dashboard.
 
-Latest focused `tpack.lua` work verified with `just official-file tpack`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
+Latest focused `tpack.lua` work verified with `just official tpack`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
 
 - `string.pack`, `string.unpack`, and `string.packsize` now handle official pack-format alignment controls (`!n`, `x`, and `Xop`), mixed endianness, fixed/zero/length-prefixed strings, byte-width integers up to 16 bytes, and official overflow/short-data diagnostics covered by `tpack.lua`.
 - Oversized hexadecimal integer literals now wrap through 64-bit Lua integer bits, matching the official long hex literal used by `tpack.lua`.
 - `tpack.lua` now passes in the basic official dashboard.
 
-Latest focused `pm.lua` work verified with `just official-file pm`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
+Latest focused `pm.lua` work verified with `just official pm`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
 
 - String pattern matching now tracks captures, position captures, backreferences, balanced matches, frontier assertions, escaped bracket-class items, and malformed-pattern diagnostics covered by `pm.lua`.
 - `string.gsub` now expands `%0`/`%1` replacement captures, passes captures to function replacements, handles table replacement keys from captures, preserves official empty-match skip semantics, and reuses the original string when no substitution changes the output.
 - `string.gmatch` now honors the optional initial position and skips empty matches immediately following the previous match.
 - `pm.lua` now passes in the basic official dashboard.
 
-Latest focused `vararg.lua` work verified with `just official-file vararg`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
+Latest focused `vararg.lua` work verified with `just official vararg`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work.
 
 - Named vararg tables now drive later `...` expansion from the table and its `n` field, so mutations such as changing indexed values or `n` are reflected in returned varargs.
 - Named vararg `n` validation now reports the official-compatible `no proper 'n'` error for invalid counts while allowing large dynamic vararg expansion used by `vararg.lua`.
@@ -67,7 +66,7 @@ Latest focused `vararg.lua` work verified with `just official-file vararg`, `zig
 - Named vararg backing tables remain normal GC-tracked table values but are excluded from `collectgarbage("count")`, matching the official read-only named-vararg memory check.
 - `vararg.lua` now passes in the basic official dashboard.
 
-Latest focused `nextvar.lua` work verified with `just official-file nextvar`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. `zig build test` initially exposed a stale generic-for resolver unit expectation, which has been updated.
+Latest focused `nextvar.lua` work verified with `just official nextvar`, `zig build test-diff`, and `zig build test-official`. `zig build ci` was not rerun during the latest focused work. `zig build test` initially exposed a stale generic-for resolver unit expectation, which has been updated.
 
 Latest focused `goto.lua` work:
 
