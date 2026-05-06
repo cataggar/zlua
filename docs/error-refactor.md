@@ -2,9 +2,9 @@
 
 ## Goal
 
-Replace string-first internal failures with structured zlua error values that can be carried through the frontend, compiler, runtime, stdlib, protected calls, and CLI, then stringified at Lua-facing boundaries into Lua-compatible messages.
+Replace string-first internal failures with structured zlua error values that can be carried through the frontend, compiler, runtime, stdlib, protected calls, and CLI, then materialized as Lua-observable error objects at semantic boundaries.
 
-The intent is not to add a compatibility message layer. The internal representation should model the actual error cause and enough source/runtime context to render the exact Lua error text when needed.
+The intent is not to add a compatibility message layer. The internal representation should model the actual error cause and enough source/runtime context to render the exact Lua error text when Lua would expose a string error object.
 
 ## Current State
 
@@ -22,14 +22,45 @@ Suggested top-level shape:
 
 ```zig
 pub const ZluaError = union(enum) {
+    lua_value: runtime.Value,
+    diagnostic: Diagnostic,
+    host: HostError,
+};
+
+pub const Diagnostic = union(enum) {
     syntax: SyntaxError,
     resolve: ResolveError,
     compile: CompileError,
     runtime: RuntimeErrorInfo,
-    lua_value: runtime.Value,
-    host: HostError,
+    argument: ArgumentError,
+};
+
+pub const HostError = union(enum) {
+    out_of_memory,
+    io: IoError,
+    internal_bug: InternalBug,
 };
 ```
+
+`diagnostic` is for structured zlua causes that Lua normally renders as strings. `lua_value` is for actual Lua error objects thrown by `error(x)`, `assert`, or equivalent API behavior. `host` is for failures from the embedding environment or VM invariants; it needs explicit policy rather than automatic conversion into ordinary Lua diagnostics.
+
+When a structured failure crosses a Lua-observable boundary, materialize it into the Lua error object that Lua code would see:
+
+```zig
+pub fn materializeLuaError(state: *State, err: ZluaError) !runtime.Value {
+    return switch (err) {
+        .lua_value => |value| value,
+        .diagnostic => |diagnostic| try renderDiagnosticAsLuaString(state, diagnostic),
+        .host => |host| try materializeHostError(state, host),
+    };
+}
+```
+
+Host-error policy should be deliberate:
+
+- Out-of-memory may need a distinct non-allocating path.
+- I/O errors may become Lua errors when they happen inside Lua APIs that report I/O failures.
+- Internal VM/compiler invariant failures should not be hidden as ordinary Lua load or runtime errors unless Lua itself would report them that way.
 
 Runtime state should move from text fields:
 
@@ -44,7 +75,22 @@ to a typed value:
 last_error: ?errors.ZluaError,
 ```
 
-`lua_value` is required because Lua code can throw non-string objects with `error(table)`, and protected calls must preserve those objects. Stringification should happen only at Lua-visible boundaries, such as `load` returning `nil, msg`, unhandled CLI execution, `debug.traceback`, or APIs that explicitly convert an error object to text.
+If `last_error` can hold `.lua_value`, that value is a GC root. Tables, functions, strings, userdata, and other collectable values thrown through `error(obj)` must remain alive while stored in protected-call or coroutine error state.
+
+A structured diagnostic may remain structured while unwinding internally, but the moment Lua code can observe it as an error object, it must materialize as the correct Lua value, usually a Lua string. Lua-observable boundaries include:
+
+- `load` and `loadfile` returning `nil, msg`.
+- `pcall` returning `false, err`.
+- `xpcall` invoking the message handler.
+- `coroutine.resume` returning `false, err`.
+- `coroutine.wrap` rethrowing or resurfacing the error.
+- C API protected calls and API functions that match `liblua` protected-call behavior.
+- `debug.traceback(err)` and message-handler traceback behavior.
+- Unhandled CLI script execution.
+
+This rule prevents hidden structured diagnostics from leaking as non-Lua objects through protected calls, while preserving non-string Lua errors exactly when Lua code throws them.
+
+Do not let `ZluaError` become a monolithic string-rendering object. Keep causes structured, keep rendering centralized but modular, and make object materialization semantics explicit.
 
 ## Frontend Diagnostics
 
@@ -99,6 +145,22 @@ Compiler diagnostics should preserve source line and span where available. These
 
 Add typed runtime constructors and move direct string failures behind them.
 
+Runtime errors should be constructed at the semantic failure site, using structured operations instead of phrasing-shaped strings:
+
+```zig
+pub const TypeErrorOp = enum {
+    arithmetic,
+    bitwise,
+    concatenate,
+    compare,
+    call,
+    index,
+    newindex,
+    length,
+    unary_minus,
+};
+```
+
 Examples:
 
 ```zig
@@ -130,6 +192,12 @@ Runtime stringification should centralize Lua wording, including:
 - `bad argument #n to 'func' (...)`.
 - Named types via `__name`, such as `FILE*`.
 
+Runtime and stdlib argument diagnostics should share the same Lua type-name path, including `__name` lookup and special handle wording:
+
+```zig
+pub fn luaTypeNameForError(state: *State, value: Value) []const u8
+```
+
 ## Runtime Provenance
 
 The largest functional gap is preserving the semantic origin of values at failing instructions.
@@ -146,9 +214,16 @@ Official `errors.lua` checks messages containing:
 
 Do not infer these from final strings. Add optional compiler-emitted error-site metadata to `Proto`, keyed by instruction index. This metadata can describe operands and call targets in terms of source-level provenance.
 
+Keep the metadata sparse. Most instructions do not need rich diagnostic context; only ops that can produce name-sensitive diagnostics should get entries. A sorted side table keyed by instruction index is preferable to hanging a large optional payload off every instruction.
+
 Possible metadata shape:
 
 ```zig
+pub const ErrorSiteEntry = struct {
+    pc: u32,
+    site: ErrorSite,
+};
+
 pub const ErrorSite = struct {
     line: usize,
     op: ErrorOp,
@@ -158,20 +233,34 @@ pub const ErrorSite = struct {
 
 pub const OperandOrigin = union(enum) {
     temporary,
-    local: []const u8,
-    upvalue: []const u8,
-    global: []const u8,
-    field: []const u8,
-    method: []const u8,
-    metamethod: []const u8,
+    local: NameRef,
+    upvalue: NameRef,
+    global: NameRef,
+    field: NameRef,
+    method: NameRef,
+    metamethod: NameRef,
+};
+
+pub const NameRef = union(enum) {
+    proto_string: u32,
+    interned: StringId,
+    static: []const u8,
 };
 ```
 
-When functions are dumped with stripped debug info, drop or ignore this metadata so errors degrade like Lua's stripped-debug behavior.
+Avoid borrowed slices into transient lexer/parser buffers for error payloads. Token text, source names, variable names, field names, metamethod names, spans, and string previews must either be owned by the diagnostic, interned, static, or referenced through proto-owned tables with a clear lifetime.
+
+When functions are dumped with stripped debug info, drop this metadata so errors degrade like Lua's stripped-debug behavior. Prefer making `ErrorSite` live inside debug metadata so stripping debug info naturally removes it:
+
+```zig
+if (proto.debug_info == .stripped) {
+    proto.error_site_metadata = null;
+}
+```
 
 ## Stdlib Argument Errors
 
-After runtime plumbing exists, convert stdlib `state.fail("...")` calls into typed argument errors.
+After runtime plumbing exists, convert stdlib `state.fail("...")` calls into typed argument errors. Argument errors are Lua API/library diagnostics and should use the central `Diagnostic.argument` machinery, not ad hoc strings in each stdlib module.
 
 Prioritize public APIs exercised by official `errors.lua`:
 
@@ -183,7 +272,7 @@ Prioritize public APIs exercised by official `errors.lua`:
 - `debug.*` argument errors.
 - Coroutine errors around yield/resume/wrap.
 
-The goal is one central formatter for argument errors, not per-function Lua-message strings.
+The goal is one central formatter for argument errors, not per-function Lua-message strings. It should consume the same runtime type-name helper used by VM type errors so `__name`, userdata/file handles, and ordinary Lua types render consistently.
 
 ## Migration Phases
 
@@ -199,7 +288,11 @@ The goal is one central formatter for argument errors, not per-function Lua-mess
 
 - Replace `State.last_error` and `State.last_error_value` with a typed error payload that can preserve Lua values.
 - Update protected call context save/restore to carry the typed error.
-- Keep `pcall`, `xpcall`, coroutine error returns, and `error(table)` semantics intact.
+- Prove `error(table)` survives `pcall` with object identity preserved.
+- Prove `error("x")` returns the correct Lua string object/message.
+- Prove `xpcall` receives the correct object in the message handler.
+- Prove coroutine `resume` and `wrap` error paths preserve or resurface the correct object.
+- Make thrown Lua values visible to GC marking while stored in error state.
 - Update CLI unhandled error formatting to emit Lua-style errors rather than `zlua runtime error:` for user-code failures.
 
 ### Phase 3: Name-Aware Runtime Messages
@@ -224,7 +317,7 @@ The goal is one central formatter for argument errors, not per-function Lua-mess
 ```sh
 zig build test
 zig build test-diff
-zig build run -- test-official --quick --show-zlua
+zig build test-official
 ```
 
 ## Risks
@@ -233,12 +326,17 @@ zig build run -- test-official --quick --show-zlua
 - Parser diagnostics may need additional context stacks to produce exact `expected` and `to close` messages.
 - Compiler-emitted metadata must not perturb runtime behavior or register allocation.
 - Protected-call and coroutine paths are sensitive because they must preserve arbitrary Lua error objects, not just strings.
-- Stripped debug info must intentionally remove or suppress provenance metadata.
+- Error payloads must not borrow transient frontend/compiler buffers unless the lifetime is guaranteed.
+- `lua_value` errors stored in runtime state must be traced as GC roots.
+- Host errors need explicit materialization policy so internal bugs and resource failures are not silently disguised as user Lua errors.
+- Stripped debug info must intentionally remove provenance metadata.
 
 ## Success Criteria
 
 - Official `errors.lua` passes without string compatibility heuristics.
 - Existing official tests continue to pass.
 - `load` and `loadfile` return Lua-compatible syntax/load messages from structured errors.
-- Runtime and stdlib failures are represented internally as typed zlua errors until they cross Lua-visible stringification boundaries.
+- Runtime and stdlib failures are represented internally as typed zlua diagnostics until Lua code can observe them as error objects.
+- Structured diagnostics materialize into Lua strings at `pcall`, `xpcall`, coroutine, debug traceback, C API protected-call, load, and CLI boundaries as appropriate.
 - Non-string Lua error objects remain identity-preserving through `pcall`, `xpcall`, and coroutine APIs.
+- The CLI no longer adds `zlua runtime error:` to user-code failures.
