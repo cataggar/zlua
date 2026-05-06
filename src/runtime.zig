@@ -71,11 +71,17 @@ pub const ProtectedCallResult = union(enum) {
 
 pub const RuntimeErrorPayload = union(enum) {
     diagnostic: []const u8,
+    argument: errors.ArgumentError,
     lua_value: Value,
 
-    fn luaValue(self: RuntimeErrorPayload) Value {
+    fn luaValue(self: RuntimeErrorPayload, state: *State) Value {
         return switch (self) {
             .diagnostic => |message| .{ .string = message },
+            .argument => |argument| blk: {
+                const rendered = errors.renderArgumentError(state.allocator, argument) catch break :blk .{ .string = "bad argument" };
+                defer state.allocator.free(rendered);
+                break :blk .{ .string = state.intern(rendered) catch "bad argument" };
+            },
             .lua_value => |value| value,
         };
     }
@@ -2087,7 +2093,7 @@ pub const State = struct {
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{});
             },
             .native_tostring => {
-                if (resolved.arg_count == 0) return self.fail("bad argument #1 to 'tostring' (value expected)");
+                if (resolved.arg_count == 0) return self.failArgumentMessage("tostring", 1, "value expected");
                 const value = self.get(thread, resolved.base + 1);
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{.{ .string = try self.valueToString(thread, value) }});
             },
@@ -2111,7 +2117,7 @@ pub const State = struct {
             },
             .native_pairs => {
                 const table_value = argValue(self, thread, resolved, 0);
-                if (table_value != .table) return self.fail("bad argument #1 to 'pairs' (table expected)");
+                if (table_value != .table) return self.failArgumentType("pairs", 1, "table", table_value);
                 if (try self.getMetamethod(table_value, "__pairs")) |metamethod| {
                     self.set(thread, resolved.base, metamethod);
                     self.set(thread, resolved.base + 1, table_value);
@@ -2124,7 +2130,7 @@ pub const State = struct {
             },
             .native_ipairs => {
                 const table_value = argValue(self, thread, resolved, 0);
-                if (table_value != .table) return self.fail("bad argument #1 to 'ipairs' (table expected)");
+                if (table_value != .table) return self.failArgumentType("ipairs", 1, "table", table_value);
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{ .native_ipairs_iter, table_value, .{ .integer = 0 } });
             },
             .native_ipairs_iter => {
@@ -2526,6 +2532,14 @@ pub const State = struct {
         };
         const metamethod = metatable.get(.{ .string = name });
         return if (metamethod == .nil) null else metamethod;
+    }
+
+    pub fn luaTypeNameForError(self: *State, value: Value) []const u8 {
+        if (isFileValue(value)) return "FILE*";
+        if (self.getMetamethod(value, "__name") catch null) |name| {
+            if (name == .string) return name.string;
+        }
+        return luaTypeName(value);
     }
 
     fn getEitherMetamethod(self: *State, lhs: Value, rhs: Value, name: []const u8) !?Value {
@@ -2948,17 +2962,17 @@ pub const State = struct {
     }
 
     fn selectValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        if (op.arg_count == 0) return self.fail("bad argument #1 to 'select'");
+        if (op.arg_count == 0) return self.failArgumentMessage("select", 1, "value expected");
         const first = argValue(self, thread, op, 0);
         if (first == .string and std.mem.eql(u8, first.string, "#")) {
             try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @intCast(op.arg_count - 1) }});
             return;
         }
 
-        var index = toInteger(first) orelse return self.fail("bad argument #1 to 'select'");
+        var index = toInteger(first) orelse return self.failArgumentType("select", 1, "number", first);
         const count: i64 = @intCast(op.arg_count - 1);
         if (index < 0) index = count + index + 1;
-        if (index < 1 or index > count + 1) return self.fail("bad argument #1 to 'select'");
+        if (index < 1 or index > count + 1) return self.failArgumentMessage("select", 1, "index out of range");
 
         var values = std.ArrayList(Value).empty;
         defer values.deinit(self.allocator);
@@ -2971,7 +2985,7 @@ pub const State = struct {
     }
 
     fn assertValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        if (op.arg_count == 0) return self.fail("bad argument #1 to 'assert' (value expected)");
+        if (op.arg_count == 0) return self.failArgumentMessage("assert", 1, "value expected");
 
         const condition = argValue(self, thread, op, 0);
         if (!truthy(condition)) {
@@ -3008,7 +3022,7 @@ pub const State = struct {
     }
 
     fn pcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        if (op.arg_count == 0) return self.fail("bad argument #1 to 'pcall'");
+        if (op.arg_count == 0) return self.failArgumentMessage("pcall", 1, "value expected");
         const args = try self.collectArgs(thread, op, 1);
         defer self.allocator.free(args);
 
@@ -3028,7 +3042,7 @@ pub const State = struct {
     }
 
     fn xpcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        if (op.arg_count < 2) return self.fail("bad argument #2 to 'xpcall'");
+        if (op.arg_count < 2) return self.failArgumentMessage("xpcall", 2, "value expected");
         const handler = argValue(self, thread, op, 1);
         const args = try self.collectArgs(thread, op, 2);
         defer self.allocator.free(args);
@@ -3171,7 +3185,7 @@ pub const State = struct {
 
     fn coroutineCreate(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const entry = argValue(self, thread, op, 0);
-        if (!functionLike(entry)) return self.fail("function expected");
+        if (!functionLike(entry)) return self.failArgumentType("coroutine.create", 1, "function", entry);
         try self.returnValues(thread, op.base, op.return_count, &.{.{ .thread = try self.newCoroutineThread(entry) }});
     }
 
@@ -3255,7 +3269,7 @@ pub const State = struct {
             return;
         }
         const entry = argValue(self, thread, op, 0);
-        if (!functionLike(entry)) return self.fail("function expected");
+        if (!functionLike(entry)) return self.failArgumentType("coroutine.wrap", 1, "function", entry);
         try self.returnValues(thread, op.base, op.return_count, &.{.{ .coroutine_wrapper = try self.newCoroutineThread(entry) }});
     }
 
@@ -3847,6 +3861,16 @@ pub const State = struct {
         const active = payload orelse return;
         switch (active) {
             .diagnostic => |message| self.markString(message),
+            .argument => |argument| {
+                self.markString(argument.function_name);
+                switch (argument.detail) {
+                    .message => |message| self.markString(message),
+                    .expected => |expected| {
+                        self.markString(expected.expected);
+                        self.markString(expected.actual);
+                    },
+                }
+            },
             .lua_value => |value| self.markValue(value),
         }
     }
@@ -4303,6 +4327,11 @@ pub const State = struct {
         try out.append(self.allocator, '\n');
         if (self.last_error) |payload| switch (payload) {
             .diagnostic => |message| try appendFmt(self.allocator, out, "last_error={s}\n", .{message}),
+            .argument => |argument| {
+                const rendered = try errors.renderArgumentError(self.allocator, argument);
+                defer self.allocator.free(rendered);
+                try appendFmt(self.allocator, out, "last_error={s}\n", .{rendered});
+            },
             .lua_value => {},
         };
         try appendFmt(self.allocator, out, "allocations strings={d} tables={d} closures={d} upvalues={d} threads={d} bytes={d}\n", .{ stats.strings, stats.tables, stats.closures, stats.upvalues, stats.threads, stats.bytes });
@@ -4568,6 +4597,47 @@ pub const State = struct {
         return error.RuntimeError;
     }
 
+    pub fn failArgument(self: *State, function_name: []const u8, index: u16, detail: errors.ArgumentErrorDetail) RuntimeError {
+        self.last_error = .{ .argument = .{
+            .function_name = function_name,
+            .index = index,
+            .detail = detail,
+        } };
+        return error.RuntimeError;
+    }
+
+    pub fn failArgumentMessage(self: *State, function_name: []const u8, index: u16, message: []const u8) RuntimeError {
+        return self.failArgument(function_name, index, .{ .message = message });
+    }
+
+    pub fn failArgumentType(self: *State, function_name: []const u8, index: u16, expected: []const u8, actual: Value) RuntimeError {
+        return self.failArgument(function_name, index, .{ .expected = .{
+            .expected = expected,
+            .actual = self.luaTypeNameForError(actual),
+        } });
+    }
+
+    pub fn expectArgumentString(self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) ![]const u8 {
+        const value = argValue(self, thread, op, index);
+        return switch (value) {
+            .string => |string| string,
+            else => self.failArgumentType(function_name, index + 1, "string", value),
+        };
+    }
+
+    pub fn expectArgumentTable(self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !*Table {
+        const value = argValue(self, thread, op, index);
+        return switch (value) {
+            .table => |table| table,
+            else => self.failArgumentType(function_name, index + 1, "table", value),
+        };
+    }
+
+    pub fn argumentInteger(self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !i64 {
+        const value = argValue(self, thread, op, index);
+        return toInteger(value) orelse self.failArgumentType(function_name, index + 1, "number", value);
+    }
+
     fn failLoadDiagnostic(self: *State, source_name: ?[]const u8, source_text: []const u8, diagnostic: ?errors.Diagnostic, fallback: []const u8) RuntimeError {
         const rendered = if (diagnostic) |diag|
             errors.renderLoadDiagnostic(self.allocator, source_name, source_text, diag) catch return self.fail(fallback)
@@ -4584,7 +4654,7 @@ pub const State = struct {
 
     pub fn currentErrorValue(self: *State) Value {
         const payload = self.last_error orelse return .nil;
-        return payload.luaValue();
+        return payload.luaValue(self);
     }
 };
 

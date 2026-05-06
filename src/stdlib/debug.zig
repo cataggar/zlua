@@ -16,8 +16,8 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
         target = runtime.argValue(state, thread, op, 1);
         options_index = 2;
     }
-    const options = if (op.arg_count > options_index) try state.expectString(runtime.argValue(state, thread, op, options_index)) else "flnSrtu";
-    try validateGetinfoOptions(state, options);
+    const options = if (op.arg_count > options_index) try state.expectArgumentString(thread, op, "debug.getinfo", options_index) else "flnSrtu";
+    try validateGetinfoOptions(state, options, "debug.getinfo", options_index + 1);
 
     const target_closure: ?*runtime.Closure, const target_func: Value, const source_name, const what, const currentline, const level_name, const istailcall = switch (target) {
         .integer => blk: {
@@ -40,7 +40,7 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
         },
         .closure => .{ target.closure, target, target.closure.proto.source_name, "Lua", @as(i64, -1), null, false },
         .gmatch_iterator, .native, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap => .{ null, target, "[C]", "C", @as(i64, -1), null, false },
-        else => return state.fail("function or level expected"),
+        else => return state.failArgumentMessage("debug.getinfo", 1, "function or level expected"),
     };
 
     const value = try state.newTableWithHints(0, 8);
@@ -107,9 +107,9 @@ pub fn getupvalue(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(name) }, readUpvalue(upvalue) });
 }
 
-fn validateGetinfoOptions(state: *State, options: []const u8) !void {
+fn validateGetinfoOptions(state: *State, options: []const u8, function_name: []const u8, index: u16) !void {
     for (options) |option| switch (option) {
-        'X', '>' => return state.fail("invalid option"),
+        'X', '>' => return state.failArgumentMessage(function_name, index, "invalid option"),
         else => {},
     };
 }
@@ -198,11 +198,11 @@ pub fn upvalueid(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn upvaluejoin(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const first = runtime.argValue(state, thread, op, 0);
-    const first_index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse return state.fail("invalid upvalue index");
+    const first_index = upvalueIndex(runtime.argValue(state, thread, op, 1)) orelse return state.failArgumentMessage("debug.upvaluejoin", 2, "invalid upvalue index");
     const second = runtime.argValue(state, thread, op, 2);
-    const second_index = upvalueIndex(runtime.argValue(state, thread, op, 3)) orelse return state.fail("invalid upvalue index");
-    const replacement = getClosureUpvalue(second, second_index) orelse return state.fail("invalid upvalue index");
-    if (first != .closure or first_index >= first.closure.upvalues.len) return state.fail("invalid upvalue index");
+    const second_index = upvalueIndex(runtime.argValue(state, thread, op, 3)) orelse return state.failArgumentMessage("debug.upvaluejoin", 4, "invalid upvalue index");
+    const replacement = getClosureUpvalue(second, second_index) orelse return state.failArgumentMessage("debug.upvaluejoin", 3, "invalid upvalue index");
+    if (first != .closure or first_index >= first.closure.upvalues.len) return state.failArgumentMessage("debug.upvaluejoin", 1, "invalid upvalue index");
     first.closure.upvalues[first_index] = replacement;
     try state.returnValues(thread, op.base, op.return_count, &.{});
 }
@@ -227,8 +227,8 @@ pub fn getlocal(state: *State, thread: *Thread, op: bytecode.Call) !void {
         index_value = runtime.argValue(state, thread, op, 2);
     }
 
-    const level = runtime.toInteger(level_value) orelse return state.fail("level expected");
-    const index = runtime.toInteger(index_value) orelse return state.fail("index expected");
+    const level = runtime.toInteger(level_value) orelse return state.failArgumentMessage("debug.getlocal", 1, "level expected");
+    const index = runtime.toInteger(index_value) orelse return state.failArgumentMessage("debug.getlocal", 2, "index expected");
     if (level == 2 and thread.hook_running and thread.hook_transfer_count != 0) {
         const offset = index - thread.hook_transfer_index_base;
         if (offset >= 0 and @as(usize, @intCast(offset)) < thread.hook_transfer_count) {
@@ -256,7 +256,7 @@ pub fn getlocal(state: *State, thread: *Thread, op: bytecode.Call) !void {
         }
         return;
     }
-    const frame_index = frameIndexAtLevel(local_thread, level) orelse return state.fail("level out of range");
+    const frame_index = frameIndexAtLevel(local_thread, level) orelse return state.failArgumentMessage("debug.getlocal", 1, "level out of range");
     const frame = &local_thread.frames.items[frame_index];
     if (index < 0) {
         const vararg_index: usize = @intCast(-index - 1);
@@ -280,10 +280,10 @@ pub fn setlocal(state: *State, thread: *Thread, op: bytecode.Call) !void {
         local_thread = first.thread;
         level_arg_index = 1;
     }
-    const level = runtime.toInteger(runtime.argValue(state, thread, op, level_arg_index)) orelse return state.fail("level expected");
-    const index = runtime.toInteger(runtime.argValue(state, thread, op, level_arg_index + 1)) orelse return state.fail("index expected");
+    const level = runtime.toInteger(runtime.argValue(state, thread, op, level_arg_index)) orelse return state.failArgumentMessage("debug.setlocal", level_arg_index + 1, "level expected");
+    const index = runtime.toInteger(runtime.argValue(state, thread, op, level_arg_index + 1)) orelse return state.failArgumentMessage("debug.setlocal", level_arg_index + 2, "index expected");
     const value = runtime.argValue(state, thread, op, level_arg_index + 2);
-    const frame_index = frameIndexAtLevel(local_thread, level) orelse return state.fail("level out of range");
+    const frame_index = frameIndexAtLevel(local_thread, level) orelse return state.failArgumentMessage("debug.setlocal", level_arg_index + 1, "level out of range");
     const frame = &local_thread.frames.items[frame_index];
     if (index < 0) {
         const vararg_index: usize = @intCast(-index - 1);

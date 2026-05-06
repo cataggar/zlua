@@ -8,9 +8,9 @@ const Thread = runtime.Thread;
 const Value = runtime.Value;
 
 pub fn loadfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const path = try state.expectArgumentString(thread, op, "loadfile", 0);
     const mode = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) == .string) runtime.argValue(state, thread, op, 1).string else "bt";
-    if (invalidLoadMode(mode)) return state.fail("invalid mode");
+    if (invalidLoadMode(mode)) return state.failArgumentMessage("loadfile", 2, "invalid mode");
 
     const source = state.readFileAlloc(path) catch {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot open file") } });
@@ -92,7 +92,7 @@ fn initialBomLen(source: []const u8) usize {
 }
 
 pub fn dofile(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const path = try state.expectArgumentString(thread, op, "dofile", 0);
     const closure = try state.loadFileAsClosure(path);
     const values = try state.callCollect(thread, closure, &.{});
     defer state.allocator.free(values);
@@ -101,7 +101,7 @@ pub fn dofile(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const name = try state.expectArgumentString(thread, op, "require", 0);
     const package = try packageTable(state);
     const loaded = try state.expectTable(package.get(.{ .string = try state.intern("loaded") }));
     const preload = try state.expectTable(package.get(.{ .string = try state.intern("preload") }));
@@ -117,7 +117,7 @@ pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var loader_data: Value = .nil;
     if (loader == .nil) {
         const path_value = package.get(.{ .string = try state.intern("path") });
-        if (path_value != .string) return state.fail("package.path must be a string");
+        if (path_value != .string) return state.failArgumentType("require", 1, "package.path string", path_value);
         const path = path_value.string;
         const found = try searchPath(state, name, path, ".", "/") orelse {
             const message = try moduleNotFoundMessage(state, name, package, path);
@@ -140,12 +140,12 @@ pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn searchpath(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const path = try state.expectString(runtime.argValue(state, thread, op, 1));
+    const name = try state.expectArgumentString(thread, op, "package.searchpath", 0);
+    const path = try state.expectArgumentString(thread, op, "package.searchpath", 1);
     const sep_value = runtime.argValue(state, thread, op, 2);
     const rep_value = runtime.argValue(state, thread, op, 3);
-    const sep = if (sep_value == .nil) "." else try state.expectString(sep_value);
-    const rep = if (rep_value == .nil) "/" else try state.expectString(rep_value);
+    const sep = if (sep_value == .nil) "." else try state.expectArgumentString(thread, op, "package.searchpath", 2);
+    const rep = if (rep_value == .nil) "/" else try state.expectArgumentString(thread, op, "package.searchpath", 3);
 
     if (try searchPath(state, name, path, sep, rep)) |found| {
         defer state.allocator.free(found);
@@ -159,7 +159,7 @@ pub fn searchpath(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn searcherPreload(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const name = try state.expectArgumentString(thread, op, "package.searchers preload", 0);
     const preload = try state.expectTable((try packageTable(state)).get(.{ .string = try state.intern("preload") }));
     const loader = preload.get(.{ .string = try state.intern(name) });
     if (loader == .nil) {
@@ -170,7 +170,7 @@ pub fn searcherPreload(state: *State, thread: *Thread, op: bytecode.Call) !void 
 }
 
 pub fn searcherLua(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const name = try state.expectArgumentString(thread, op, "package.searchers Lua", 0);
     const package = try packageTable(state);
     const path = try state.expectString(package.get(.{ .string = try state.intern("path") }));
     const found = try searchPath(state, name, path, ".", "/") orelse {

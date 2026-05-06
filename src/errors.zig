@@ -17,6 +17,21 @@ pub const Diagnostic = union(enum) {
     syntax: SyntaxError,
     resolve: ResolveError,
     compile: CompileError,
+    argument: ArgumentError,
+};
+
+pub const ArgumentError = struct {
+    function_name: []const u8,
+    index: u16,
+    detail: ArgumentErrorDetail,
+};
+
+pub const ArgumentErrorDetail = union(enum) {
+    message: []const u8,
+    expected: struct {
+        expected: []const u8,
+        actual: []const u8,
+    },
 };
 
 pub const SyntaxError = union(enum) {
@@ -140,7 +155,24 @@ fn appendDiagnosticDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8),
             .jump_out_of_range => try out.appendSlice(allocator, "control structure too long"),
             .invalid_ast => try out.appendSlice(allocator, "internal compiler error"),
         },
+        .argument => |argument| try appendArgumentErrorDetail(allocator, out, argument),
     }
+}
+
+pub fn renderArgumentError(allocator: std.mem.Allocator, argument: ArgumentError) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    try appendArgumentErrorDetail(allocator, &out, argument);
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendArgumentErrorDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8), argument: ArgumentError) !void {
+    try appendFmt(allocator, out, "bad argument #{d} to '{s}' (", .{ argument.index, argument.function_name });
+    switch (argument.detail) {
+        .message => |message| try out.appendSlice(allocator, message),
+        .expected => |expected| try appendFmt(allocator, out, "{s} expected, got {s}", .{ expected.expected, expected.actual }),
+    }
+    try out.append(allocator, ')');
 }
 
 fn diagnosticLine(diagnostic: Diagnostic) usize {
@@ -169,6 +201,7 @@ fn diagnosticLine(diagnostic: Diagnostic) usize {
             .jump_out_of_range => |err| err.line,
             .invalid_ast => |err| err.line,
         },
+        .argument => 0,
     };
 }
 

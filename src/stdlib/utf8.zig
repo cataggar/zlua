@@ -11,16 +11,16 @@ pub fn char(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
     for (0..op.arg_count) |index| {
-        const code = runtime.toInteger(runtime.argValue(state, thread, op, @intCast(index))) orelse return state.fail("integer expected");
+        const code = try state.argumentInteger(thread, op, "utf8.char", @intCast(index));
         var bytes: [6]u8 = undefined;
-        const encoded_len = encode(code, &bytes) orelse return state.fail("value out of range");
+        const encoded_len = encode(code, &bytes) orelse return state.failArgumentMessage("utf8.char", @intCast(index + 1), "value out of range");
         try out.appendSlice(state.allocator, bytes[0..encoded_len]);
     }
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
 }
 
 pub fn codepoint(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const source = try state.expectArgumentString(thread, op, "utf8.codepoint", 0);
     const start = normalizeStringIndex(if (op.arg_count >= 2) runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse 1 else 1, source.len);
     const stop = normalizeStringIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse @as(i64, @intCast(start)) else @as(i64, @intCast(start)), source.len);
     const strict = !(op.arg_count >= 4 and runtime.truthy(runtime.argValue(state, thread, op, 3)));
@@ -43,7 +43,7 @@ pub fn codepoint(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn codes(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const source = try state.expectArgumentString(thread, op, "utf8.codes", 0);
     const strict = !(op.arg_count >= 2 and runtime.truthy(runtime.argValue(state, thread, op, 1)));
     if (strict) {
         try state.returnValues(thread, op.base, op.return_count, &.{ .{ .native = .utf8_codes_iter }, .{ .string = source }, .{ .integer = 0 } });
@@ -87,7 +87,7 @@ pub fn codesNext(state: *State, state_value: Value, index_value: Value) ![2]Valu
 }
 
 pub fn len(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const source = try state.expectArgumentString(thread, op, "utf8.len", 0);
     const start = normalizeStringIndex(if (op.arg_count >= 2) runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse 1 else 1, source.len);
     const stop = normalizeStringIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse -1 else -1, source.len);
     const strict = !(op.arg_count >= 4 and runtime.truthy(runtime.argValue(state, thread, op, 3)));
@@ -112,8 +112,8 @@ pub fn len(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn offset(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const n = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const source = try state.expectArgumentString(thread, op, "utf8.offset", 0);
+    const n = try state.argumentInteger(thread, op, "utf8.offset", 1);
     const explicit_pos = op.arg_count >= 3;
     const pos = normalizeStringIndex(if (explicit_pos) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse 1 else if (n >= 0) 1 else @as(i64, @intCast(source.len + 1)), source.len);
     if (pos < 1 or pos > source.len + 1) {

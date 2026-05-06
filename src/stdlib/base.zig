@@ -15,7 +15,7 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     defer if (loaded_source.owned) state.allocator.free(loaded_source.source);
 
     const source = loaded_source.source;
-    if (invalidLoadMode(state, thread, op)) return state.fail("invalid mode");
+    if (invalidLoadMode(state, thread, op)) return state.failArgumentMessage("load", 3, "invalid mode");
     if (loadModeError(state, thread, op, source)) |message| {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
@@ -56,7 +56,7 @@ const LoadSource = struct {
 fn loadSource(state: *State, thread: *Thread, op: bytecode.Call) !LoadSource {
     const source_value = runtime.argValue(state, thread, op, 0);
     if (source_value == .string) return .{ .source = source_value.string };
-    if (!isReaderFunction(source_value)) return .{ .source = try state.expectString(source_value) };
+    if (!isReaderFunction(source_value)) return .{ .source = try state.expectArgumentString(thread, op, "load", 0) };
 
     var source = std.ArrayList(u8).empty;
     errdefer source.deinit(state.allocator);
@@ -122,18 +122,21 @@ fn isReaderFunction(value: Value) bool {
 }
 
 pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count == 0) return state.fail("bad argument #1 to 'type' (value expected)");
+    if (op.arg_count == 0) return state.failArgumentMessage("type", 1, "value expected");
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(typeName(runtime.argValue(state, thread, op, 0))) }});
 }
 
 pub fn tonumber(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count == 0) return state.fail("bad argument #1 to 'tonumber' (value expected)");
+    if (op.arg_count == 0) return state.failArgumentMessage("tonumber", 1, "value expected");
 
     const value = runtime.argValue(state, thread, op, 0);
     if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil) {
-        const base = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("base out of range");
-        if (base < 2 or base > 36) return state.fail("base out of range");
-        const string = try state.expectString(value);
+        const base = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.failArgumentMessage("tonumber", 2, "base out of range");
+        if (base < 2 or base > 36) return state.failArgumentMessage("tonumber", 2, "base out of range");
+        const string = switch (value) {
+            .string => |string| string,
+            else => return state.failArgumentType("tonumber", 1, "string", value),
+        };
         const parsed = parseIntegerBase(runtime.trimAscii(string), @intCast(base)) orelse Value.nil;
         try state.returnValues(thread, op.base, op.return_count, &.{parsed});
         return;

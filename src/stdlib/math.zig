@@ -14,7 +14,7 @@ pub fn abs(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const value = runtime.argValue(state, thread, op, 0);
     const result: Value = switch (value) {
         .integer => |integer| .{ .integer = if (integer == std.math.minInt(i64)) integer else @intCast(@abs(integer)) },
-        else => .{ .number = @abs(try runtime.toNumber(value)) },
+        else => .{ .number = @abs(try numberArgument(state, thread, op, "math.abs", 0)) },
     };
     try state.returnValues(thread, op.base, op.return_count, &.{result});
 }
@@ -28,8 +28,8 @@ pub fn asin(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn atan(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const y = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
-    const x = if (op.arg_count >= 2) try runtime.toNumber(runtime.argValue(state, thread, op, 1)) else 1.0;
+    const y = try numberArgument(state, thread, op, "math.atan", 0);
+    const x = if (op.arg_count >= 2) try numberArgument(state, thread, op, "math.atan", 1) else 1.0;
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = std.math.atan2(y, x) }});
 }
 
@@ -57,7 +57,7 @@ pub fn fmod(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const lhs = runtime.argValue(state, thread, op, 0);
     const rhs = runtime.argValue(state, thread, op, 1);
     if (runtime.toInteger(lhs)) |left| if (runtime.toInteger(rhs)) |right| {
-        if (right == 0) return state.fail("bad argument #2 to 'math.fmod' (zero)");
+        if (right == 0) return state.failArgumentMessage("math.fmod", 2, "zero");
         if (left == std.math.minInt(i64) and right == -1) {
             try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = 0 }});
             return;
@@ -65,11 +65,11 @@ pub fn fmod(state: *State, thread: *Thread, op: bytecode.Call) !void {
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @rem(left, right) }});
         return;
     };
-    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = @rem(try runtime.toNumber(lhs), try runtime.toNumber(rhs)) }});
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = @rem(try numberArgument(state, thread, op, "math.fmod", 0), try numberArgument(state, thread, op, "math.fmod", 1)) }});
 }
 
 pub fn frexp(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const value = try numberArgument(state, thread, op, "math.frexp", 0);
     if (!std.math.isFinite(value)) {
         try state.returnValues(thread, op.base, op.return_count, &.{ .{ .number = value }, .{ .integer = 0 } });
         return;
@@ -79,16 +79,16 @@ pub fn frexp(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn ldexp(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
-    const exponent = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const value = try numberArgument(state, thread, op, "math.ldexp", 0);
+    const exponent = try integerArgument(state, thread, op, "math.ldexp", 1);
     const clamped = std.math.clamp(exponent, std.math.minInt(i32), std.math.maxInt(i32));
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = std.math.ldexp(value, @intCast(clamped)) }});
 }
 
 pub fn log(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const value = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const value = try numberArgument(state, thread, op, "math.log", 0);
     const result = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil)
-        std.math.log(f64, try runtime.toNumber(runtime.argValue(state, thread, op, 1)), value)
+        std.math.log(f64, try numberArgument(state, thread, op, "math.log", 1), value)
     else
         @log(value);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = result }});
@@ -103,7 +103,7 @@ pub fn min(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn modf(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const number = try runtime.toNumber(runtime.argValue(state, thread, op, 0));
+    const number = try numberArgument(state, thread, op, "math.modf", 0);
     if (!std.math.isFinite(number)) {
         const frac = if (std.math.isNan(number)) number else 0.0;
         try state.returnValues(thread, op.base, op.return_count, &.{ .{ .number = number }, .{ .number = frac } });
@@ -119,29 +119,29 @@ pub fn rad(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn random(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count > 2) return state.fail("wrong number of arguments");
+    if (op.arg_count > 2) return state.failArgumentMessage("math.random", 3, "wrong number of arguments");
     const bits = nextRandom(state);
     if (op.arg_count == 0) {
         const value = @as(f64, @floatFromInt(bits >> 11)) / @as(f64, @floatFromInt(@as(u64, 1) << 53));
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = value }});
         return;
     }
-    const low: i64 = if (op.arg_count == 1) 1 else runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected");
-    const high: i64 = if (op.arg_count == 1) runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected") else runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const low: i64 = if (op.arg_count == 1) 1 else try integerArgument(state, thread, op, "math.random", 0);
+    const high: i64 = if (op.arg_count == 1) try integerArgument(state, thread, op, "math.random", 0) else try integerArgument(state, thread, op, "math.random", 1);
     if (op.arg_count == 1 and high == 0) {
         try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = @bitCast(bits) }});
         return;
     }
-    if (low > high) return state.fail("interval is empty");
+    if (low > high) return state.failArgumentMessage("math.random", if (op.arg_count == 1) 1 else 2, "interval is empty");
     const span = @as(u64, @bitCast(high -% low)) +% 1;
     const offset = projectRandom(state, bits, span -% 1);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = low +% @as(i64, @bitCast(offset)) }});
 }
 
 pub fn randomseed(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count > 2) return state.fail("wrong number of arguments");
-    const seed1 = if (op.arg_count >= 1) runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected") else @as(i64, @bitCast(nextRandom(state)));
-    const seed2 = if (op.arg_count >= 2) runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected") else if (op.arg_count == 0) @as(i64, @bitCast(nextRandom(state))) else 0;
+    if (op.arg_count > 2) return state.failArgumentMessage("math.randomseed", 3, "wrong number of arguments");
+    const seed1 = if (op.arg_count >= 1) try integerArgument(state, thread, op, "math.randomseed", 0) else @as(i64, @bitCast(nextRandom(state)));
+    const seed2 = if (op.arg_count >= 2) try integerArgument(state, thread, op, "math.randomseed", 1) else if (op.arg_count == 0) @as(i64, @bitCast(nextRandom(state))) else 0;
     seedRandom(state, @bitCast(seed1), @bitCast(seed2));
     try state.returnValues(thread, op.base, op.return_count, &.{ .{ .integer = seed1 }, .{ .integer = seed2 } });
 }
@@ -183,14 +183,13 @@ pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn ult(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const lhs = runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected");
-    const rhs = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const lhs = try integerArgument(state, thread, op, "math.ult", 0);
+    const rhs = try integerArgument(state, thread, op, "math.ult", 1);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = @as(u64, @bitCast(lhs)) < @as(u64, @bitCast(rhs)) }});
 }
 
 fn unary(state: *State, thread: *Thread, op: bytecode.Call, func: UnaryFn) !void {
-    const arg = runtime.argValue(state, thread, op, 0);
-    const value = runtime.toNumber(arg) catch return state.fail(unaryArgError(func));
+    const value = try numberArgument(state, thread, op, unaryFnName(func), 0);
     const result = switch (func) {
         .acos => std.math.acos(value),
         .asin => std.math.asin(value),
@@ -203,20 +202,24 @@ fn unary(state: *State, thread: *Thread, op: bytecode.Call, func: UnaryFn) !void
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = result }});
 }
 
-fn unaryArgError(func: UnaryFn) []const u8 {
+fn unaryFnName(func: UnaryFn) []const u8 {
     return switch (func) {
-        .acos => "bad argument #1 to 'acos' (number expected)",
-        .asin => "bad argument #1 to 'asin' (number expected)",
-        .cos => "bad argument #1 to 'cos' (number expected)",
-        .exp => "bad argument #1 to 'exp' (number expected)",
-        .sin => "bad argument #1 to 'sin' (number expected)",
-        .sqrt => "bad argument #1 to 'sqrt' (number expected)",
-        .tan => "bad argument #1 to 'tan' (number expected)",
+        .acos => "math.acos",
+        .asin => "math.asin",
+        .cos => "math.cos",
+        .exp => "math.exp",
+        .sin => "math.sin",
+        .sqrt => "math.sqrt",
+        .tan => "math.tan",
     };
 }
 
 fn unaryScale(state: *State, thread: *Thread, op: bytecode.Call, scale: f64) !void {
-    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = (try runtime.toNumber(runtime.argValue(state, thread, op, 0))) * scale }});
+    const function_name = switch (scale > 1.0) {
+        true => "math.deg",
+        false => "math.rad",
+    };
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = (try numberArgument(state, thread, op, function_name, 0)) * scale }});
 }
 
 fn integerUnary(state: *State, thread: *Thread, op: bytecode.Call, func: IntegerUnaryFn) !void {
@@ -225,7 +228,7 @@ fn integerUnary(state: *State, thread: *Thread, op: bytecode.Call, func: Integer
         try state.returnValues(thread, op.base, op.return_count, &.{arg});
         return;
     }
-    const value = runtime.toNumber(arg) catch return state.fail("number expected");
+    const value = try numberArgument(state, thread, op, if (func == .ceil) "math.ceil" else "math.floor", 0);
     const number = switch (func) {
         .ceil => @ceil(value),
         .floor => @floor(value),
@@ -238,7 +241,7 @@ fn integerUnary(state: *State, thread: *Thread, op: bytecode.Call, func: Integer
 }
 
 fn minMax(state: *State, thread: *Thread, op: bytecode.Call, choose_min: bool) !void {
-    if (op.arg_count == 0) return state.fail("value expected");
+    if (op.arg_count == 0) return state.failArgumentMessage(if (choose_min) "math.min" else "math.max", 1, "value expected");
     var best = runtime.argValue(state, thread, op, 0);
     var index: u16 = 1;
     while (index < op.arg_count) : (index += 1) {
@@ -247,6 +250,16 @@ fn minMax(state: *State, thread: *Thread, op: bytecode.Call, choose_min: bool) !
         if (choose) best = value;
     }
     try state.returnValues(thread, op.base, op.return_count, &.{best});
+}
+
+fn numberArgument(state: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !f64 {
+    const value = runtime.argValue(state, thread, op, index);
+    return runtime.toNumber(value) catch state.failArgumentType(function_name, index + 1, "number", value);
+}
+
+fn integerArgument(state: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !i64 {
+    const value = runtime.argValue(state, thread, op, index);
+    return runtime.toInteger(value) orelse state.failArgumentType(function_name, index + 1, "number", value);
 }
 
 fn nextRandom(state: *State) u64 {

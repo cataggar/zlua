@@ -21,11 +21,11 @@ pub fn clock(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn date(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var format = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil)
-        try state.expectString(runtime.argValue(state, thread, op, 0))
+        try state.expectArgumentString(thread, op, "os.date", 0)
     else
         "%c";
     const when = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil)
-        runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected")
+        try state.argumentInteger(thread, op, "os.date", 1)
     else
         try state.currentTime();
 
@@ -42,7 +42,7 @@ pub fn date(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn remove(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const path = try state.expectArgumentString(thread, op, "os.remove", 0);
     const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
     std.Io.Dir.cwd().deleteFile(io, path) catch {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot remove file") }, .{ .integer = 2 } });
@@ -52,8 +52,8 @@ pub fn remove(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn rename(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const old_path = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const new_path = try state.expectString(runtime.argValue(state, thread, op, 1));
+    const old_path = try state.expectArgumentString(thread, op, "os.rename", 0);
+    const new_path = try state.expectArgumentString(thread, op, "os.rename", 1);
     const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
     std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, io) catch {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot rename file") }, .{ .integer = 2 } });
@@ -70,20 +70,20 @@ pub fn tmpname(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn difftime(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const t2 = runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected");
-    const t1 = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const t2 = try state.argumentInteger(thread, op, "os.difftime", 0);
+    const t1 = try state.argumentInteger(thread, op, "os.difftime", 1);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = @floatFromInt(t2 - t1) }});
 }
 
 pub fn getenv(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const name = try state.expectArgumentString(thread, op, "os.getenv", 0);
     const value = if (state.getenv(name)) |env| Value{ .string = try state.intern(env) } else Value.nil;
     try state.returnValues(thread, op.base, op.return_count, &.{value});
 }
 
 pub fn setlocale(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const locale = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil)
-        try state.expectString(runtime.argValue(state, thread, op, 0))
+        try state.expectArgumentString(thread, op, "os.setlocale", 0)
     else
         "C";
     const value = if (std.mem.eql(u8, locale, "C")) Value{ .string = try state.intern("C") } else Value.nil;
@@ -92,7 +92,7 @@ pub fn setlocale(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn execute(state: *State, thread: *Thread, op: bytecode.Call) !void {
     if (!state.processEnabled()) return state.fail("process access disabled");
-    const command = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const command = try state.expectArgumentString(thread, op, "os.execute", 0);
     const io = state.options.io orelse return state.fail("process I/O unavailable");
     const argv = [_][]const u8{ "/bin/sh", "-c", command };
     const result = std.process.run(state.allocator, io, .{
@@ -142,7 +142,10 @@ fn timeParts(timestamp: i64) struct {
 }
 
 fn tableToTime(state: *State, value: Value) !i64 {
-    const table = try state.expectTable(value);
+    const table = switch (value) {
+        .table => |table| table,
+        else => return state.failArgumentType("os.time", 1, "table", value),
+    };
     const year = try tableField(state, table, "year");
     const month = try tableField(state, table, "month");
     const day = try tableField(state, table, "day");
@@ -171,14 +174,14 @@ fn tableToTime(state: *State, value: Value) !i64 {
 
 fn tableField(state: *State, table: *runtime.Table, name: []const u8) !i64 {
     const value = table.get(.{ .string = name });
-    if (value == .nil) return state.fail("missing field");
-    return runtime.toInteger(value) orelse state.fail("not an integer");
+    if (value == .nil) return state.failArgumentMessage("os.time", 1, "missing field");
+    return runtime.toInteger(value) orelse state.failArgumentMessage("os.time", 1, "not an integer");
 }
 
 fn tableOptionalField(state: *State, table: *runtime.Table, name: []const u8) !?i64 {
     const value = table.get(.{ .string = name });
     if (value == .nil) return null;
-    return runtime.toInteger(value) orelse state.fail("not an integer");
+    return runtime.toInteger(value) orelse state.failArgumentMessage("os.time", 1, "not an integer");
 }
 
 fn checkYearFieldBounds(state: *State, year: i64) !void {

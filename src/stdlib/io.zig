@@ -22,12 +22,12 @@ pub fn write(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const path = try state.expectArgumentString(thread, op, "io.open", 0);
     const mode = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil)
-        try state.expectString(runtime.argValue(state, thread, op, 1))
+        try state.expectArgumentString(thread, op, "io.open", 1)
     else
         "r";
-    const parsed = parseMode(mode) orelse return state.fail("invalid mode");
+    const parsed = parseMode(mode) orelse return state.failArgumentMessage("io.open", 2, "invalid mode");
 
     if (isSpecialDevice(path)) {
         try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, "", parsed)});
@@ -60,7 +60,7 @@ pub fn close(state: *State, thread: *Thread, op: bytecode.Call) !void {
         Value{ .table = try currentFile(state, "__zlua_output") }
     else
         runtime.argValue(state, thread, op, 0);
-    try closeFileValue(state, thread, op, value, false);
+    try closeFileValue(state, thread, op, value, "io.close", false);
 }
 
 pub fn flush(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -78,7 +78,7 @@ pub fn lines(state: *State, thread: *Thread, op: bytecode.Call) !void {
     var start: u16 = 0;
     const file_value = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil) blk: {
         start = 1;
-        const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+        const path = try state.expectArgumentString(thread, op, "io.lines", 0);
         const parsed = parseMode("r").?;
         const contents = state.readFileAlloc(path) catch return state.fail("cannot open file");
         defer state.allocator.free(contents);
@@ -112,34 +112,34 @@ pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn fileRead(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const file = try expectFile(state, runtime.argValue(state, thread, op, 0));
+    const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:read", 1);
     try readFromFile(state, thread, op, file, 1);
 }
 
 pub fn fileWrite(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const file = try expectFile(state, runtime.argValue(state, thread, op, 0));
+    const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:write", 1);
     try writeToFile(state, thread, op, file, 1);
 }
 
 pub fn fileClose(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (op.arg_count == 0) return state.fail("got no value");
+    if (op.arg_count == 0) return state.failArgumentMessage("file:close", 1, "FILE* expected, got no value");
     if (runtime.isClosedFileValue(runtime.argValue(state, thread, op, 0))) {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
         return;
     }
-    try closeFileValue(state, thread, op, runtime.argValue(state, thread, op, 0), false);
+    try closeFileValue(state, thread, op, runtime.argValue(state, thread, op, 0), "file:close", false);
 }
 
 pub fn fileSeek(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const file = try expectFile(state, runtime.argValue(state, thread, op, 0));
+    const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:seek", 1);
     try ensureOpen(state, file);
     try refreshReadable(state, file);
     const whence = if (op.arg_count >= 2 and runtime.argValue(state, thread, op, 1) != .nil)
-        try state.expectString(runtime.argValue(state, thread, op, 1))
+        try state.expectArgumentString(thread, op, "file:seek", 1)
     else
         "cur";
     const offset = if (op.arg_count >= 3 and runtime.argValue(state, thread, op, 2) != .nil)
-        runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse return state.fail("number expected")
+        try state.argumentInteger(thread, op, "file:seek", 2)
     else
         0;
     const content = try fileString(state, file, "__zlua_file_content");
@@ -150,7 +150,7 @@ pub fn fileSeek(state: *State, thread: *Thread, op: bytecode.Call) !void {
     else if (std.mem.eql(u8, whence, "end"))
         @intCast(content.len)
     else
-        return state.fail("invalid whence");
+        return state.failArgumentMessage("file:seek", 2, "invalid whence");
     const new_pos = base + offset;
     if (new_pos < 0) {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("invalid argument") }, .{ .integer = 22 } });
@@ -161,7 +161,7 @@ pub fn fileSeek(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn fileFlush(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const file = try expectFile(state, runtime.argValue(state, thread, op, 0));
+    const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:flush", 1);
     try ensureOpen(state, file);
     if (std.mem.eql(u8, try fileString(state, file, "__zlua_file_path"), "/dev/full")) {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
@@ -173,17 +173,17 @@ pub fn fileFlush(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn fileLines(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const file_value = runtime.argValue(state, thread, op, 0);
-    _ = try expectFile(state, file_value);
+    _ = try expectFileArgument(state, file_value, "file:lines", 1);
     if (op.arg_count > max_line_args + 1) return state.fail("too many arguments");
     const iterator = try newLinesIterator(state, thread, file_value, op, 1, false);
     try state.returnValues(thread, op.base, op.return_count, &.{iterator});
 }
 
 pub fn fileSetvbuf(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const file = try expectFile(state, runtime.argValue(state, thread, op, 0));
+    const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:setvbuf", 1);
     try ensureOpen(state, file);
-    const mode = try state.expectString(runtime.argValue(state, thread, op, 1));
-    if (!std.mem.eql(u8, mode, "no") and !std.mem.eql(u8, mode, "full") and !std.mem.eql(u8, mode, "line")) return state.fail("invalid mode");
+    const mode = try state.expectArgumentString(thread, op, "file:setvbuf", 1);
+    if (!std.mem.eql(u8, mode, "no") and !std.mem.eql(u8, mode, "full") and !std.mem.eql(u8, mode, "line")) return state.failArgumentMessage("file:setvbuf", 2, "invalid mode");
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_buffer_mode") }, .{ .string = try state.intern(mode) });
     if (std.mem.eql(u8, mode, "no")) try flushFile(state, file);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
@@ -232,7 +232,7 @@ fn setCurrentFile(state: *State, thread: *Thread, op: bytecode.Call, key: []cons
         defer state.allocator.free(contents);
         value = try newFile(state, path, mode, contents, parsed);
     } else {
-        _ = try expectFile(state, value);
+        _ = try expectFileArgument(state, value, if (std.mem.eql(u8, key, "__zlua_output")) "io.output" else "io.input", 1);
     }
     if (std.mem.eql(u8, key, "__zlua_output")) {
         const old_value = io_table.get(.{ .string = key });
@@ -425,8 +425,8 @@ fn writeBytes(state: *State, file: *runtime.Table, bytes: []const u8) !void {
     try setPos(state, file, end + 1);
 }
 
-fn closeFileValue(state: *State, thread: *Thread, op: bytecode.Call, value: Value, from_iterator: bool) !void {
-    const file = try expectFile(state, value);
+fn closeFileValue(state: *State, thread: *Thread, op: bytecode.Call, value: Value, function_name: []const u8, from_iterator: bool) !void {
+    const file = try expectFileArgument(state, value, function_name, 1);
     if (runtime.isClosedFileValue(value)) {
         if (from_iterator) return;
         return state.fail("closed file");
@@ -502,6 +502,11 @@ fn openFailure(state: *State, thread: *Thread, op: bytecode.Call, message: []con
 
 fn expectFile(state: *State, value: Value) !*runtime.Table {
     if (!runtime.isFileValue(value)) return state.fail("file expected");
+    return value.table;
+}
+
+fn expectFileArgument(state: *State, value: Value, function_name: []const u8, index: u16) !*runtime.Table {
+    if (!runtime.isFileValue(value)) return state.failArgumentType(function_name, index, "FILE*", value);
     return value.table;
 }
 
