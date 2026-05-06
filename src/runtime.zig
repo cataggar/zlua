@@ -1874,7 +1874,10 @@ pub const State = struct {
 
         return switch (metamethod) {
             .table => self.getTableDepthContinuable(thread, dest, metamethod, key, depth + 1),
-            else => try self.callOneMetamethodWithContinuation(thread, "__index", metamethod, &.{ table_value, key }, .{ .value = dest }),
+            else => if (functionLike(metamethod))
+                try self.callOneMetamethodWithContinuation(thread, "__index", metamethod, &.{ table_value, key }, .{ .value = dest })
+            else
+                self.failRuntimeDetail(thread, indexErrorMessage(metamethod)),
         };
     }
 
@@ -1894,7 +1897,9 @@ pub const State = struct {
 
         return switch (metamethod) {
             .table => self.getTableDepth(thread, metamethod, key, depth + 1),
-            else => if (thread) |active_thread|
+            else => if (!functionLike(metamethod))
+                self.failRuntimeDetail(thread, indexErrorMessage(metamethod))
+            else if (thread) |active_thread|
                 try self.callOneMetamethod(active_thread, "__index", metamethod, &.{ table_value, key })
             else
                 self.fail(callErrorMessage(metamethod)),
@@ -1946,7 +1951,11 @@ pub const State = struct {
 
         switch (metamethod) {
             .table => try self.setTableDepthContinuable(thread, metamethod, key, value, depth + 1),
-            else => _ = try self.callOneMetamethodWithContinuation(thread, "__newindex", metamethod, &.{ table_value, key, value }, .discard),
+            else => if (functionLike(metamethod)) {
+                _ = try self.callOneMetamethodWithContinuation(thread, "__newindex", metamethod, &.{ table_value, key, value }, .discard);
+            } else {
+                return self.failRuntimeDetail(thread, indexErrorMessage(metamethod));
+            },
         }
     }
 
@@ -1974,7 +1983,9 @@ pub const State = struct {
 
         switch (metamethod) {
             .table => try self.setTableDepth(thread, metamethod, key, value, depth + 1),
-            else => if (thread) |active_thread| {
+            else => if (!functionLike(metamethod)) {
+                return self.failRuntimeDetail(thread, indexErrorMessage(metamethod));
+            } else if (thread) |active_thread| {
                 _ = try self.callOneMetamethod(active_thread, "__newindex", metamethod, &.{ table_value, key, value });
             } else {
                 return self.fail(callErrorMessage(metamethod));
@@ -2152,7 +2163,7 @@ pub const State = struct {
             },
             .native => |native| try self.callNative(native, thread, resolved),
             else => {
-                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.failCallTypeError(thread, callee);
+                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.failCallTypeError(thread, callee, call_name, call_namewhat);
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
                 try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
             },
@@ -4466,11 +4477,15 @@ pub const State = struct {
         return self.failAccessTypeError(thread, value, indexErrorMessage(value));
     }
 
-    fn failCallTypeError(self: *State, thread: *Thread, value: Value) RuntimeError {
+    fn failCallTypeError(self: *State, thread: *Thread, value: Value, call_name: ?[]const u8, call_namewhat: ?[]const u8) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
         appendFmt(self.allocator, &detail, "attempt to call a {s} value", .{luaTypeName(value)}) catch return self.fail(callErrorMessage(value));
-        self.appendCallOrigin(&detail, self.currentErrorSite(thread)) catch return self.fail(callErrorMessage(value));
+        if (call_name != null and call_namewhat != null and std.mem.eql(u8, call_namewhat.?, "metamethod")) {
+            appendFmt(self.allocator, &detail, " (metamethod '{s}')", .{call_name.?}) catch return self.fail(callErrorMessage(value));
+        } else {
+            self.appendCallOrigin(&detail, self.currentErrorSite(thread)) catch return self.fail(callErrorMessage(value));
+        }
         return self.failRuntimeDetail(thread, detail.items);
     }
 

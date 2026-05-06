@@ -56,3 +56,23 @@ end)
 report("bitwise constant", function()
   return "a" & 1
 end)
+
+local add_meta = setmetatable({}, { __add = 1 })
+report("invalid add metamethod", function()
+  return add_meta + 1
+end)
+
+local len_meta = setmetatable({}, { __len = 1 })
+report("invalid len metamethod", function()
+  return #len_meta
+end)
+
+local index_meta = setmetatable({}, { __index = 1 })
+report("invalid index metamethod", function()
+  return index_meta.x
+end)
+
+local newindex_meta = setmetatable({}, { __newindex = 1 })
+report("invalid newindex metamethod", function()
+  newindex_meta.x = 1
+end)

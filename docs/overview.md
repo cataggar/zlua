@@ -1626,8 +1626,8 @@ track individual failures where possible
 official basic suite is runnable
 official suite failures are categorized
 README shows current official suite status
-CI can run a quick official subset
-nightly/local can run larger official set
+CI can run the full official suite under a memory cap
+legacy heavy/quick command split is no longer needed for CI
 ```
 
 ---
@@ -2514,4 +2514,3 @@ The project shape is: **CLua first, tests always, implementation second**. Every
       Zig Programming Language
     "
 [4]: https://ziglang.org/download/0.16.0/release-notes.html?utm_source=chatgpt.com "0.16.0 Release Notes"
-

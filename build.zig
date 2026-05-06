@@ -88,32 +88,22 @@ pub fn build(b: *std.Build) void {
     diff_cmd.addArtifactArg(clua_exe);
     diff_step.dependOn(&diff_cmd.step);
 
-    const official_step = b.step("test-official", "Run quick official Lua 5.5 suite subset");
+    const official_step = b.step("test-official", "Run full official Lua 5.5 suite dashboard under a memory cap");
     const official_cmd = b.addRunArtifact(official_exe);
     official_cmd.step.dependOn(b.getInstallStep());
     official_cmd.addArg("--clua");
     official_cmd.addArtifactArg(clua_exe);
     official_cmd.addArg("--zlua");
     official_cmd.addArtifactArg(exe);
-    official_cmd.addArg("--quick");
-    official_step.dependOn(&official_cmd.step);
-
-    const official_heavy_step = b.step("test-official-heavy", "Run full official Lua 5.5 suite dashboard under a memory cap");
-    const official_heavy_cmd = b.addRunArtifact(official_exe);
-    official_heavy_cmd.step.dependOn(b.getInstallStep());
-    official_heavy_cmd.addArg("--clua");
-    official_heavy_cmd.addArtifactArg(clua_exe);
-    official_heavy_cmd.addArg("--zlua");
-    official_heavy_cmd.addArtifactArg(exe);
     if (official_memory_limit_mb != 0) {
-        official_heavy_cmd.addArg(b.fmt("--memory-limit-mb={d}", .{official_memory_limit_mb}));
+        official_cmd.addArg(b.fmt("--memory-limit-mb={d}", .{official_memory_limit_mb}));
     }
-    official_heavy_step.dependOn(&official_heavy_cmd.step);
+    official_step.dependOn(&official_cmd.step);
 
     const ci_step = b.step("ci", "Run CI checks");
     ci_step.dependOn(test_step);
     ci_step.dependOn(diff_step);
-    ci_step.dependOn(official_heavy_step);
+    ci_step.dependOn(official_step);
 }
 
 fn addVendoredClua(

@@ -171,7 +171,7 @@ fn runIndividualSuite(
     for (files.items) |file| {
         if (options.quick and std.mem.eql(u8, std.fs.path.basename(file), "heavy.lua")) {
             counts.skipped += 1;
-            try out.print("skip heavy.lua (memory-stress test; run test-official-heavy)\n", .{});
+            try out.print("skip heavy.lua (memory-stress test; omit --quick for full run)\n", .{});
             continue;
         }
 
