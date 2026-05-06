@@ -541,6 +541,8 @@ pub const State = struct {
     stdin_pos: usize = 0,
     last_error: ?[]const u8 = null,
     last_error_value: Value = .nil,
+    last_error_in_close: bool = false,
+    traceback_error_in_close: bool = false,
     current_thread: ?*Thread = null,
     coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
@@ -924,7 +926,7 @@ pub const State = struct {
                 .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
                 .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
                 .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
-                .check_close => |register| try self.checkToBeClosedValue(self.get(thread, register)),
+                .check_close => |register| try self.checkToBeClosedRegister(thread, register),
                 .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, null),
             }
 
@@ -993,6 +995,7 @@ pub const State = struct {
 
     pub fn currentFunctionName(self: *State, thread: *Thread, level: i64) ?[]const u8 {
         _ = self;
+        if (level == 2 and thread.protected_close_depth != 0) return "pcall";
         if (level < 1) return null;
         const depth: usize = @intCast(level);
         if (depth > thread.frames.items.len) return null;
@@ -1505,10 +1508,31 @@ pub const State = struct {
         }
     }
 
-    fn checkToBeClosedValue(self: *State, value: Value) !void {
+    fn checkToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register) !void {
+        const value = self.get(thread, register);
         if (value == .nil) return;
         if (value == .boolean and !value.boolean) return;
-        if ((try self.getMetamethod(value, "__close")) == null) return self.fail("variable got a non-closable value");
+        if ((try self.getMetamethod(value, "__close")) == null) {
+            const frame = thread.frames.items[thread.frames.items.len - 1];
+            thread.stack.items[frame.base + register] = .nil;
+            if (self.toBeClosedLocalName(thread, register)) |name| {
+                const message = try std.fmt.allocPrint(self.allocator, "variable '{s}' got a non-closable value", .{name});
+                defer self.allocator.free(message);
+                return self.fail(try self.intern(message));
+            }
+            return self.fail("variable got a non-closable value");
+        }
+    }
+
+    fn toBeClosedLocalName(self: *State, thread: *Thread, register: bytecode.Register) ?[]const u8 {
+        _ = self;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        for (frame.proto.locals.items) |local| {
+            if (!local.to_close or local.register != register) continue;
+            if (!localActiveAt(local, frame.pc)) continue;
+            return local.name;
+        }
+        return null;
     }
 
     fn closeToBeClosedRegister(self: *State, thread: *Thread, register: bytecode.Register, error_value: ?Value) anyerror!void {
@@ -1519,13 +1543,14 @@ pub const State = struct {
         if (value == .boolean and !value.boolean) return;
         const metamethod = (try self.getMetamethod(value, "__close")) orelse {
             thread.stack.items[absolute_register] = .nil;
-            return self.fail("variable got a non-closable value");
+            return self.fail("metamethod 'close'");
         };
         _ = (if (error_value) |err_value|
             self.callOneResult(thread, metamethod, &.{ value, err_value })
         else
             self.callOneResult(thread, metamethod, &.{value})) catch |err| {
             thread.stack.items[absolute_register] = .nil;
+            if (isRuntimeError(err)) self.last_error_in_close = true;
             return err;
         };
         thread.stack.items[absolute_register] = .nil;
@@ -2042,6 +2067,7 @@ pub const State = struct {
 
         self.last_error = null;
         self.last_error_value = .nil;
+        self.last_error_in_close = false;
         self.invokeValue(thread, .{ .base = context.relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
                 if (thread.frames.items.len < context.frame_count) return err;
@@ -2651,6 +2677,9 @@ pub const State = struct {
 
     fn returnXpcallFailure(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value) !void {
         const context = self.protectedCallContextWithErrors(thread);
+        const previous_traceback_close = self.traceback_error_in_close;
+        self.traceback_error_in_close = self.last_error_in_close;
+        defer self.traceback_error_in_close = previous_traceback_close;
         const handler_result = self.runProtectedCall(thread, context, handler, &.{error_value}) catch |err| switch (err) {
             error.CoroutineYield => {
                 try self.pushProtectedContinuation(thread, context, base, return_count, .xpcall_handler, .nil);
@@ -2676,6 +2705,7 @@ pub const State = struct {
             try out.append(self.allocator, '\n');
         }
         try out.appendSlice(self.allocator, "stack traceback:");
+        if (self.traceback_error_in_close) try out.appendSlice(self.allocator, "\n\tzlua:?: in metamethod 'close'");
         const level = if (op.arg_count >= 2) toInteger(argValue(self, thread, op, 1)) orelse 1 else 1;
         const skip = if (level <= 0) thread.frames.items.len else std.math.cast(usize, level - 1) orelse thread.frames.items.len;
         var index = if (skip >= thread.frames.items.len) @as(usize, 0) else thread.frames.items.len - skip;

@@ -899,13 +899,16 @@ const FunctionCompiler = struct {
         var has_captured = false;
         for (self.locals.items[scope.local_start..]) |local| {
             has_captured = has_captured or local.captured;
-            self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
+            if (!local.to_close) self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
         }
         var index = self.locals.items.len;
         while (index > scope.local_start) {
             index -= 1;
             const local = self.locals.items[index];
             if (local.to_close) _ = try self.emit(.{ .close_tbc = local.register });
+        }
+        for (self.locals.items[scope.local_start..]) |local| {
+            if (local.to_close) self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
         }
         if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
         self.locals.items.len = scope.local_start;
