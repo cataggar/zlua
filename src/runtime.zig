@@ -656,6 +656,52 @@ pub const State = struct {
         try self.executeClosure(try self.newRootClosure(proto));
     }
 
+    pub fn callLoadedClosure(self: *State, closure: *Closure, args: []const Value) ![]Value {
+        var thread = try Thread.initRoot(self.allocator, closure);
+        defer thread.deinit(self.allocator);
+        try self.setRootThreadArgs(&thread, args);
+        thread.frames.items[0].return_count = bytecode.multret_count;
+        const previous_thread = self.current_thread;
+        self.current_thread = &thread;
+        defer self.current_thread = previous_thread;
+        self.runThreadUntil(&thread, 0) catch |err| {
+            if (self.options.debug_errors and isRuntimeError(err)) self.appendUnhandledErrorDebugDump(&thread, err) catch {};
+            self.closeFramesTo(&thread, 0, self.currentErrorValue()) catch |close_err| return close_err;
+            thread.status = .dead;
+            return err;
+        };
+        thread.status = .dead;
+        return self.copyStackSlice(&thread, thread.last_result_base, thread.last_result_count);
+    }
+
+    pub fn protectedCallLoadedClosure(self: *State, closure: *Closure, args: []const Value) !ProtectedCallResult {
+        var thread = try Thread.initRoot(self.allocator, closure);
+        defer thread.deinit(self.allocator);
+        try self.setRootThreadArgs(&thread, args);
+        thread.frames.items[0].return_count = bytecode.multret_count;
+        const previous_thread = self.current_thread;
+        self.current_thread = &thread;
+        defer self.current_thread = previous_thread;
+
+        self.last_error = null;
+        self.last_error_in_close = false;
+        self.runThreadUntil(&thread, 0) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                if (self.options.debug_errors) self.appendUnhandledErrorDebugDump(&thread, err) catch {};
+                var failure = self.currentErrorValue();
+                self.closeFramesTo(&thread, 0, failure) catch |close_err| switch (close_err) {
+                    error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => failure = self.currentErrorValue(),
+                    else => return close_err,
+                };
+                thread.status = .dead;
+                return .{ .failure = failure };
+            },
+            else => return err,
+        };
+        thread.status = .dead;
+        return .{ .success = try self.copyStackSlice(&thread, thread.last_result_base, thread.last_result_count) };
+    }
+
     pub fn executeSourceChunk(self: *State, source: []const u8) !void {
         const loaded = try self.loadSourceAsClosure(source);
         try self.executeClosure(loaded.closure);
@@ -1095,11 +1141,24 @@ pub const State = struct {
     }
 
     pub fn loadFileAsClosure(self: *State, path: []const u8) !Value {
+        return self.loadFileAsClosureNamed(path, null);
+    }
+
+    pub fn loadFileAsClosureNamed(self: *State, path: []const u8, source_name: ?[]const u8) !Value {
         const source = try self.readFileAlloc(path);
         errdefer self.allocator.free(source);
-        const closure = try self.loadSourceAsClosure(source);
+        const allocated_source_name = if (source_name == null) try std.fmt.allocPrint(self.allocator, "@{s}", .{path}) else null;
+        defer if (allocated_source_name) |name| self.allocator.free(name);
+        const closure = try self.loadSourceAsClosureNamed(source, source_name orelse allocated_source_name.?);
         try self.source_allocations.append(self.allocator, source);
         return closure;
+    }
+
+    fn setRootThreadArgs(self: *State, thread: *Thread, args: []const Value) !void {
+        if (args.len == 0) return;
+        const owned_args = try self.allocator.dupe(Value, args);
+        thread.frames.items[0].varargs = owned_args;
+        thread.frames.items[0].owns_varargs = true;
     }
 
     pub fn callCollect(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror![]Value {
