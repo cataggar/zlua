@@ -8,7 +8,10 @@ print(string.sub("abcdef", 2, -2), string.reverse("abc"))
 print(string.lower("AbC"), string.upper("AbC"), string.rep("ha", 3, ":"))
 print(string.find("abc123def", "%d+"))
 print(string.match("abc123def", "%d+"))
+print(string.match("aaab", ".+b"), string.match("b", ".+b") == nil)
+print(string.match("um caracter ? extra", "[^%sa-z]"), string.match("]]]ab", "[^]]+"))
 print(string.gsub("a1b22", "%d+", "#"))
+print(string.gsub("abc", ".", "%0?"))
 print(string.format("%s:%d:%x", "n", 42, 255))
 
 local out = {}

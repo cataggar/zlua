@@ -375,11 +375,14 @@ fn parseFormatSpec(fmt: []const u8, index: *usize, start: usize) ?FormatSpec {
 }
 
 pub fn gmatch(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const source = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const initial = normalizeIndex(if (op.arg_count >= 3) runtime.toInteger(runtime.argValue(state, thread, op, 2)) orelse 1 else 1, source.len);
+    const start = if (initial <= 1) 0 else @min(initial - 1, source.len + 1);
     const state_value = try state.newTableWithHints(0, 3);
     const state_table = state_value.table;
-    try state_table.set(state.allocator, .{ .string = try state.intern("s") }, .{ .string = try state.expectString(runtime.argValue(state, thread, op, 0)) });
+    try state_table.set(state.allocator, .{ .string = try state.intern("s") }, .{ .string = source });
     try state_table.set(state.allocator, .{ .string = try state.intern("p") }, .{ .string = try state.expectString(runtime.argValue(state, thread, op, 1)) });
-    try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = 0 });
+    try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = @intCast(start) });
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .gmatch_iterator = state_value.table }});
 }
 
@@ -392,13 +395,25 @@ pub fn gmatchNext(state: *State, state_value: Value) ![2]Value {
     const state_table = try state.expectTable(state_value);
     const source = try state.expectString(state_table.get(.{ .string = "s" }));
     const pattern = try state.expectString(state_table.get(.{ .string = "p" }));
-    const pos = runtime.toInteger(state_table.get(.{ .string = "i" })) orelse 0;
+    var pos = runtime.toInteger(state_table.get(.{ .string = "i" })) orelse 0;
+    const previous_match_end = runtime.toInteger(state_table.get(.{ .string = "last" }));
     const capture_pattern = positionAndWholeCapturePattern(pattern);
     const search_pattern = capture_pattern orelse pattern;
-    const found = (try simplePatternFind(state, source, search_pattern, @intCast(@max(pos, 0)))) orelse return .{ .nil, .nil };
-    try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = @intCast(if (found.end > found.start) found.end else found.end + 1) });
-    if (capture_pattern != null) return .{ .{ .integer = @intCast(found.start + 1) }, .{ .string = try state.intern(source[found.start..found.end]) } };
-    return .{ .{ .string = try state.intern(source[found.start..found.end]) }, .nil };
+    const found = while (true) {
+        const current = (try simplePatternFind(state, source, search_pattern, @intCast(@max(pos, 0)))) orelse return .{ .nil, .nil };
+        if (current.range.start == current.range.end and previous_match_end != null and previous_match_end.? == current.range.start) {
+            if (current.range.end >= source.len) return .{ .nil, .nil };
+            pos = @intCast(current.range.end + 1);
+            continue;
+        }
+        break current;
+    };
+    try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = @intCast(if (found.range.end > found.range.start) found.range.end else found.range.end + 1) });
+    try state_table.set(state.allocator, .{ .string = try state.intern("last") }, .{ .integer = @intCast(found.range.end) });
+    if (capture_pattern != null) return .{ .{ .integer = @intCast(found.range.start + 1) }, .{ .string = try state.intern(source[found.range.start..found.range.end]) } };
+    var values = [_]Value{ .nil, .nil };
+    try writeMatchValues(state, source, found, values[0..]);
+    return values;
 }
 
 fn positionAndWholeCapturePattern(pattern: []const u8) ?[]const u8 {
@@ -419,15 +434,36 @@ pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
     defer out.deinit(state.allocator);
     var pos: usize = 0;
     var count: i64 = 0;
+    var changed = false;
+    var previous_match_end: ?usize = null;
     while (pos <= source.len and count < max_count) {
         const found = (try simplePatternFind(state, source, pattern, pos)) orelse break;
-        try out.appendSlice(state.allocator, source[pos..found.start]);
-        try out.appendSlice(state.allocator, try gsubReplacement(state, thread, replacement, source[found.start..found.end]));
-        pos = if (found.end > found.start) found.end else found.end + 1;
+        try out.appendSlice(state.allocator, source[pos..found.range.start]);
+        if (found.range.start == found.range.end and previous_match_end != null and previous_match_end.? == found.range.start) {
+            if (found.range.end < source.len) {
+                try out.append(state.allocator, source[found.range.end]);
+                pos = found.range.end + 1;
+                continue;
+            }
+            break;
+        }
+        const replacement_text = try gsubReplacement(state, thread, replacement, source, found);
+        try out.appendSlice(state.allocator, replacement_text.text);
+        changed = changed or replacement_text.changed;
+        previous_match_end = found.range.end;
+        if (found.range.end > found.range.start) {
+            pos = found.range.end;
+        } else if (found.range.end < source.len) {
+            try out.append(state.allocator, source[found.range.end]);
+            pos = found.range.end + 1;
+        } else {
+            pos = found.range.end + 1;
+        }
         count += 1;
     }
     try out.appendSlice(state.allocator, source[@min(pos, source.len)..]);
-    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = try state.intern(out.items) }, .{ .integer = count } });
+    const result = if (!changed) source else try state.intern(out.items);
+    try state.returnValues(thread, op.base, op.return_count, &.{ .{ .string = result }, .{ .integer = count } });
 }
 
 fn trimReasonableNumeral(state: *State, source: []const u8) ![]const u8 {
@@ -445,36 +481,155 @@ fn trimReasonableNumeral(state: *State, source: []const u8) ![]const u8 {
     return state.intern(out.items);
 }
 
-fn gsubReplacement(state: *State, thread: *Thread, replacement: Value, matched: []const u8) ![]const u8 {
+const GsubReplacement = struct { text: []const u8, changed: bool };
+
+fn gsubReplacement(state: *State, thread: *Thread, replacement: Value, source: []const u8, matched: Match) !GsubReplacement {
+    const matched_text = source[matched.range.start..matched.range.end];
     return switch (replacement) {
-        .string => |bytes| bytes,
-        .table => |table| switch (try state.getTableFromThread(thread, .{ .table = table }, .{ .string = try state.intern(matched) })) {
-            .nil => matched,
-            .boolean => |value| if (value) "true" else matched,
-            .string => |bytes| bytes,
-            else => |value| blk: {
+        .string => |bytes| .{ .text = try gsubStringReplacement(state, bytes, source, matched), .changed = true },
+        .table => |table| switch (try state.getTableFromThread(thread, .{ .table = table }, try firstMatchValue(state, source, matched))) {
+            .nil => .{ .text = matched_text, .changed = false },
+            .boolean => |value| if (value) .{ .text = "true", .changed = true } else .{ .text = matched_text, .changed = false },
+            .string => |bytes| .{ .text = bytes, .changed = true },
+            .integer => |integer| blk: {
                 var out = std.ArrayList(u8).empty;
                 defer out.deinit(state.allocator);
-                try runtime.appendValue(state.allocator, &out, value);
-                break :blk try state.intern(out.items);
+                try runtime.appendLuaString(state.allocator, &out, .{ .integer = integer });
+                break :blk .{ .text = try state.intern(out.items), .changed = true };
+            },
+            .number => |number| blk: {
+                var out = std.ArrayList(u8).empty;
+                defer out.deinit(state.allocator);
+                try runtime.appendLuaString(state.allocator, &out, .{ .number = number });
+                break :blk .{ .text = try state.intern(out.items), .changed = true };
+            },
+            else => |value| {
+                _ = try invalidReplacementValue(state, value);
+                unreachable;
             },
         },
         .closure, .gmatch_iterator, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap, .native => blk: {
-            const result = try state.callOneResult(thread, replacement, &.{.{ .string = try state.intern(matched) }});
+            var args = std.ArrayList(Value).empty;
+            defer args.deinit(state.allocator);
+            try appendMatchValues(state, &args, source, matched);
+            const result = try state.callOneResult(thread, replacement, args.items);
             switch (result) {
-                .nil => break :blk matched,
-                .boolean => |value| break :blk if (value) "true" else matched,
-                .string => |bytes| break :blk bytes,
+                .nil => break :blk .{ .text = matched_text, .changed = false },
+                .boolean => |value| break :blk if (value) .{ .text = "true", .changed = true } else .{ .text = matched_text, .changed = false },
+                .string => |bytes| break :blk .{ .text = bytes, .changed = true },
                 .integer, .number => {
                     var out = std.ArrayList(u8).empty;
                     defer out.deinit(state.allocator);
                     try runtime.appendLuaString(state.allocator, &out, result);
-                    break :blk try state.intern(out.items);
+                    break :blk .{ .text = try state.intern(out.items), .changed = true };
                 },
-                else => return state.fail("invalid replacement value"),
+                else => |value| {
+                    _ = try invalidReplacementValue(state, value);
+                    unreachable;
+                },
             }
         },
         else => return state.fail("string or table expected"),
+    };
+}
+
+fn invalidReplacementValue(state: *State, value: Value) ![]const u8 {
+    var message = std.ArrayList(u8).empty;
+    defer message.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &message, "invalid replacement value (a {s})", .{luaTypeName(value)});
+    return state.fail(try state.intern(message.items));
+}
+
+fn invalidCaptureIndex(state: *State, one_based: u8) !void {
+    var message = std.ArrayList(u8).empty;
+    defer message.deinit(state.allocator);
+    try runtime.appendFmt(state.allocator, &message, "invalid capture index %{d}", .{one_based});
+    return state.fail(try state.intern(message.items));
+}
+
+fn luaTypeName(value: Value) []const u8 {
+    return switch (value) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .string => "string",
+        .table => "table",
+        .closure, .coroutine_wrapper, .gmatch_iterator, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_pcall, .native_xpcall, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_collectgarbage, .native_error, .native_coroutine_wrap, .native => "function",
+        .thread => "thread",
+    };
+}
+
+fn gsubStringReplacement(state: *State, replacement: []const u8, source: []const u8, matched: Match) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, replacement, '%') == null) return replacement;
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(state.allocator);
+    var index: usize = 0;
+    while (index < replacement.len) : (index += 1) {
+        if (replacement[index] != '%' or index + 1 >= replacement.len) {
+            try out.append(state.allocator, replacement[index]);
+            continue;
+        }
+        index += 1;
+        switch (replacement[index]) {
+            '0' => try out.appendSlice(state.allocator, source[matched.range.start..matched.range.end]),
+            '1'...'9' => |capture_index| try appendReplacementCapture(state, &out, source, matched, capture_index - '0'),
+            '%' => try out.append(state.allocator, '%'),
+            else => return state.fail("invalid use of '%'"),
+        }
+    }
+    return state.intern(out.items);
+}
+
+fn appendReplacementCapture(state: *State, out: *std.ArrayList(u8), source: []const u8, matched: Match, one_based: u8) !void {
+    if (matched.captures.count == 0 and one_based == 1) {
+        try out.appendSlice(state.allocator, source[matched.range.start..matched.range.end]);
+        return;
+    }
+    const index: usize = one_based - 1;
+    if (index >= matched.captures.count) {
+        try invalidCaptureIndex(state, one_based);
+        unreachable;
+    }
+    switch (matched.captures.slots[index]) {
+        .range => |range| try out.appendSlice(state.allocator, source[range.start..range.end]),
+        .position => |position| try runtime.appendFmt(state.allocator, out, "{d}", .{position + 1}),
+        .unfinished => {
+            try invalidCaptureIndex(state, one_based);
+            unreachable;
+        },
+    }
+}
+
+fn firstMatchValue(state: *State, source: []const u8, matched: Match) !Value {
+    if (matched.captures.count == 0) return .{ .string = try state.intern(source[matched.range.start..matched.range.end]) };
+    return captureValue(state, source, matched.captures.slots[0]);
+}
+
+fn appendMatchValues(state: *State, values: *std.ArrayList(Value), source: []const u8, matched: Match) !void {
+    if (matched.captures.count == 0) {
+        try values.append(state.allocator, .{ .string = try state.intern(source[matched.range.start..matched.range.end]) });
+        return;
+    }
+    try appendCaptureValues(state, values, source, matched.captures);
+}
+
+fn appendCaptureValues(state: *State, values: *std.ArrayList(Value), source: []const u8, captures: CaptureState) !void {
+    for (captures.slots[0..captures.count]) |slot| try values.append(state.allocator, try captureValue(state, source, slot));
+}
+
+fn writeMatchValues(state: *State, source: []const u8, matched: Match, values: []Value) !void {
+    var list = std.ArrayList(Value).empty;
+    defer list.deinit(state.allocator);
+    try appendMatchValues(state, &list, source, matched);
+    for (values, 0..) |*value, index| value.* = if (index < list.items.len) list.items[index] else .nil;
+}
+
+fn captureValue(state: *State, source: []const u8, slot: CaptureSlot) !Value {
+    return switch (slot) {
+        .range => |range| .{ .string = try state.intern(source[range.start..range.end]) },
+        .position => |position| .{ .integer = @intCast(position + 1) },
+        .unfinished => state.fail("unfinished capture"),
     };
 }
 
@@ -648,9 +803,17 @@ fn findImpl(state: *State, thread: *Thread, op: bytecode.Call, positions: bool) 
     const found = if (plain) plainFind(source, pattern, start) else try simplePatternFind(state, source, pattern, start);
     if (found) |range| {
         if (positions) {
-            try state.returnValues(thread, op.base, op.return_count, &.{ .{ .integer = @intCast(range.start + 1) }, .{ .integer = @intCast(range.end) } });
+            var values = std.ArrayList(Value).empty;
+            defer values.deinit(state.allocator);
+            try values.append(state.allocator, .{ .integer = @intCast(range.range.start + 1) });
+            try values.append(state.allocator, .{ .integer = @intCast(range.range.end) });
+            try appendCaptureValues(state, &values, source, range.captures);
+            try state.returnValues(thread, op.base, op.return_count, values.items);
         } else {
-            try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(source[range.start..range.end]) }});
+            var values = std.ArrayList(Value).empty;
+            defer values.deinit(state.allocator);
+            try appendMatchValues(state, &values, source, range);
+            try state.returnValues(thread, op.base, op.return_count, values.items);
         }
     } else {
         try state.returnValues(thread, op.base, op.return_count, &.{.nil});
@@ -665,92 +828,274 @@ fn normalizeIndex(index: i64, source_len: usize) usize {
 }
 
 const MatchRange = struct { start: usize, end: usize };
+const max_captures = 32;
+const CaptureSlot = union(enum) {
+    unfinished: usize,
+    range: MatchRange,
+    position: usize,
+};
+const CaptureState = struct {
+    slots: [max_captures]CaptureSlot = undefined,
+    count: usize = 0,
+};
+const Match = struct { range: MatchRange, captures: CaptureState };
+const MatchResult = struct { end: usize, captures: CaptureState };
 const pattern_match_max_depth: usize = 1000;
 
-fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?MatchRange {
-    if (pattern.len == 0) return .{ .start = @min(start, source.len), .end = @min(start, source.len) };
+fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?Match {
+    if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
     if (start > source.len) return null;
     const relative = std.mem.indexOf(u8, source[start..], pattern) orelse return null;
-    return .{ .start = start + relative, .end = start + relative + pattern.len };
+    return .{ .range = .{ .start = start + relative, .end = start + relative + pattern.len }, .captures = .{} };
 }
 
-fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, start: usize) !?MatchRange {
-    if (pattern.len == 0) return .{ .start = @min(start, source.len), .end = @min(start, source.len) };
+fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, start: usize) !?Match {
+    if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
     if (pattern[0] == '^') {
         const anchored_start = @min(start, source.len);
-        const end = (try matchSimplePatternAt(state, source, pattern[1..], anchored_start)) orelse return null;
-        return .{ .start = anchored_start, .end = end };
+        const matched = (try matchSimplePatternAt(state, source, pattern[1..], anchored_start)) orelse return null;
+        return .{ .range = .{ .start = anchored_start, .end = matched.end }, .captures = matched.captures };
     }
     var candidate = start;
     while (candidate <= source.len) : (candidate += 1) {
-        if (try matchSimplePatternAt(state, source, pattern, candidate)) |end| return .{ .start = candidate, .end = end };
+        if (try matchSimplePatternAt(state, source, pattern, candidate)) |matched| return .{ .range = .{ .start = candidate, .end = matched.end }, .captures = matched.captures };
     }
     return null;
 }
 
-fn matchSimplePatternAt(state: *State, source: []const u8, pattern: []const u8, start: usize) !?usize {
-    return matchPatternFrom(state, source, pattern, start, 0, 0);
+fn matchSimplePatternAt(state: *State, source: []const u8, pattern: []const u8, start: usize) !?MatchResult {
+    return matchPatternFrom(state, source, pattern, start, 0, 0, .{});
 }
 
-fn matchPatternFrom(state: *State, source: []const u8, pattern: []const u8, source_index: usize, pattern_index: usize, depth: usize) !?usize {
+fn matchPatternFrom(state: *State, source: []const u8, pattern: []const u8, source_index: usize, pattern_index: usize, depth: usize, captures: CaptureState) !?MatchResult {
     if (depth > pattern_match_max_depth) return state.fail("pattern too complex");
-    if (pattern_index >= pattern.len) return source_index;
-    if (pattern[pattern_index] == '$' and pattern_index + 1 == pattern.len) return if (source_index == source.len) source_index else null;
-    if (pattern[pattern_index] == '(' or pattern[pattern_index] == ')') return matchPatternFrom(state, source, pattern, source_index, pattern_index + 1, depth + 1);
+    if (pattern_index >= pattern.len) {
+        if (capturesHaveUnfinished(captures)) return state.fail("unfinished capture");
+        return .{ .end = source_index, .captures = captures };
+    }
+    if (pattern[pattern_index] == '$' and pattern_index + 1 == pattern.len) return if (source_index == source.len) .{ .end = source_index, .captures = captures } else null;
+    if (pattern[pattern_index] == '(') {
+        const updated = if (pattern_index + 1 < pattern.len and pattern[pattern_index + 1] == ')')
+            try appendCapture(state, captures, .{ .position = source_index })
+        else
+            try appendCapture(state, captures, .{ .unfinished = source_index });
+        const next_index = pattern_index + @as(usize, if (pattern_index + 1 < pattern.len and pattern[pattern_index + 1] == ')') 2 else 1);
+        return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, updated);
+    }
+    if (pattern[pattern_index] == ')') return matchPatternFrom(state, source, pattern, source_index, pattern_index + 1, depth + 1, try closeCapture(state, captures, source_index));
 
     const atom_start = pattern_index;
     const atom_end = nextPatternAtom(pattern, atom_start);
+    try validatePatternAtom(state, pattern, atom_start, atom_end);
     const quantifier = if (atom_end < pattern.len and std.mem.indexOfScalar(u8, "*+-?", pattern[atom_end]) != null) pattern[atom_end] else 0;
     const next_index = atom_end + @as(usize, if (quantifier != 0) 1 else 0);
     const atom = pattern[atom_start..atom_end];
 
     switch (quantifier) {
         0 => {
-            if (source_index >= source.len or !patternAtomMatches(atom, source[source_index])) return null;
-            return matchPatternFrom(state, source, pattern, source_index + 1, next_index, depth + 1);
+            const item_end = (try matchPatternItem(state, source, atom, source_index, captures)) orelse return null;
+            return matchPatternFrom(state, source, pattern, item_end, next_index, depth + 1, captures);
         },
         '?' => {
-            if (source_index < source.len and patternAtomMatches(atom, source[source_index])) {
-                if (try matchPatternFrom(state, source, pattern, source_index + 1, next_index, depth + 1)) |end| return end;
+            if (try matchPatternItem(state, source, atom, source_index, captures)) |item_end| {
+                if (item_end > source_index) {
+                    if (try matchPatternFrom(state, source, pattern, item_end, next_index, depth + 1, captures)) |end| return end;
+                }
             }
-            return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1);
+            return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, captures);
         },
         '*', '+' => {
+            var ends: [512]usize = undefined;
+            var end_count: usize = 0;
             var end = source_index;
-            while (end < source.len and patternAtomMatches(atom, source[end])) end += 1;
-            if (quantifier == '+' and end == source_index) return null;
-            var candidate = end;
-            while (candidate >= source_index) : (candidate -= 1) {
-                if (try matchPatternFrom(state, source, pattern, candidate, next_index, depth + 1)) |matched_end| return matched_end;
-                if (candidate == source_index) break;
+            while (end_count < ends.len) {
+                const item_end = (try matchPatternItem(state, source, atom, end, captures)) orelse break;
+                if (item_end == end) break;
+                end = item_end;
+                ends[end_count] = end;
+                end_count += 1;
             }
+            if (quantifier == '+' and end == source_index) return null;
+            var index = end_count;
+            while (index > 0) {
+                index -= 1;
+                if (try matchPatternFrom(state, source, pattern, ends[index], next_index, depth + 1, captures)) |matched_end| return matched_end;
+            }
+            if (quantifier == '*') return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, captures);
             return null;
         },
         '-' => {
             var candidate = source_index;
             while (true) {
-                if (try matchPatternFrom(state, source, pattern, candidate, next_index, depth + 1)) |matched_end| return matched_end;
-                if (candidate >= source.len or !patternAtomMatches(atom, source[candidate])) return null;
-                candidate += 1;
+                if (try matchPatternFrom(state, source, pattern, candidate, next_index, depth + 1, captures)) |matched_end| return matched_end;
+                const item_end = (try matchPatternItem(state, source, atom, candidate, captures)) orelse return null;
+                if (item_end == candidate) return null;
+                candidate = item_end;
             }
         },
         else => unreachable,
     }
 }
 
+fn validatePatternAtom(state: *State, pattern: []const u8, atom_start: usize, atom_end: usize) !void {
+    if (pattern[atom_start] == '[' and atom_end == atom_start + 1) return state.fail("malformed pattern");
+    if (pattern[atom_start] != '%') return;
+    if (atom_start + 1 >= pattern.len) return state.fail("malformed pattern");
+    switch (pattern[atom_start + 1]) {
+        'b' => if (atom_start + 3 >= pattern.len) return state.fail("malformed pattern"),
+        'f' => if (atom_start + 2 >= pattern.len or pattern[atom_start + 2] != '[' or atom_end == atom_start + 1) return state.fail("missing '[' after '%f'"),
+        else => {},
+    }
+}
+
+fn appendCapture(state: *State, captures: CaptureState, slot: CaptureSlot) !CaptureState {
+    if (captures.count >= max_captures) return state.fail("too many captures");
+    var updated = captures;
+    updated.slots[updated.count] = slot;
+    updated.count += 1;
+    return updated;
+}
+
+fn closeCapture(state: *State, captures: CaptureState, end: usize) !CaptureState {
+    var updated = captures;
+    var index = updated.count;
+    while (index > 0) {
+        index -= 1;
+        switch (updated.slots[index]) {
+            .unfinished => |start| {
+                updated.slots[index] = .{ .range = .{ .start = start, .end = end } };
+                return updated;
+            },
+            else => {},
+        }
+    }
+    return state.fail("invalid pattern capture");
+}
+
+fn capturesHaveUnfinished(captures: CaptureState) bool {
+    for (captures.slots[0..captures.count]) |slot| switch (slot) {
+        .unfinished => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn matchPatternItem(state: *State, source: []const u8, atom: []const u8, source_index: usize, captures: CaptureState) !?usize {
+    if (atom.len == 0) return null;
+    if (atom.len == 1) {
+        if (source_index >= source.len) return null;
+        return if (atom[0] == '.' or atom[0] == source[source_index]) source_index + 1 else null;
+    }
+    if (atom[0] == '%') {
+        if (atom.len >= 4 and atom[1] == 'b') return matchBalanced(source, source_index, atom[2], atom[3]);
+        if (atom.len >= 4 and atom[1] == 'f' and atom[2] == '[') {
+            const previous = if (source_index == 0) 0 else source[source_index - 1];
+            const current = if (source_index < source.len) source[source_index] else 0;
+            return if (!patternAtomMatches(atom[2..], previous) and patternAtomMatches(atom[2..], current)) source_index else null;
+        }
+        if (atom[1] == '0') {
+            try invalidCaptureIndex(state, 0);
+            unreachable;
+        }
+        if (atom[1] >= '1' and atom[1] <= '9') return matchCaptureReference(state, source, source_index, captures, atom[1] - '0');
+        if (source_index >= source.len) return null;
+        return if (patternEscapeMatches(atom[1], source[source_index])) source_index + 1 else null;
+    }
+    if (atom[0] == '[' and atom[atom.len - 1] == ']') {
+        if (source_index >= source.len) return null;
+        return if (patternAtomMatches(atom, source[source_index])) source_index + 1 else null;
+    }
+    return null;
+}
+
+fn matchBalanced(source: []const u8, source_index: usize, open: u8, close: u8) ?usize {
+    if (source_index >= source.len or source[source_index] != open) return null;
+    var depth: usize = 1;
+    var index = source_index + 1;
+    while (index < source.len) : (index += 1) {
+        if (source[index] == close) {
+            depth -= 1;
+            if (depth == 0) return index + 1;
+        } else if (source[index] == open) {
+            depth += 1;
+        }
+    }
+    return null;
+}
+
+fn matchCaptureReference(state: *State, source: []const u8, source_index: usize, captures: CaptureState, one_based: u8) !?usize {
+    const index: usize = one_based - 1;
+    if (index >= captures.count) {
+        try invalidCaptureIndex(state, one_based);
+        unreachable;
+    }
+    const range = switch (captures.slots[index]) {
+        .range => |range| range,
+        else => {
+            try invalidCaptureIndex(state, one_based);
+            unreachable;
+        },
+    };
+    const captured = source[range.start..range.end];
+    if (source_index + captured.len > source.len) return null;
+    return if (std.mem.eql(u8, source[source_index .. source_index + captured.len], captured)) source_index + captured.len else null;
+}
+
 fn nextPatternAtom(pattern: []const u8, index: usize) usize {
-    if (pattern[index] == '%' and index + 1 < pattern.len) return index + 2;
+    if (pattern[index] == '%' and index + 1 < pattern.len) {
+        if (pattern[index + 1] == 'b' and index + 3 < pattern.len) return index + 4;
+        if (pattern[index + 1] == 'f' and index + 2 < pattern.len and pattern[index + 2] == '[') return classAtomEnd(pattern, index + 2);
+        return index + 2;
+    }
     if (pattern[index] == '[') {
-        var end = index + 1;
-        while (end < pattern.len and pattern[end] != ']') : (end += 1) {}
-        if (end < pattern.len) return end + 1;
+        const end = classAtomEnd(pattern, index);
+        if (end > index) return end;
     }
     return index + 1;
 }
 
+fn classAtomEnd(pattern: []const u8, index: usize) usize {
+    var end = index + 1;
+    if (end < pattern.len and pattern[end] == '^') end += 1;
+    if (end < pattern.len and pattern[end] == ']') end += 1;
+    while (end < pattern.len) {
+        if (pattern[end] == '%' and end + 1 < pattern.len) {
+            end += 2;
+            continue;
+        }
+        if (pattern[end] == ']') return end + 1;
+        end += 1;
+    }
+    return index;
+}
+
 fn patternAtomMatches(atom: []const u8, source_byte: u8) bool {
     if (atom.len == 1) return atom[0] == '.' or atom[0] == source_byte;
-    if (atom[0] == '%') return switch (atom[1]) {
+    if (atom[0] == '%') return patternEscapeMatches(atom[1], source_byte);
+    if (atom[0] == '[' and atom[atom.len - 1] == ']') {
+        const negated = atom.len > 2 and atom[1] == '^';
+        const body = atom[if (negated) 2 else 1 .. atom.len - 1];
+        var matched = false;
+        var index: usize = 0;
+        while (index < body.len) {
+            if (body[index] == '%' and index + 1 < body.len) {
+                matched = matched or patternEscapeMatches(body[index + 1], source_byte);
+                index += 2;
+            } else if (index + 2 < body.len and body[index + 1] == '-') {
+                matched = matched or (body[index] <= source_byte and source_byte <= body[index + 2]);
+                index += 3;
+            } else {
+                matched = matched or body[index] == source_byte;
+                index += 1;
+            }
+        }
+        return if (negated) !matched else matched;
+    }
+    return false;
+}
+
+fn patternEscapeMatches(code: u8, source_byte: u8) bool {
+    return switch (code) {
         'a' => std.ascii.isAlphabetic(source_byte),
         'A' => !std.ascii.isAlphabetic(source_byte),
         'c' => isControl(source_byte),
@@ -773,24 +1118,8 @@ fn patternAtomMatches(atom: []const u8, source_byte: u8) bool {
         'X' => !std.ascii.isHex(source_byte),
         'z' => source_byte == 0,
         'Z' => source_byte != 0,
-        else => atom[1] == source_byte,
+        else => code == source_byte,
     };
-    if (atom[0] == '[' and atom[atom.len - 1] == ']') {
-        const negated = atom.len > 2 and atom[1] == '^';
-        const body = atom[if (negated) 2 else 1 .. atom.len - 1];
-        var matched = false;
-        var index: usize = 0;
-        while (index < body.len) : (index += 1) {
-            if (index + 2 < body.len and body[index + 1] == '-') {
-                matched = matched or (body[index] <= source_byte and source_byte <= body[index + 2]);
-                index += 2;
-            } else {
-                matched = matched or body[index] == source_byte;
-            }
-        }
-        return if (negated) !matched else matched;
-    }
-    return false;
 }
 
 fn isControl(code: u8) bool {

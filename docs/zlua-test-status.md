@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=26`, `categorized_failed=6`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=27`, `categorized_failed=5`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -24,6 +24,13 @@ This document tracks the test layers currently used for zlua and the current sta
 | Not run | The file exists in the official suite but is not part of the per-file basic dashboard. |
 
 ## Focused Official Progress
+
+Latest focused `pm.lua` work verified with `just official-file pm`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+- String pattern matching now tracks captures, position captures, backreferences, balanced matches, frontier assertions, escaped bracket-class items, and malformed-pattern diagnostics covered by `pm.lua`.
+- `string.gsub` now expands `%0`/`%1` replacement captures, passes captures to function replacements, handles table replacement keys from captures, preserves official empty-match skip semantics, and reuses the original string when no substitution changes the output.
+- `string.gmatch` now honors the optional initial position and skips empty matches immediately following the previous match.
+- `pm.lua` now passes in the basic official dashboard.
 
 Latest focused `vararg.lua` work verified with `just official-file vararg`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
 
@@ -196,7 +203,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `math.lua` | Pass | Pass |  |
 | `memerr.lua` | Pass | Pass |  |
 | `nextvar.lua` | Pass | Pass |  |
-| `pm.lua` | Pass | XFail | `runtime` |
+| `pm.lua` | Pass | Pass |  |
 | `sort.lua` | Pass | Pass |  |
 | `strings.lua` | Pass | Pass |  |
 | `tpack.lua` | Pass | XFail | `runtime` |
@@ -215,7 +222,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 26 |
-| Categorized zlua failures | 6 |
+| zlua passes | 27 |
+| Categorized zlua failures | 5 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |
