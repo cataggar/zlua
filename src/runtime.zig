@@ -738,23 +738,38 @@ pub const State = struct {
         try state.globals.put(try state.intern("dofile"), .{ .native = .dofile });
         try state.globals.put(try state.intern("require"), .{ .native = .require });
 
-        const io_lib = try state.newTableWithHints(0, 4);
+        const io_lib = try state.newTableWithHints(0, 16);
+        const stdin = try state.newStandardFile("stdin", "r");
+        const stdout = try state.newStandardFile("stdout", "w");
+        const stderr = try state.newStandardFile("stderr", "w");
         try state.setTable(io_lib, .{ .string = try state.intern("read") }, .{ .native = .io_read });
         try state.setTable(io_lib, .{ .string = try state.intern("write") }, .{ .native = .io_write });
         try state.setTable(io_lib, .{ .string = try state.intern("open") }, .{ .native = .io_open });
+        try state.setTable(io_lib, .{ .string = try state.intern("input") }, .{ .native = .io_input });
+        try state.setTable(io_lib, .{ .string = try state.intern("output") }, .{ .native = .io_output });
+        try state.setTable(io_lib, .{ .string = try state.intern("close") }, .{ .native = .io_close });
+        try state.setTable(io_lib, .{ .string = try state.intern("flush") }, .{ .native = .io_flush });
+        try state.setTable(io_lib, .{ .string = try state.intern("lines") }, .{ .native = .io_lines });
+        try state.setTable(io_lib, .{ .string = try state.intern("tmpfile") }, .{ .native = .io_tmpfile });
         try state.setTable(io_lib, .{ .string = try state.intern("type") }, .{ .native = .io_type });
-        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, try state.newStandardFile("stdin", "r"));
-        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, try state.newStandardFile("stdout", "w"));
-        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, try state.newStandardFile("stderr", "w"));
+        try state.setTable(io_lib, .{ .string = try state.intern("stdin") }, stdin);
+        try state.setTable(io_lib, .{ .string = try state.intern("stdout") }, stdout);
+        try state.setTable(io_lib, .{ .string = try state.intern("stderr") }, stderr);
+        try state.setTable(io_lib, .{ .string = try state.intern("__zlua_input") }, stdin);
+        try state.setTable(io_lib, .{ .string = try state.intern("__zlua_output") }, stdout);
         try state.globals.put(try state.intern("io"), io_lib);
 
-        const os_lib = try state.newTableWithHints(0, 4);
+        const os_lib = try state.newTableWithHints(0, 12);
         try state.setTable(os_lib, .{ .string = try state.intern("time") }, .{ .native = .os_time });
         try state.setTable(os_lib, .{ .string = try state.intern("clock") }, .{ .native = .os_clock });
         try state.setTable(os_lib, .{ .string = try state.intern("date") }, .{ .native = .os_date });
         try state.setTable(os_lib, .{ .string = try state.intern("getenv") }, .{ .native = .os_getenv });
         try state.setTable(os_lib, .{ .string = try state.intern("setlocale") }, .{ .native = .os_setlocale });
         try state.setTable(os_lib, .{ .string = try state.intern("execute") }, .{ .native = .os_execute });
+        try state.setTable(os_lib, .{ .string = try state.intern("remove") }, .{ .native = .os_remove });
+        try state.setTable(os_lib, .{ .string = try state.intern("rename") }, .{ .native = .os_rename });
+        try state.setTable(os_lib, .{ .string = try state.intern("tmpname") }, .{ .native = .os_tmpname });
+        try state.setTable(os_lib, .{ .string = try state.intern("difftime") }, .{ .native = .os_difftime });
         try state.globals.put(try state.intern("os"), os_lib);
 
         const debug_lib = try state.newTableWithHints(0, 9);
@@ -805,10 +820,24 @@ pub const State = struct {
         try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern("") });
         try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
         try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_standard") }, .{ .boolean = true });
+        try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_buffer_mode") }, .{ .string = try state.intern("full") });
         try file.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .io_file_read });
         try file.set(state.allocator, .{ .string = try state.intern("write") }, .{ .native = .io_file_write });
         try file.set(state.allocator, .{ .string = try state.intern("close") }, .{ .native = .io_file_close });
+        try file.set(state.allocator, .{ .string = try state.intern("seek") }, .{ .native = .io_file_seek });
+        try file.set(state.allocator, .{ .string = try state.intern("flush") }, .{ .native = .io_file_flush });
+        try file.set(state.allocator, .{ .string = try state.intern("lines") }, .{ .native = .io_file_lines });
+        try file.set(state.allocator, .{ .string = try state.intern("setvbuf") }, .{ .native = .io_file_setvbuf });
+        file.metatable = try state.fileMetatable();
         return value;
+    }
+
+    pub fn fileMetatable(state: *State) !*Table {
+        const value = try state.newTableWithHints(0, 2);
+        try value.table.set(state.allocator, .{ .string = try state.intern("__name") }, .{ .string = try state.intern("FILE*") });
+        try value.table.set(state.allocator, .{ .string = try state.intern("__close") }, .{ .native = .io_file_close });
+        return value.table;
     }
 
     pub fn deinit(self: *State) void {
@@ -2031,8 +2060,13 @@ pub const State = struct {
             .native_coroutine_close => try self.coroutineClose(thread, resolved),
             .native_coroutine_wrap => try self.coroutineWrap(thread, resolved),
             .gmatch_iterator => |state_table| {
-                const values = try stdlib.string.gmatchNext(self, .{ .table = state_table });
-                try self.returnValues(thread, resolved.base, resolved.return_count, &values);
+                if (state_table.get(.{ .string = "__zlua_lines_iterator" }) != .nil) {
+                    const values = try stdlib.io.linesNext(self, .{ .table = state_table });
+                    try self.returnValues(thread, resolved.base, resolved.return_count, values);
+                } else {
+                    const values = try stdlib.string.gmatchNext(self, .{ .table = state_table });
+                    try self.returnValues(thread, resolved.base, resolved.return_count, values[0..2]);
+                }
             },
             .native => |native| try self.callNative(native, thread, resolved),
             else => {
@@ -2268,6 +2302,14 @@ pub const State = struct {
     }
 
     pub fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
+        if (isFileValue(value)) {
+            if (isClosedFileValue(value)) return self.intern("file (closed)");
+            var file_name = std.ArrayList(u8).empty;
+            defer file_name.deinit(self.allocator);
+            try appendFmt(self.allocator, &file_name, "file (0x{x})", .{@intFromPtr(value.table)});
+            return self.intern(file_name.items);
+        }
+
         if (try self.getMetamethod(value, "__tostring")) |metamethod| {
             const result = try self.callOneResult(thread, metamethod, &.{value});
             return switch (result) {
@@ -3042,6 +3084,12 @@ pub const State = struct {
 
         target.status = .dead;
         target.close_error_value = null;
+        if (target.entry == .native and target.entry.native == .dofile and target.last_result_count >= 2) {
+            const values = target.stack.items[target.last_result_base .. target.last_result_base + target.last_result_count];
+            if (values[0] == .native and values[0].native == .dofile and values[1] == .string) {
+                return .{ .success = try self.copyValues(values[2..]) };
+            }
+        }
         return .{ .success = try self.copyStackSlice(target, target.last_result_base, target.last_result_count) };
     }
 
@@ -4483,6 +4531,7 @@ fn isNativeCallable(value: Value) bool {
 fn isYieldBlockingNative(value: Value) bool {
     return switch (value) {
         .native_pcall, .native_xpcall => false,
+        .native => |native| native != .dofile,
         else => isNativeCallable(value),
     };
 }
@@ -4903,7 +4952,13 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
         .integer => |integer| try appendFmt(allocator, out, "{d}", .{integer}),
         .number => |number| try appendNumber(allocator, out, number),
         .string => |string| try out.appendSlice(allocator, string),
-        .table => |table| try appendFmt(allocator, out, "table: 0x{x}", .{@intFromPtr(table)}),
+        .table => |table| if (isFileValue(value)) {
+            if (isClosedFileValue(value)) {
+                try out.appendSlice(allocator, "file (closed)");
+            } else {
+                try appendFmt(allocator, out, "file (0x{x})", .{@intFromPtr(table)});
+            }
+        } else try appendFmt(allocator, out, "table: 0x{x}", .{@intFromPtr(table)}),
         .closure => |closure| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(closure)}),
         .thread => |thread| try appendFmt(allocator, out, "thread: 0x{x}", .{@intFromPtr(thread)}),
         .coroutine_wrapper => |thread| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(thread)}),
@@ -4941,6 +4996,16 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
             try out.appendSlice(allocator, native.name());
         },
     }
+}
+
+pub fn isFileValue(value: Value) bool {
+    return value == .table and value.table.get(.{ .string = "__zlua_file" }) != .nil;
+}
+
+pub fn isClosedFileValue(value: Value) bool {
+    if (!isFileValue(value)) return false;
+    const closed = value.table.get(.{ .string = "__zlua_file_closed" });
+    return closed == .boolean and closed.boolean;
 }
 
 fn appendNamedValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: Value) !void {

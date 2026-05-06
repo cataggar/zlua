@@ -15,6 +15,7 @@ pub fn load(state: *State, thread: *Thread, op: bytecode.Call) !void {
     defer if (loaded_source.owned) state.allocator.free(loaded_source.source);
 
     const source = loaded_source.source;
+    if (invalidLoadMode(state, thread, op)) return state.fail("invalid mode");
     if (loadModeError(state, thread, op, source)) |message| {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) } });
         return;
@@ -99,6 +100,13 @@ fn loadModeError(state: *State, thread: *Thread, op: bytecode.Call, source: []co
     return null;
 }
 
+fn invalidLoadMode(state: *State, thread: *Thread, op: bytecode.Call) bool {
+    const mode = if (op.arg_count >= 3 and runtime.argValue(state, thread, op, 2) == .string) runtime.argValue(state, thread, op, 2).string else "bt";
+    if (mode.len == 0) return true;
+    for (mode) |byte| if (byte != 'b' and byte != 't') return true;
+    return false;
+}
+
 fn looksLikeBinaryChunk(source: []const u8) bool {
     return std.mem.startsWith(u8, source, runtime.binary_chunk_signature) or
         (source.len > 0 and std.mem.startsWith(u8, runtime.binary_chunk_signature, source));
@@ -111,7 +119,7 @@ fn loadEnvironment(state: *State, thread: *Thread, op: bytecode.Call) Value {
 
 fn isReaderFunction(value: Value) bool {
     return switch (value) {
-        .closure, .coroutine_wrapper, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap, .native => true,
+        .closure, .coroutine_wrapper, .gmatch_iterator, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap, .native => true,
         else => false,
     };
 }
@@ -580,6 +588,7 @@ pub fn warn(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 fn typeName(value: Value) []const u8 {
+    if (runtime.isFileValue(value)) return "userdata";
     return switch (value) {
         .nil => "nil",
         .boolean => "boolean",

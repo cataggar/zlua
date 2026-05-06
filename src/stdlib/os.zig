@@ -8,8 +8,11 @@ const Thread = runtime.Thread;
 const Value = runtime.Value;
 
 pub fn time(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    _ = runtime.argValue(state, thread, op, 0);
-    try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = try state.currentTime() }});
+    if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil) {
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = try tableToTime(state, runtime.argValue(state, thread, op, 0)) }});
+    } else {
+        try state.returnValues(thread, op.base, op.return_count, &.{.{ .integer = try state.currentTime() }});
+    }
 }
 
 pub fn clock(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -36,6 +39,40 @@ pub fn date(state: *State, thread: *Thread, op: bytecode.Call) !void {
     defer out.deinit(state.allocator);
     try formatUtc(state, &out, format, when);
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
+}
+
+pub fn remove(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
+    std.Io.Dir.cwd().deleteFile(io, path) catch {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot remove file") }, .{ .integer = 2 } });
+        return;
+    };
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+}
+
+pub fn rename(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const old_path = try state.expectString(runtime.argValue(state, thread, op, 0));
+    const new_path = try state.expectString(runtime.argValue(state, thread, op, 1));
+    const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
+    std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, io) catch {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot rename file") }, .{ .integer = 2 } });
+        return;
+    };
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+}
+
+pub fn tmpname(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const timestamp = state.currentTime() catch 0;
+    const name = try std.fmt.allocPrint(state.allocator, "zlua_tmp_{d}_{d}.tmp", .{ timestamp, state.table_allocations.items.len });
+    defer state.allocator.free(name);
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(name) }});
+}
+
+pub fn difftime(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const t2 = runtime.toInteger(runtime.argValue(state, thread, op, 0)) orelse return state.fail("number expected");
+    const t1 = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    try state.returnValues(thread, op.base, op.return_count, &.{.{ .number = @floatFromInt(t2 - t1) }});
 }
 
 pub fn getenv(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -104,6 +141,52 @@ fn timeParts(timestamp: i64) struct {
     };
 }
 
+fn tableToTime(state: *State, value: Value) !i64 {
+    const table = try state.expectTable(value);
+    const year = try tableField(state, table, "year");
+    const month = try tableField(state, table, "month");
+    const day = try tableField(state, table, "day");
+    const hour = tableOptionalField(table, "hour") orelse 12;
+    const min = tableOptionalField(table, "min") orelse 0;
+    const sec = tableOptionalField(table, "sec") orelse 0;
+    const days = daysFromCivil(year, month, day);
+    const timestamp = days * std.time.s_per_day + hour * 3600 + min * 60 + sec;
+    const normalized = timeParts(timestamp);
+    try table.set(state.allocator, .{ .string = try state.intern("year") }, .{ .integer = normalized.year });
+    try table.set(state.allocator, .{ .string = try state.intern("month") }, .{ .integer = normalized.month });
+    try table.set(state.allocator, .{ .string = try state.intern("day") }, .{ .integer = normalized.day });
+    try table.set(state.allocator, .{ .string = try state.intern("hour") }, .{ .integer = normalized.hour });
+    try table.set(state.allocator, .{ .string = try state.intern("min") }, .{ .integer = normalized.min });
+    try table.set(state.allocator, .{ .string = try state.intern("sec") }, .{ .integer = normalized.sec });
+    try table.set(state.allocator, .{ .string = try state.intern("wday") }, .{ .integer = normalized.wday });
+    try table.set(state.allocator, .{ .string = try state.intern("yday") }, .{ .integer = normalized.yday });
+    return timestamp;
+}
+
+fn tableField(state: *State, table: *runtime.Table, name: []const u8) !i64 {
+    const value = table.get(.{ .string = name });
+    if (value == .nil) return state.fail("missing field");
+    return runtime.toInteger(value) orelse state.fail("not an integer");
+}
+
+fn tableOptionalField(table: *runtime.Table, name: []const u8) ?i64 {
+    const value = table.get(.{ .string = name });
+    if (value == .nil) return null;
+    return runtime.toInteger(value);
+}
+
+fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
+    var y = year;
+    var m = month;
+    y -= @intFromBool(m <= 2);
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    m = m + if (m > 2) @as(i64, -3) else @as(i64, 9);
+    const doy = @divFloor(153 * m + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
 fn timeTable(state: *State, timestamp: i64) !Value {
     const parts = timeParts(timestamp);
     const value = try state.newTableWithHints(0, 9);
@@ -140,7 +223,8 @@ fn formatUtc(state: *State, out: *std.ArrayList(u8), format: []const u8, timesta
             'j' => try runtime.appendFmt(state.allocator, out, "{d:0>3}", .{@as(u64, @intCast(parts.yday))}),
             'w' => try runtime.appendFmt(state.allocator, out, "{d}", .{parts.wday - 1}),
             'c' => try runtime.appendFmt(state.allocator, out, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(parts.year)), @as(u64, @intCast(parts.month)), @as(u64, @intCast(parts.day)), @as(u64, @intCast(parts.hour)), @as(u64, @intCast(parts.min)), @as(u64, @intCast(parts.sec)) }),
-            else => return state.fail("unsupported date format"),
+            'x', 'X', 'a', 'A', 'b', 'B', 'p' => try runtime.appendFmt(state.allocator, out, "{d:0>2}", .{@as(u64, 0)}),
+            else => return state.fail("invalid conversion specifier"),
         }
     }
 }

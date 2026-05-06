@@ -1012,7 +1012,7 @@ fn matchPatternFrom(state: *State, source: []const u8, pattern: []const u8, sour
             return matchPatternFrom(state, source, pattern, source_index, next_index, depth + 1, captures);
         },
         '*', '+' => {
-            var ends: [512]usize = undefined;
+            var ends: [4096]usize = undefined;
             var end_count: usize = 0;
             var end = source_index;
             while (end_count < ends.len) {

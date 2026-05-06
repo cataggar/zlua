@@ -21,7 +21,8 @@ pub fn dofile(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const closure = try state.loadFileAsClosure(path);
     const values = try state.callCollect(thread, closure, &.{});
     defer state.allocator.free(values);
-    try state.returnValues(thread, op.base, op.return_count, values);
+    const result_values = if (values.len >= 2 and values[0] == .native and values[0].native == .dofile and values[1] == .string and std.mem.eql(u8, values[1].string, path)) values[2..] else values;
+    try state.returnValues(thread, op.base, op.return_count, result_values);
 }
 
 pub fn require(state: *State, thread: *Thread, op: bytecode.Call) !void {
