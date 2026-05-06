@@ -42,6 +42,7 @@ const Local = struct {
     debug_index: usize,
     captured: bool = false,
     to_close: bool = false,
+    synthetic: bool = false,
 };
 
 const PendingLocal = struct {
@@ -136,7 +137,7 @@ const FunctionCompiler = struct {
         defer self.deinit();
         self.proto.is_vararg = true;
         try self.enterScope();
-        const env = try self.declareLocal("_ENV");
+        const env = try self.declareSyntheticLocal("_ENV");
         const env_upvalue = try self.proto.addUpvalue(.{ .name = "_ENV", .in_stack = false, .index = 0 });
         self.current_line = 0;
         _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = env_upvalue } });
@@ -253,7 +254,7 @@ const FunctionCompiler = struct {
         defer pending.deinit(self.allocator);
 
         for (decl.bindings) |binding| {
-            if (self.locals.items.len + pending.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
+            if (self.activeUserLocalCount() + pending.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
             const register = try self.allocReg();
             const debug_index = try self.proto.addLocal(.{
                 .name = binding.name.name,
@@ -433,7 +434,7 @@ const FunctionCompiler = struct {
             _ = try self.emit(.{ .load_const = .{ .dest = step, .constant = one } });
         }
 
-        if (self.locals.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
+        if (self.activeUserLocalCount() >= lua_max_local_variables) return self.failTooManyLocalVariables();
         const debug_index = try self.proto.addLocal(.{ .name = stmt.name.name, .register = base, .start_pc = self.proto.pc() });
         try self.locals.append(self.allocator, .{ .name = stmt.name.name, .register = base, .debug_index = debug_index });
         try self.decls.append(self.allocator, .{ .name = stmt.name.name, .kind = .local, .local_index = self.locals.items.len - 1 });
@@ -572,6 +573,7 @@ const FunctionCompiler = struct {
 
     fn compileReturn(self: *FunctionCompiler, stmt: ast.ReturnStmt) anyerror!void {
         const first = self.registerMark();
+        if (fixedReturnCountExceedsLimit(stmt.values)) return error.TooManyReturns;
         if (stmt.values.len == 1 and isCallExpr(stmt.values[0]) and !self.hasActiveToCloseLocal()) {
             const base = try self.allocReg();
             _ = try self.compileCallInto(stmt.values[0], bytecode.multret_count, base, true);
@@ -1058,6 +1060,14 @@ const FunctionCompiler = struct {
         return false;
     }
 
+    fn activeUserLocalCount(self: FunctionCompiler) usize {
+        var count: usize = 0;
+        for (self.locals.items) |local| {
+            if (!local.synthetic) count += 1;
+        }
+        return count;
+    }
+
     fn lookupUpvalue(self: *FunctionCompiler, name: []const u8) !?bytecode.UpvalueIndex {
         if (self.parent) |parent| {
             switch (parent.lookupName(name)) {
@@ -1127,11 +1137,20 @@ const FunctionCompiler = struct {
         return self.declareLocalAt(name, register, false);
     }
 
+    fn declareSyntheticLocal(self: *FunctionCompiler, name: []const u8) !bytecode.Register {
+        const register = try self.allocReg();
+        return self.declareLocalAtInternal(name, register, false, true);
+    }
+
     fn declareLocalAt(self: *FunctionCompiler, name: []const u8, register: bytecode.Register, to_close: bool) !bytecode.Register {
-        if (self.locals.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
+        return self.declareLocalAtInternal(name, register, to_close, false);
+    }
+
+    fn declareLocalAtInternal(self: *FunctionCompiler, name: []const u8, register: bytecode.Register, to_close: bool, synthetic: bool) !bytecode.Register {
+        if (!synthetic and self.activeUserLocalCount() >= lua_max_local_variables) return self.failTooManyLocalVariables();
         const debug_index = try self.proto.addLocal(.{ .name = name, .register = register, .start_pc = self.proto.pc() });
         self.proto.locals.items[debug_index].to_close = to_close;
-        try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close });
+        try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close, .synthetic = synthetic });
         try self.decls.append(self.allocator, .{ .name = name, .kind = .local, .local_index = self.locals.items.len - 1 });
         return register;
     }
@@ -1331,6 +1350,11 @@ fn isMultiResultExpr(expr: *const ast.Expr) bool {
         .call, .method_call, .vararg => true,
         else => false,
     };
+}
+
+fn fixedReturnCountExceedsLimit(values: []const *ast.Expr) bool {
+    if (values.len <= 254) return false;
+    return !isMultiResultExpr(values[values.len - 1]);
 }
 
 fn isCloseAttribute(attribute: ?ast.Identifier) bool {
