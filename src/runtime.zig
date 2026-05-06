@@ -2577,6 +2577,9 @@ pub const State = struct {
             self.set(thread, op.dest, result);
             return;
         }
+        if (kind == .bnot) {
+            if (bitwiseValueError(value)) |message| return self.failRuntimeDetail(thread, message);
+        }
         const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.failUnaryTypeError(thread, value, kind);
         const result = try self.callOneMetamethodWithContinuation(thread, unaryMetamethod(kind), metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
@@ -2670,6 +2673,9 @@ pub const State = struct {
 
     fn unaryOp(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) !Value {
         if (rawUnaryOp(value, op)) |result| return result;
+        if (op == .bnot) {
+            if (bitwiseValueError(value)) |message| return self.failRuntimeDetail(thread, message);
+        }
         const metamethod_name = unaryMetamethod(op);
         const metamethod = (try self.getMetamethod(value, metamethod_name)) orelse return self.failUnaryTypeError(thread, value, op);
         return self.callOneMetamethod(thread, metamethod_name, metamethod, &.{ value, value });
@@ -4447,24 +4453,24 @@ pub const State = struct {
         switch (op) {
             .add, .sub, .mul, .div, .idiv, .mod, .pow => {
                 if (lhs == .string or rhs == .string) {
-                    appendFmt(self.allocator, &detail, "attempt to {s} a '{s}' with a '{s}'", .{ arithmeticVerb(op), luaTypeName(lhs), luaTypeName(rhs) }) catch return self.fail("attempt to perform operation on unsupported values");
+                    appendFmt(self.allocator, &detail, "attempt to {s} a '{s}' with a '{s}'", .{ arithmeticVerb(op), self.luaTypeNameForError(lhs), self.luaTypeNameForError(rhs) }) catch return self.fail("attempt to perform operation on unsupported values");
                     return self.failRuntimeDetail(thread, detail.items);
                 }
                 const operand_index: usize = if (toNumberMaybe(lhs) == null) 0 else 1;
                 const bad_value = if (operand_index == 0) lhs else rhs;
-                appendFmt(self.allocator, &detail, "attempt to perform arithmetic on a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                appendFmt(self.allocator, &detail, "attempt to perform arithmetic on a {s} value", .{self.luaTypeNameForError(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
                 self.appendSiteOrigin(&detail, site, operand_index, false) catch return self.fail("attempt to perform operation on unsupported values");
             },
             .band, .bor, .bxor, .shl, .shr => {
                 const operand_index: usize = if (toBitwiseInteger(lhs) == null) 0 else 1;
                 const bad_value = if (operand_index == 0) lhs else rhs;
-                appendFmt(self.allocator, &detail, "attempt to perform bitwise operation on a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                appendFmt(self.allocator, &detail, "attempt to perform bitwise operation on a {s} value", .{self.luaTypeNameForError(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
                 self.appendSiteOrigin(&detail, site, operand_index, true) catch return self.fail("attempt to perform operation on unsupported values");
             },
             .concat => {
                 const operand_index: usize = if (!luaStringLike(lhs)) 0 else 1;
                 const bad_value = if (operand_index == 0) lhs else rhs;
-                appendFmt(self.allocator, &detail, "attempt to concatenate a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                appendFmt(self.allocator, &detail, "attempt to concatenate a {s} value", .{self.luaTypeNameForError(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
                 self.appendSiteOrigin(&detail, site, operand_index, false) catch return self.fail("attempt to perform operation on unsupported values");
             },
         }
@@ -4478,7 +4484,7 @@ pub const State = struct {
             .unm => "arithmetic",
             .bnot => "bitwise operation",
         };
-        appendFmt(self.allocator, &detail, "attempt to perform {s} on a {s} value", .{ operation, luaTypeName(value) }) catch return self.fail("attempt to perform operation on unsupported value");
+        appendFmt(self.allocator, &detail, "attempt to perform {s} on a {s} value", .{ operation, self.luaTypeNameForError(value) }) catch return self.fail("attempt to perform operation on unsupported value");
         self.appendSiteOrigin(&detail, self.currentErrorSite(thread), 0, op == .bnot) catch return self.fail("attempt to perform operation on unsupported value");
         return self.failRuntimeDetail(thread, detail.items);
     }
@@ -4486,14 +4492,20 @@ pub const State = struct {
     fn failCompareTypeError(self: *State, thread: *Thread, lhs: Value, rhs: Value) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
-        appendFmt(self.allocator, &detail, "attempt to compare {s} with {s}", .{ luaTypeName(lhs), luaTypeName(rhs) }) catch return self.fail("attempt to compare unsupported values");
+        const lhs_type = self.luaTypeNameForError(lhs);
+        const rhs_type = self.luaTypeNameForError(rhs);
+        if (std.mem.eql(u8, lhs_type, rhs_type)) {
+            appendFmt(self.allocator, &detail, "attempt to compare two {s} values", .{lhs_type}) catch return self.fail("attempt to compare unsupported values");
+        } else {
+            appendFmt(self.allocator, &detail, "attempt to compare {s} with {s}", .{ lhs_type, rhs_type }) catch return self.fail("attempt to compare unsupported values");
+        }
         return self.failRuntimeDetail(thread, detail.items);
     }
 
     fn failLengthTypeError(self: *State, thread: *Thread, value: Value) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
-        appendFmt(self.allocator, &detail, "attempt to get length of a {s} value", .{luaTypeName(value)}) catch return self.fail("attempt to get length of a non-string value");
+        appendFmt(self.allocator, &detail, "attempt to get length of a {s} value", .{self.luaTypeNameForError(value)}) catch return self.fail("attempt to get length of a non-string value");
         self.appendSiteOrigin(&detail, self.currentErrorSite(thread), 0, false) catch return self.fail("attempt to get length of a non-string value");
         return self.failRuntimeDetail(thread, detail.items);
     }
@@ -4509,7 +4521,7 @@ pub const State = struct {
     fn failCallTypeError(self: *State, thread: *Thread, value: Value, call_name: ?[]const u8, call_namewhat: ?[]const u8) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
-        appendFmt(self.allocator, &detail, "attempt to call a {s} value", .{luaTypeName(value)}) catch return self.fail(callErrorMessage(value));
+        appendFmt(self.allocator, &detail, "attempt to call a {s} value", .{self.luaTypeNameForError(value)}) catch return self.fail(callErrorMessage(value));
         if (call_name != null and call_namewhat != null and std.mem.eql(u8, call_namewhat.?, "metamethod")) {
             appendFmt(self.allocator, &detail, " (metamethod '{s}')", .{call_name.?}) catch return self.fail(callErrorMessage(value));
         } else {
@@ -4521,7 +4533,7 @@ pub const State = struct {
     fn failAccessTypeError(self: *State, thread: ?*Thread, value: Value, fallback: []const u8) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
-        appendFmt(self.allocator, &detail, "attempt to index a {s} value", .{luaTypeName(value)}) catch return self.fail(fallback);
+        appendFmt(self.allocator, &detail, "attempt to index a {s} value", .{self.luaTypeNameForError(value)}) catch return self.fail(fallback);
         const site = if (thread) |active| self.currentErrorSite(active) else null;
         self.appendSiteOrigin(&detail, site, 0, false) catch return self.fail(fallback);
         return self.failRuntimeDetail(thread, detail.items);
@@ -4530,7 +4542,7 @@ pub const State = struct {
     fn failForTypeError(self: *State, thread: *Thread, which: ForValueKind, value: Value) RuntimeError {
         var detail = std.ArrayList(u8).empty;
         defer detail.deinit(self.allocator);
-        appendFmt(self.allocator, &detail, "bad 'for' {s} (number expected, got {s})", .{ forValueName(which), luaTypeName(value) }) catch return self.fail("bad 'for' value");
+        appendFmt(self.allocator, &detail, "bad 'for' {s} (number expected, got {s})", .{ forValueName(which), self.luaTypeNameForError(value) }) catch return self.fail("bad 'for' value");
         return self.failRuntimeDetail(thread, detail.items);
     }
 
