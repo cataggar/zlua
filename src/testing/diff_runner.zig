@@ -16,6 +16,7 @@ const Options = struct {
     show_clua: bool = false,
     show_zlua: bool = false,
     gc_stress: bool = false,
+    debug_errors: bool = false,
     timeout_ms: u64 = 5000,
 };
 
@@ -91,6 +92,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.show_zlua = true;
         } else if (std.mem.eql(u8, arg, "--gc-stress")) {
             options.gc_stress = true;
+        } else if (std.mem.eql(u8, arg, "--debug-errors")) {
+            options.debug_errors = true;
         } else if (std.mem.eql(u8, arg, "--clua")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -237,6 +240,7 @@ fn runZluaForStage(
                 .filesystem = .host_cwd,
                 .environment = environ_map,
                 .process = .disabled,
+                .debug_errors = options.debug_errors,
             },
         }),
     };
@@ -386,8 +390,9 @@ fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 }
 
 test "argument parser accepts stage and feature" {
-    const args = [_][]const u8{ "tests/diff", "--stage=parse", "--feature=syntax" };
+    const args = [_][]const u8{ "tests/diff", "--stage=parse", "--feature=syntax", "--debug-errors" };
     const options = try parseArgs(&args);
     try std.testing.expectEqual(metadata.Stage.parse, options.stage.?);
     try std.testing.expect(std.mem.eql(u8, options.feature.?, "syntax"));
+    try std.testing.expect(options.debug_errors);
 }

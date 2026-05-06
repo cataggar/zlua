@@ -516,6 +516,7 @@ pub const StateOptions = struct {
     clock: ClockCapability = .system,
     process: ProcessCapability = .disabled,
     stdin: []const u8 = "",
+    debug_errors: bool = false,
 };
 
 pub const ExecuteOptions = struct {
@@ -843,6 +844,7 @@ pub const State = struct {
         self.current_thread = &thread;
         defer self.current_thread = previous_thread;
         self.runThreadUntil(&thread, 0) catch |err| {
+            if (self.options.debug_errors and isRuntimeError(err)) self.appendUnhandledErrorDebugDump(&thread, err) catch {};
             self.closeFramesTo(&thread, 0, self.currentErrorValue()) catch |close_err| return close_err;
             thread.status = .dead;
             return err;
@@ -3759,6 +3761,109 @@ pub const State = struct {
         };
     }
 
+    fn appendUnhandledErrorDebugDump(self: *State, thread: *Thread, err: anyerror) !void {
+        const out = &self.stderr;
+        const stats = self.allocationStats();
+        try out.appendSlice(self.allocator, "\n[zlua debug] unhandled runtime exception\n");
+        try appendFmt(self.allocator, out, "error={s}\n", .{@errorName(err)});
+        try out.appendSlice(self.allocator, "error_value=");
+        try self.appendDebugValue(out, self.currentErrorValue());
+        try out.append(self.allocator, '\n');
+        if (self.last_error) |message| try appendFmt(self.allocator, out, "last_error={s}\n", .{message});
+        try appendFmt(self.allocator, out, "allocations strings={d} tables={d} closures={d} upvalues={d} threads={d} bytes={d}\n", .{ stats.strings, stats.tables, stats.closures, stats.upvalues, stats.threads, stats.bytes });
+        try appendFmt(self.allocator, out, "thread status={s} frames={d} stack={d} results={d}@{d} native_depth={d} protected_close_depth={d}\n", .{ @tagName(thread.status), thread.frames.items.len, thread.stack.items.len, thread.last_result_count, thread.last_result_base, thread.native_call_depth, thread.protected_close_depth });
+        try appendFmt(self.allocator, out, "continuations protected={d} call_one={d} tail={d} generic_for={d}\n", .{ thread.protected_continuations.items.len, thread.call_one_continuations.items.len, thread.tail_call_continuations.items.len, thread.generic_for_continuations.items.len });
+        try self.appendDebugFrames(out, thread);
+        try self.appendDebugStack(out, thread);
+        try out.appendSlice(self.allocator, "[/zlua debug]\n");
+    }
+
+    fn appendDebugFrames(self: *State, out: *std.ArrayList(u8), thread: *Thread) !void {
+        try appendFmt(self.allocator, out, "frames newest-first ({d}):\n", .{thread.frames.items.len});
+        var index = thread.frames.items.len;
+        while (index > 0) {
+            index -= 1;
+            const frame = thread.frames.items[index];
+            const pc = if (frame.pc == 0) @as(usize, 0) else frame.pc - 1;
+            const line = lineForFrame(frame) orelse 0;
+            const name = frame.proto.debug_name orelse "(anonymous)";
+            const instruction = if (pc < frame.proto.instructions.items.len)
+                @tagName(std.meta.activeTag(frame.proto.instructions.items[pc]))
+            else
+                "<end>";
+            try appendFmt(self.allocator, out, "  frame {d}: {s}:{d} pc={d} op={s} func={s} base={d} return={d}@{d} registers={d}\n", .{ index, frame.proto.source_name, line, pc, instruction, name, frame.base, frame.return_count, frame.return_start, frame.proto.max_registers });
+            try self.appendDebugLocals(out, thread, frame);
+            try self.appendDebugVarargs(out, frame);
+            try self.appendDebugUpvalues(out, frame);
+        }
+    }
+
+    fn appendDebugLocals(self: *State, out: *std.ArrayList(u8), thread: *Thread, frame: CallFrame) !void {
+        const pc = if (frame.pc == 0) @as(usize, 0) else frame.pc - 1;
+        var found = false;
+        for (frame.proto.locals.items) |local| {
+            if (!localActiveAt(local, pc)) continue;
+            found = true;
+            try appendFmt(self.allocator, out, "    local {s} r{d}", .{ local.name, local.register });
+            if (local.to_close) try out.appendSlice(self.allocator, " <close>");
+            try out.appendSlice(self.allocator, " = ");
+            const absolute_register = frame.base + local.register;
+            if (absolute_register < thread.stack.items.len) {
+                try self.appendDebugValue(out, thread.stack.items[absolute_register]);
+            } else {
+                try out.appendSlice(self.allocator, "<out-of-stack>");
+            }
+            try out.append(self.allocator, '\n');
+        }
+        if (!found) try out.appendSlice(self.allocator, "    locals: <none>\n");
+    }
+
+    fn appendDebugVarargs(self: *State, out: *std.ArrayList(u8), frame: CallFrame) !void {
+        if (frame.varargs.len == 0) {
+            try out.appendSlice(self.allocator, "    varargs: <none>\n");
+            return;
+        }
+        for (frame.varargs, 0..) |value, index| {
+            try appendFmt(self.allocator, out, "    vararg {d} = ", .{index});
+            try self.appendDebugValue(out, value);
+            try out.append(self.allocator, '\n');
+        }
+    }
+
+    fn appendDebugUpvalues(self: *State, out: *std.ArrayList(u8), frame: CallFrame) !void {
+        if (frame.closure.upvalues.len == 0) {
+            try out.appendSlice(self.allocator, "    upvalues: <none>\n");
+            return;
+        }
+        for (frame.closure.upvalues, 0..) |upvalue, index| {
+            const name = if (index < frame.proto.upvalues.items.len) frame.proto.upvalues.items[index].name else "?";
+            const value = if (upvalue.is_open) upvalue.owner.stack.items[upvalue.stack_index] else upvalue.closed;
+            try appendFmt(self.allocator, out, "    upvalue U{d} {s} {s}", .{ index, name, if (upvalue.is_open) "open" else "closed" });
+            if (upvalue.is_open) try appendFmt(self.allocator, out, " stack={d}", .{upvalue.stack_index});
+            try out.appendSlice(self.allocator, " = ");
+            try self.appendDebugValue(out, value);
+            try out.append(self.allocator, '\n');
+        }
+    }
+
+    fn appendDebugStack(self: *State, out: *std.ArrayList(u8), thread: *Thread) !void {
+        try appendFmt(self.allocator, out, "stack ({d} slots):\n", .{thread.stack.items.len});
+        for (thread.stack.items, 0..) |value, stack_index| {
+            try appendFmt(self.allocator, out, "  [{d}]", .{stack_index});
+            if (debugStackRegister(thread, stack_index)) |slot| {
+                try appendFmt(self.allocator, out, " frame={d} r{d}", .{ slot.frame_index, slot.register });
+            }
+            try out.appendSlice(self.allocator, " = ");
+            try self.appendDebugValue(out, value);
+            try out.append(self.allocator, '\n');
+        }
+    }
+
+    fn appendDebugValue(self: *State, out: *std.ArrayList(u8), value: Value) !void {
+        try appendFmt(self.allocator, out, "({s}) ", .{debugValueTypeName(value)});
+        try appendValue(self.allocator, out, value);
+    }
+
     fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
         if (self.last_error_value == .nil) return allocator.dupe(u8, @errorName(err));
         var out = std.ArrayList(u8).empty;
@@ -3821,7 +3926,17 @@ pub fn executeSourceWithOptions(allocator: std.mem.Allocator, source: []const u8
         defer if (state.last_error == null) allocator.free(detail);
         const message = try std.fmt.allocPrint(allocator, "zlua runtime error: {s}\n", .{detail});
         defer allocator.free(message);
-        return process.ownedResult(allocator, "", message, 1);
+        var stderr = std.ArrayList(u8).empty;
+        errdefer stderr.deinit(allocator);
+        try stderr.appendSlice(allocator, state.stderr.items);
+        try stderr.appendSlice(allocator, message);
+        return .{
+            .stdout = try allocator.dupe(u8, state.stdout.items),
+            .stderr = try stderr.toOwnedSlice(allocator),
+            .exit_code = 1,
+            .signal = null,
+            .timed_out = false,
+        };
     };
 
     return .{
@@ -4288,6 +4403,69 @@ fn indexErrorMessage(value: Value) []const u8 {
     };
 }
 
+const DebugStackSlot = struct {
+    frame_index: usize,
+    register: usize,
+};
+
+fn debugStackRegister(thread: *Thread, stack_index: usize) ?DebugStackSlot {
+    var frame_index = thread.frames.items.len;
+    while (frame_index > 0) {
+        frame_index -= 1;
+        const frame = thread.frames.items[frame_index];
+        const register_count: usize = @intCast(frame.proto.max_registers);
+        if (stack_index >= frame.base and stack_index < frame.base + register_count) {
+            return .{ .frame_index = frame_index, .register = stack_index - frame.base };
+        }
+    }
+    return null;
+}
+
+fn debugValueTypeName(value: Value) []const u8 {
+    return switch (value) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer => "integer",
+        .number => "number",
+        .string => "string",
+        .table => "table",
+        .thread => "thread",
+        .closure,
+        .coroutine_wrapper,
+        .gmatch_iterator,
+        .native_print,
+        .native_tostring,
+        .native_getmetatable,
+        .native_setmetatable,
+        .native_rawequal,
+        .native_rawget,
+        .native_rawset,
+        .native_rawlen,
+        .native_next,
+        .native_pairs,
+        .native_ipairs,
+        .native_ipairs_iter,
+        .native_table_create,
+        .native_select,
+        .native_assert,
+        .native_error,
+        .native_pcall,
+        .native_xpcall,
+        .native_collectgarbage,
+        .native_debug_traceback,
+        .native_coroutine_create,
+        .native_coroutine_resume,
+        .native_coroutine_yield,
+        .native_coroutine_status,
+        .native_coroutine_running,
+        .native_coroutine_isyieldable,
+        .native_coroutine_close,
+        .native_coroutine_wrap,
+        .native,
+        => "function",
+    };
+}
+
 pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
     switch (value) {
         .integer, .number, .string => try appendValue(allocator, out, value),
@@ -4684,6 +4862,19 @@ test "reports calls to non-functions" {
 
     try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "attempt to call a non-function value") != null);
+}
+
+test "debug errors dump stack state before unwinding" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\local x = 42
+        \\error("boom", 0)
+    , .{ .state = .{ .debug_errors = true } });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 1), result.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "[zlua debug] unhandled runtime exception") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "local x r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "stack (") != null);
 }
 
 test "safe stdlib omits host-facing libraries" {

@@ -13,6 +13,7 @@ const Options = struct {
     quick: bool = false,
     show_clua: bool = false,
     show_zlua: bool = false,
+    debug_errors: bool = false,
     timeout_ms: u64 = 0,
 };
 
@@ -87,6 +88,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.show_clua = true;
         } else if (std.mem.eql(u8, arg, "--show-zlua")) {
             options.show_zlua = true;
+        } else if (std.mem.eql(u8, arg, "--debug-errors")) {
+            options.debug_errors = true;
         } else if (std.mem.eql(u8, arg, "--clua")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -220,8 +223,12 @@ fn runOfficialFile(
         .complete => official_complete_prelude,
         .internal => unreachable,
     };
-    const argv = [_][]const u8{ exe, "-e", prelude, std.fs.path.basename(file) };
-    return process.runProcess(allocator, io, &argv, .{
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, exe);
+    if (runner == .zlua and options.debug_errors) try argv.append(allocator, "--debug-errors");
+    try argv.appendSlice(allocator, &.{ "-e", prelude, std.fs.path.basename(file) });
+    return process.runProcess(allocator, io, argv.items, .{
         .cwd = options.suite_path,
         .timeout_ms = options.timeout_ms,
         .max_output_bytes = 4 * 1024 * 1024,
@@ -289,9 +296,10 @@ fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 }
 
 test "argument parser accepts quick and complete mode" {
-    const args = [_][]const u8{ "--quick", "--mode=complete", "--timeout-ms=10" };
+    const args = [_][]const u8{ "--quick", "--mode=complete", "--debug-errors", "--timeout-ms=10" };
     const options = try parseArgs(&args);
     try std.testing.expect(options.quick);
+    try std.testing.expect(options.debug_errors);
     try std.testing.expectEqual(Mode.complete, options.mode);
     try std.testing.expectEqual(@as(u64, 10), options.timeout_ms);
 }

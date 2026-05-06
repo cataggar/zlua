@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(exit_code);
     }
 
-    if (std.mem.eql(u8, command, "-e") or std.mem.startsWith(u8, command, "-e")) {
+    if (std.mem.eql(u8, command, "--debug-errors") or std.mem.eql(u8, command, "-e") or std.mem.startsWith(u8, command, "-e")) {
         const exit_code = try runCliProgram(arena_allocator, io, init.environ_map, args[1..]);
         std.process.exit(exit_code);
     }
@@ -57,6 +57,7 @@ fn runCliProgram(
 
     var script_path: ?[]const u8 = null;
     var script_args: []const []const u8 = &.{};
+    var debug_errors = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -67,6 +68,8 @@ fn runCliProgram(
                 script_args = args[index + 1 ..];
             }
             break;
+        } else if (std.mem.eql(u8, arg, "--debug-errors")) {
+            debug_errors = true;
         } else if (std.mem.eql(u8, arg, "-e")) {
             index += 1;
             if (index >= args.len) {
@@ -96,6 +99,7 @@ fn runCliProgram(
         .filesystem = .host_cwd,
         .environment = environ_map,
         .process = .enabled,
+        .debug_errors = debug_errors,
     });
     defer state.deinit();
 
@@ -179,8 +183,9 @@ fn printUsage(io: std.Io) !void {
         \\Usage: zlua [--version] <command|script>
         \\
         \\Commands:
-        \\  test-diff [path] [--stage=name] [--feature=name] [--gc-stress] [--show-clua] [--show-zlua]
-        \\  test-official [--quick] [--mode=basic|complete|internal] [--show-clua] [--show-zlua]
+        \\  test-diff [path] [--stage=name] [--feature=name] [--gc-stress] [--debug-errors] [--show-clua] [--show-zlua]
+        \\  test-official [--quick] [--mode=basic|complete|internal] [--debug-errors] [--show-clua] [--show-zlua]
+        \\  --debug-errors <script>
         \\  -e 'chunk' [script [args...]]
         \\
     , .{});

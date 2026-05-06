@@ -18,7 +18,7 @@ release:
 
 # Run all unit tests.
 test:
-    {{zig}} build test
+    {{zig}} build --summary all test
 
 # Run all CI checks.
 ci:
@@ -42,7 +42,7 @@ clua-version: build
 
 # Run the differential harness with the vendored CLua oracle.
 diff *args:
-    {{zig}} build run -- test-diff --clua {{clua}} {{args}}
+    {{zig}} build --summary all run -- test-diff --clua {{clua}} --debug-errors {{args}}
 
 # Run parse-stage differential tests.
 diff-parse *args:
@@ -70,11 +70,11 @@ official-ci:
 
 # Run the full official Lua 5.5 suite dashboard, including memory-stress files.
 official-heavy:
-    {{zig}} build test-official-heavy
+    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors
 
 # Run the official Lua 5.5 suite dashboard.
 official *args:
-    {{zig}} build run -- test-official --clua {{clua}} {{args}}
+    {{zig}} build --summary all run -- test-official --clua {{clua}} --debug-errors {{args}}
 
 # Run the official basic suite dashboard.
 official-basic *args:
@@ -85,8 +85,9 @@ official-complete *args:
     just official --mode=complete {{args}}
 
 # Run one official Lua 5.5 test file by name, e.g. `just official-file attrib`.
-official-file name *args: build
-    file="{{name}}"; if [[ "$file" != *.lua ]]; then file="$file.lua"; fi; cd tests/official/lua-5.5.0-tests; ../../../{{zlua}} -e "_U=true; _soft=true; _port=true; _nomsg=true; T=nil; ARG=arg" "$file" {{args}}
+official-file name *args:
+    {{zig}} build --summary all
+    file="{{name}}"; if [[ "$file" != *.lua ]]; then file="$file.lua"; fi; cd tests/official/lua-5.5.0-tests; ../../../{{zlua}} --debug-errors -e "_U=true; _soft=true; _port=true; _nomsg=true; T=nil; ARG=arg" "$file" {{args}}
 
 # Remove build outputs and Zig cache directories.
 clean:
