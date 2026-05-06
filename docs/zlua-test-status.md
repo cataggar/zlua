@@ -9,7 +9,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | Test layer | Command | Status | Notes |
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
-| CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
+| CLua differential fixtures | `zig build test-diff` or `just diff` | Pass | `just diff` accepts paths and filters for targeted runs. Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
 | Official Lua 5.5 dashboard | `zig build test-official` or `just official` | Pass | Runs every per-file official test, including memory-stress `heavy.lua`, under the default memory cap. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=31`, `categorized_failed=1`, `skipped=1`, `timed_out=0`, `unexpected_failed=0` before the heavy-by-default wiring change. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the full official dashboard. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |

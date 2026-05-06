@@ -44,26 +44,6 @@ clua-version: build
 diff *args:
     {{zig}} build --summary all run-test-diff -- --debug-errors {{args}}
 
-# Run parse-stage differential tests.
-diff-parse *args:
-    just diff --stage=parse {{args}}
-
-# Run runtime-stage differential tests.
-diff-runtime *args:
-    just diff --stage=runtime {{args}}
-
-# Run differential tests for one feature.
-diff-feature feature *args:
-    just diff --feature={{feature}} {{args}}
-
-# Run a single differential fixture.
-diff-file file *args:
-    just diff {{file}} {{args}}
-
-# Run the build-system differential step exactly as CI does.
-diff-ci:
-    {{zig}} build test-diff
-
 # Run the official Lua 5.5 suite dashboard.
 official *args:
     {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 {{args}}
