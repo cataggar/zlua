@@ -36,8 +36,8 @@ const PendingLocal = struct {
 
 const PreparedTarget = union(enum) {
     expr: *const ast.Expr,
-    field: struct { table: bytecode.Register, name: bytecode.ConstantIndex },
-    index: struct { table: bytecode.Register, key: bytecode.Register },
+    field: struct { table: bytecode.Register, name: bytecode.ConstantIndex, table_origin: proto_mod.OperandOrigin },
+    index: struct { table: bytecode.Register, key: bytecode.Register, table_origin: proto_mod.OperandOrigin },
 };
 
 const Scope = struct {
@@ -415,7 +415,10 @@ const FunctionCompiler = struct {
         try self.locals.append(self.allocator, .{ .name = stmt.name.name, .register = base, .debug_index = debug_index });
         try self.decls.append(self.allocator, .{ .name = stmt.name.name, .kind = .local, .local_index = self.locals.items.len - 1 });
 
-        const prep = try self.emit(.{ .for_prep = .{ .base = base, .offset = 0 } });
+        const start_origin = try self.exprOrigin(stmt.start);
+        const limit_origin = try self.exprOrigin(stmt.limit);
+        const step_origin = if (stmt.step) |step_expr| try self.exprOrigin(step_expr) else proto_mod.OperandOrigin.temporary;
+        const prep = try self.emitWithErrorSite(.{ .for_prep = .{ .base = base, .offset = 0 } }, .numeric_for, &.{ start_origin, limit_origin, step_origin }, null);
         const body_start = self.proto.pc();
         try self.enterLoop(base);
         try self.compileScopedBlock(stmt.body);
@@ -575,16 +578,18 @@ const FunctionCompiler = struct {
                 const mark = self.registerMark();
                 const table = try self.allocReg();
                 const key = try self.allocReg();
+                const table_origin = try self.exprOrigin(index.receiver);
                 try self.compileExpr(index.receiver, table);
                 try self.compileExpr(index.key, key);
-                _ = try self.emit(.{ .get_table = .{ .dest = dest, .table = table, .key = key } });
+                _ = try self.emitWithErrorSite(.{ .get_table = .{ .dest = dest, .table = table, .key = key } }, .index, &.{table_origin}, null);
                 self.release(mark);
             },
             .field => |field| {
                 const mark = self.registerMark();
                 const table = try self.allocReg();
+                const table_origin = try self.exprOrigin(field.receiver);
                 try self.compileExpr(field.receiver, table);
-                _ = try self.emit(.{ .get_field = .{ .dest = dest, .table = table, .name = try self.nameConstant(field.name.name) } });
+                _ = try self.emitWithErrorSite(.{ .get_field = .{ .dest = dest, .table = table, .name = try self.nameConstant(field.name.name) } }, .index, &.{table_origin}, null);
                 self.release(mark);
             },
             .call, .method_call => {
@@ -668,7 +673,14 @@ const FunctionCompiler = struct {
             .length => .{ .len = .{ .dest = dest, .source = source } },
             .bit_not => .{ .bnot = .{ .dest = dest, .source = source } },
         };
-        _ = try self.emit(instruction);
+        const site_op: proto_mod.ErrorOp = switch (unary.op) {
+            .negate => .arithmetic,
+            .bit_not => .bitwise,
+            .length => .length,
+            .not => .compare,
+        };
+        const origin = try self.exprOrigin(unary.operand);
+        _ = try self.emitWithErrorSite(instruction, site_op, &.{origin}, null);
         self.release(mark);
     }
 
@@ -684,15 +696,18 @@ const FunctionCompiler = struct {
         const mark = self.registerMark();
         const left = try self.allocReg();
         const right = try self.allocReg();
+        var left_origin = try self.exprOrigin(binary.left);
+        var right_origin = try self.exprOrigin(binary.right);
         try self.compileExprForcedLine(binary.left, left, binary.op_line);
         try self.compileExpr(binary.right, right);
         const right_line = exprLine(binary.right.*);
         self.current_line = binary.op_line;
         if (binary.op == .ne) {
-            _ = try self.emit(.{ .eq = .{ .dest = dest, .left = left, .right = right } });
+            _ = try self.emitWithErrorSite(.{ .eq = .{ .dest = dest, .left = left, .right = right } }, .compare, &.{ left_origin, right_origin }, null);
             _ = try self.emit(.{ .not = .{ .dest = dest, .source = dest } });
         } else {
-            _ = try self.emit(binaryInstruction(binary.op, dest, left, right));
+            if (binary.op == .gt or binary.op == .ge) std.mem.swap(proto_mod.OperandOrigin, &left_origin, &right_origin);
+            _ = try self.emitWithErrorSite(binaryInstruction(binary.op, dest, left, right), binaryErrorOp(binary.op), &.{ left_origin, right_origin }, null);
         }
         self.current_line = right_line;
         self.release(mark);
@@ -709,19 +724,22 @@ const FunctionCompiler = struct {
         switch (expr.*) {
             .call => |call| {
                 try self.reserveRegistersUntil(dest + 1);
+                const call_name = try self.callOrigin(expr);
                 try self.compileExpr(call.callee, dest);
                 const arg_count = try self.compileCallArgs(call.args, dest + 1, 0);
-                _ = try self.emit(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } });
+                _ = try self.emitWithErrorSite(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } }, .call, &.{call_name}, call_name);
                 self.release(callReleaseMark(dest, returns));
                 return dest;
             },
             .method_call => |call| {
                 const receiver = dest + 1;
                 try self.reserveRegistersUntil(dest + 2);
+                const receiver_origin = try self.exprOrigin(call.receiver);
                 try self.compileExpr(call.receiver, receiver);
-                _ = try self.emit(.{ .get_field = .{ .dest = dest, .table = receiver, .name = try self.nameConstant(call.method.name) } });
+                _ = try self.emitWithErrorSite(.{ .get_field = .{ .dest = dest, .table = receiver, .name = try self.nameConstant(call.method.name) } }, .index, &.{receiver_origin}, null);
                 const arg_count = try self.compileCallArgs(call.args, dest + 2, 1);
-                _ = try self.emit(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } });
+                const method_origin = proto_mod.OperandOrigin{ .method = call.method.name };
+                _ = try self.emitWithErrorSite(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } }, .call, &.{method_origin}, method_origin);
                 self.release(callReleaseMark(dest, returns));
                 return dest;
             },
@@ -859,15 +877,17 @@ const FunctionCompiler = struct {
             },
             .field => |field| blk: {
                 const table = try self.allocReg();
+                const table_origin = try self.exprOrigin(field.receiver);
                 try self.compileExpr(field.receiver, table);
-                break :blk .{ .field = .{ .table = table, .name = try self.nameConstant(field.name.name) } };
+                break :blk .{ .field = .{ .table = table, .name = try self.nameConstant(field.name.name), .table_origin = table_origin } };
             },
             .index => |index| blk: {
                 const table = try self.allocReg();
                 const key = try self.allocReg();
+                const table_origin = try self.exprOrigin(index.receiver);
                 try self.compileExpr(index.receiver, table);
                 try self.compileExpr(index.key, key);
-                break :blk .{ .index = .{ .table = table, .key = key } };
+                break :blk .{ .index = .{ .table = table, .key = key, .table_origin = table_origin } };
             },
             else => error.CompileError,
         };
@@ -876,8 +896,8 @@ const FunctionCompiler = struct {
     fn assignPreparedTarget(self: *FunctionCompiler, target: PreparedTarget, value_reg: bytecode.Register) anyerror!void {
         switch (target) {
             .expr => |expr| try self.assignTarget(expr, value_reg),
-            .field => |field| _ = try self.emit(.{ .set_field = .{ .table = field.table, .name = field.name, .value = value_reg } }),
-            .index => |index| _ = try self.emit(.{ .set_table = .{ .table = index.table, .key = index.key, .value = value_reg } }),
+            .field => |field| _ = try self.emitWithErrorSite(.{ .set_field = .{ .table = field.table, .name = field.name, .value = value_reg } }, .newindex, &.{field.table_origin}, null),
+            .index => |index| _ = try self.emitWithErrorSite(.{ .set_table = .{ .table = index.table, .key = index.key, .value = value_reg } }, .newindex, &.{index.table_origin}, null),
         }
     }
 
@@ -1133,10 +1153,69 @@ const FunctionCompiler = struct {
         return self.proto.emit(instruction, self.forced_line orelse self.current_line);
     }
 
+    fn emitWithErrorSite(
+        self: *FunctionCompiler,
+        instruction: bytecode.Instruction,
+        op: proto_mod.ErrorOp,
+        operands: []const proto_mod.OperandOrigin,
+        call_name: ?proto_mod.OperandOrigin,
+    ) !usize {
+        const line = self.forced_line orelse self.current_line;
+        const pc_index = try self.proto.emit(instruction, line);
+        try self.proto.addErrorSite(pc_index, .{ .line = line, .op = op, .operands = operands, .call_name = call_name });
+        return pc_index;
+    }
+
+    fn exprOrigin(self: *FunctionCompiler, expr: *const ast.Expr) !proto_mod.OperandOrigin {
+        return switch (expr.*) {
+            .identifier => |identifier| self.nameOrigin(identifier.name),
+            .field => |field| .{ .field = field.name.name },
+            .method_call => |call| .{ .method = call.method.name },
+            .grouped => |inner| self.exprOrigin(inner),
+            .string => |literal| .{ .constant = stringLiteralPreview(literal.lexeme) },
+            else => .temporary,
+        };
+    }
+
+    fn callOrigin(self: *FunctionCompiler, expr: *const ast.Expr) !proto_mod.OperandOrigin {
+        return switch (expr.*) {
+            .call => |call| self.exprOrigin(call.callee),
+            .method_call => |call| .{ .method = call.method.name },
+            else => .temporary,
+        };
+    }
+
+    fn nameOrigin(self: *FunctionCompiler, name: []const u8) !proto_mod.OperandOrigin {
+        switch (self.lookupName(name)) {
+            .local => return .{ .local = name },
+            .global => return .{ .global = name },
+            .undeclared => if (try self.lookupUpvalue(name)) |_| {
+                return .{ .upvalue = name };
+            } else {
+                return .{ .global = name };
+            },
+        }
+    }
+
     fn nameConstant(self: *FunctionCompiler, name: []const u8) !bytecode.ConstantIndex {
         return self.proto.addConstant(.{ .string = name });
     }
 };
+
+fn binaryErrorOp(op: ast.BinaryOp) proto_mod.ErrorOp {
+    return switch (op) {
+        .or_op, .and_op => unreachable,
+        .eq, .ne, .lt, .le, .gt, .ge => .compare,
+        .bit_or, .bit_xor, .bit_and, .shift_left, .shift_right => .bitwise,
+        .concat => .concat,
+        .add, .sub, .mul, .div, .idiv, .mod, .pow => .arithmetic,
+    };
+}
+
+fn stringLiteralPreview(lexeme: []const u8) []const u8 {
+    if (lexeme.len >= 2 and (lexeme[0] == '"' or lexeme[0] == '\'')) return lexeme[1 .. lexeme.len - 1];
+    return lexeme;
+}
 
 fn binaryInstruction(op: ast.BinaryOp, dest: bytecode.Register, left: bytecode.Register, right: bytecode.Register) bytecode.Instruction {
     const binary: bytecode.Binary = .{ .dest = dest, .left = left, .right = right };

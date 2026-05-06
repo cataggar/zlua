@@ -19,6 +19,41 @@ pub const UpvalueDesc = struct {
     index: u16,
 };
 
+pub const ErrorOp = enum {
+    arithmetic,
+    bitwise,
+    concat,
+    compare,
+    call,
+    index,
+    newindex,
+    length,
+    numeric_for,
+};
+
+pub const OperandOrigin = union(enum) {
+    temporary,
+    local: []const u8,
+    upvalue: []const u8,
+    global: []const u8,
+    field: []const u8,
+    method: []const u8,
+    metamethod: []const u8,
+    constant: []const u8,
+};
+
+pub const ErrorSite = struct {
+    line: usize,
+    op: ErrorOp,
+    operands: []const OperandOrigin = &.{},
+    call_name: ?OperandOrigin = null,
+};
+
+pub const ErrorSiteEntry = struct {
+    pc: usize,
+    site: ErrorSite,
+};
+
 pub const Proto = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -27,6 +62,7 @@ pub const Proto = struct {
     line_info: std.ArrayList(LineInfo) = .empty,
     locals: std.ArrayList(LocalDebug) = .empty,
     upvalues: std.ArrayList(UpvalueDesc) = .empty,
+    error_sites: std.ArrayList(ErrorSiteEntry) = .empty,
     children: std.ArrayList(*Proto) = .empty,
     max_registers: u16 = 0,
     param_count: u16 = 0,
@@ -50,6 +86,7 @@ pub const Proto = struct {
             self.allocator.destroy(child);
         }
         self.children.deinit(self.allocator);
+        self.error_sites.deinit(self.allocator);
         self.upvalues.deinit(self.allocator);
         self.locals.deinit(self.allocator);
         self.line_info.deinit(self.allocator);
@@ -123,6 +160,28 @@ pub const Proto = struct {
         return @intCast(self.children.items.len - 1);
     }
 
+    pub fn addErrorSite(self: *Proto, pc_index: usize, site: ErrorSite) !void {
+        const operands = try self.arena.allocator().alloc(OperandOrigin, site.operands.len);
+        for (site.operands, 0..) |origin, index| operands[index] = try self.ownOrigin(origin);
+        try self.error_sites.append(self.allocator, .{
+            .pc = pc_index,
+            .site = .{
+                .line = site.line,
+                .op = site.op,
+                .operands = operands,
+                .call_name = if (site.call_name) |origin| try self.ownOrigin(origin) else null,
+            },
+        });
+    }
+
+    pub fn errorSiteAt(self: Proto, pc_index: usize) ?ErrorSite {
+        for (self.error_sites.items) |entry| {
+            if (entry.pc == pc_index) return entry.site;
+            if (entry.pc > pc_index) return null;
+        }
+        return null;
+    }
+
     pub fn setDebugName(self: *Proto, name: []const u8) !void {
         self.debug_name = try self.dupe(name);
     }
@@ -134,6 +193,19 @@ pub const Proto = struct {
             .integer => |value| .{ .integer = try self.dupe(value) },
             .number => |value| .{ .number = try self.dupe(value) },
             .string => |value| .{ .string = try self.dupe(value) },
+        };
+    }
+
+    fn ownOrigin(self: *Proto, origin: OperandOrigin) !OperandOrigin {
+        return switch (origin) {
+            .temporary => .temporary,
+            .local => |name| .{ .local = try self.dupe(name) },
+            .upvalue => |name| .{ .upvalue = try self.dupe(name) },
+            .global => |name| .{ .global = try self.dupe(name) },
+            .field => |name| .{ .field = try self.dupe(name) },
+            .method => |name| .{ .method = try self.dupe(name) },
+            .metamethod => |name| .{ .metamethod = try self.dupe(name) },
+            .constant => |name| .{ .constant = try self.dupe(name) },
         };
     }
 

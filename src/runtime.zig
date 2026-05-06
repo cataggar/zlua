@@ -1722,9 +1722,9 @@ pub const State = struct {
         const step = self.get(thread, op.base + 2);
         if (toInteger(initial)) |initial_integer| {
             if (toInteger(step)) |step_integer| {
-                if (step_integer == 0) return self.fail("'for' step is zero");
+                if (step_integer == 0) return self.failRuntimeDetail(thread, "'for' step is zero");
                 const limit_integer = toInteger(limit) orelse blk: {
-                    const limit_number = toNumberMaybe(limit) orelse return self.fail("'for' limit must be a number");
+                    const limit_number = toNumberMaybe(limit) orelse return self.failForTypeError(thread, .limit, limit);
                     break :blk integerForLimit(limit_number, step_integer) orelse {
                         self.set(thread, op.base, .{ .integer = initial_integer });
                         self.set(thread, op.base + 1, .{ .integer = initial_integer });
@@ -1741,10 +1741,10 @@ pub const State = struct {
             }
         }
 
-        const initial_number = toNumberMaybe(initial) orelse return self.fail("'for' initial value must be a number");
-        const limit_number = toNumberMaybe(limit) orelse return self.fail("'for' limit must be a number");
-        const step_number = toNumberMaybe(step) orelse return self.fail("'for' step must be a number");
-        if (step_number == 0) return self.fail("'for' step is zero");
+        const initial_number = toNumberMaybe(initial) orelse return self.failForTypeError(thread, .initial, initial);
+        const limit_number = toNumberMaybe(limit) orelse return self.failForTypeError(thread, .limit, limit);
+        const step_number = toNumberMaybe(step) orelse return self.failForTypeError(thread, .step, step);
+        if (step_number == 0) return self.failRuntimeDetail(thread, "'for' step is zero");
         self.set(thread, op.base, .{ .number = initial_number });
         self.set(thread, op.base + 1, .{ .number = limit_number });
         self.set(thread, op.base + 2, .{ .number = step_number });
@@ -1869,7 +1869,7 @@ pub const State = struct {
 
         const metamethod = try self.getMetamethod(table_value, "__index") orelse {
             if (table_value == .table) return .nil;
-            return self.fail(indexErrorMessage(table_value));
+            return self.failIndexTypeError(thread, table_value);
         };
 
         return switch (metamethod) {
@@ -1889,7 +1889,7 @@ pub const State = struct {
 
         const metamethod = try self.getMetamethod(table_value, "__index") orelse {
             if (table_value == .table) return .nil;
-            return self.fail(indexErrorMessage(table_value));
+            return self.failIndexTypeError(thread, table_value);
         };
 
         return switch (metamethod) {
@@ -1941,7 +1941,7 @@ pub const State = struct {
                 self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
-            return self.fail(indexErrorMessage(table_value));
+            return self.failNewIndexTypeError(thread, table_value);
         };
 
         switch (metamethod) {
@@ -1969,7 +1969,7 @@ pub const State = struct {
                 self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
-            return self.fail(indexErrorMessage(table_value));
+            return self.failNewIndexTypeError(thread, table_value);
         };
 
         switch (metamethod) {
@@ -2152,7 +2152,7 @@ pub const State = struct {
             },
             .native => |native| try self.callNative(native, thread, resolved),
             else => {
-                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.fail(callErrorMessage(callee));
+                const metamethod = try self.getMetamethod(callee, "__call") orelse return self.failCallTypeError(thread, callee);
                 try self.prependCallArgument(thread, resolved, metamethod, callee);
                 try self.invokeValue(thread, .{ .base = resolved.base, .arg_count = resolved.arg_count + 1, .return_count = resolved.return_count }, depth + 1);
             },
@@ -2530,7 +2530,7 @@ pub const State = struct {
             return;
         }
         const raw = rawBinaryOp(lhs, rhs, kind) catch |err| switch (err) {
-            error.RuntimeError => if ((kind == .idiv or kind == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail(if (kind == .mod) "attempt to perform 'n%0'" else "divide by zero") else return err,
+            error.RuntimeError => if ((kind == .idiv or kind == .mod) and (toInteger(rhs) orelse 1) == 0) return self.failRuntimeDetail(thread, if (kind == .mod) "attempt to perform 'n%0'" else "attempt to divide by zero") else return err,
         };
         if (raw) |value| {
             self.set(thread, op.dest, value);
@@ -2539,8 +2539,8 @@ pub const State = struct {
 
         const metamethod_name = binaryMetamethod(kind);
         const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse {
-            if (bitwiseIntegerError(lhs, rhs, kind)) |message| return self.fail(message);
-            return self.fail("attempt to perform operation on unsupported values");
+            if (bitwiseIntegerError(lhs, rhs, kind)) |message| return self.failRuntimeDetail(thread, message);
+            return self.failBinaryTypeError(thread, lhs, rhs, kind);
         };
         const result = try self.callOneMetamethodWithContinuation(thread, metamethod_name, metamethod, &.{ lhs, rhs }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
@@ -2552,7 +2552,7 @@ pub const State = struct {
             self.set(thread, op.dest, result);
             return;
         }
-        const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.fail("attempt to perform operation on unsupported value");
+        const metamethod = (try self.getMetamethod(value, unaryMetamethod(kind))) orelse return self.failUnaryTypeError(thread, value, kind);
         const result = try self.callOneMetamethodWithContinuation(thread, unaryMetamethod(kind), metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
         self.set(thread, op.dest, result);
     }
@@ -2585,7 +2585,7 @@ pub const State = struct {
         }
         switch (kind) {
             .lt => {
-                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.failCompareTypeError(thread, lhs, rhs);
                 const result = try self.callOneMetamethodWithContinuation(thread, "__lt", metamethod, &.{ lhs, rhs }, .{ .truthy = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, .{ .boolean = truthy(result) });
             },
@@ -2595,7 +2595,7 @@ pub const State = struct {
                     self.set(thread, op.dest, .{ .boolean = truthy(result) });
                     return;
                 }
-                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.failCompareTypeError(thread, lhs, rhs);
                 const result = try self.callOneMetamethodWithContinuation(thread, "__lt", lt, &.{ rhs, lhs }, .{ .inverted_truthy = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, .{ .boolean = !truthy(result) });
             },
@@ -2616,7 +2616,7 @@ pub const State = struct {
                 const result = try self.callOneMetamethodWithContinuation(thread, "__len", metamethod, &.{ value, value }, .{ .value = self.absoluteRegister(thread, op.dest) });
                 self.set(thread, op.dest, result);
             } else {
-                return self.fail("attempt to get length of a non-string value");
+                return self.failLengthTypeError(thread, value);
             },
         }
     }
@@ -2632,13 +2632,13 @@ pub const State = struct {
     fn binaryOp(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: BinaryOp) !Value {
         if (op == .concat and luaStringLike(lhs) and luaStringLike(rhs)) return self.concatValues(lhs, rhs);
         const raw = rawBinaryOp(lhs, rhs, op) catch |err| switch (err) {
-            error.RuntimeError => if ((op == .idiv or op == .mod) and (toInteger(rhs) orelse 1) == 0) return self.fail(if (op == .mod) "attempt to perform 'n%0'" else "divide by zero") else return err,
+            error.RuntimeError => if ((op == .idiv or op == .mod) and (toInteger(rhs) orelse 1) == 0) return self.failRuntimeDetail(thread, if (op == .mod) "attempt to perform 'n%0'" else "attempt to divide by zero") else return err,
         };
         if (raw) |value| return value;
         const metamethod_name = binaryMetamethod(op);
         const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse {
-            if (bitwiseIntegerError(lhs, rhs, op)) |message| return self.fail(message);
-            return self.fail("attempt to perform operation on unsupported values");
+            if (bitwiseIntegerError(lhs, rhs, op)) |message| return self.failRuntimeDetail(thread, message);
+            return self.failBinaryTypeError(thread, lhs, rhs, op);
         };
         return self.callOneMetamethod(thread, metamethod_name, metamethod, &.{ lhs, rhs });
     }
@@ -2646,7 +2646,7 @@ pub const State = struct {
     fn unaryOp(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) !Value {
         if (rawUnaryOp(value, op)) |result| return result;
         const metamethod_name = unaryMetamethod(op);
-        const metamethod = (try self.getMetamethod(value, metamethod_name)) orelse return self.fail("attempt to perform operation on unsupported value");
+        const metamethod = (try self.getMetamethod(value, metamethod_name)) orelse return self.failUnaryTypeError(thread, value, op);
         return self.callOneMetamethod(thread, metamethod_name, metamethod, &.{ value, value });
     }
 
@@ -2661,14 +2661,14 @@ pub const State = struct {
         if (rawCompare(lhs, rhs, op)) |result| return result;
         switch (op) {
             .lt => {
-                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.failCompareTypeError(thread, lhs, rhs);
                 return truthy(try self.callOneMetamethod(thread, "__lt", metamethod, &.{ lhs, rhs }));
             },
             .le => {
                 if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
                     return truthy(try self.callOneMetamethod(thread, "__le", metamethod, &.{ lhs, rhs }));
                 }
-                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.fail("attempt to compare unsupported values");
+                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.failCompareTypeError(thread, lhs, rhs);
                 return !truthy(try self.callOneMetamethod(thread, "__lt", lt, &.{ rhs, lhs }));
             },
         }
@@ -4392,6 +4392,154 @@ pub const State = struct {
         try appendValue(self.allocator, out, value);
     }
 
+    fn failRuntimeDetail(self: *State, thread: ?*Thread, detail: []const u8) RuntimeError {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        self.appendRuntimeErrorPrefix(&out, thread) catch return self.fail(detail);
+        out.appendSlice(self.allocator, detail) catch return self.fail(detail);
+        return self.fail(self.intern(out.items) catch return self.fail(detail));
+    }
+
+    fn failBinaryTypeError(self: *State, thread: *Thread, lhs: Value, rhs: Value, op: BinaryOp) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        const site = self.currentErrorSite(thread);
+        switch (op) {
+            .add, .sub, .mul, .div, .idiv, .mod, .pow => {
+                if (lhs == .string or rhs == .string) {
+                    appendFmt(self.allocator, &detail, "attempt to {s} a '{s}' with a '{s}'", .{ arithmeticVerb(op), luaTypeName(lhs), luaTypeName(rhs) }) catch return self.fail("attempt to perform operation on unsupported values");
+                    return self.failRuntimeDetail(thread, detail.items);
+                }
+                const operand_index: usize = if (toNumberMaybe(lhs) == null) 0 else 1;
+                const bad_value = if (operand_index == 0) lhs else rhs;
+                appendFmt(self.allocator, &detail, "attempt to perform arithmetic on a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                self.appendSiteOrigin(&detail, site, operand_index, false) catch return self.fail("attempt to perform operation on unsupported values");
+            },
+            .band, .bor, .bxor, .shl, .shr => {
+                const operand_index: usize = if (toBitwiseInteger(lhs) == null) 0 else 1;
+                const bad_value = if (operand_index == 0) lhs else rhs;
+                appendFmt(self.allocator, &detail, "attempt to perform bitwise operation on a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                self.appendSiteOrigin(&detail, site, operand_index, true) catch return self.fail("attempt to perform operation on unsupported values");
+            },
+            .concat => {
+                const operand_index: usize = if (!luaStringLike(lhs)) 0 else 1;
+                const bad_value = if (operand_index == 0) lhs else rhs;
+                appendFmt(self.allocator, &detail, "attempt to concatenate a {s} value", .{luaTypeName(bad_value)}) catch return self.fail("attempt to perform operation on unsupported values");
+                self.appendSiteOrigin(&detail, site, operand_index, false) catch return self.fail("attempt to perform operation on unsupported values");
+            },
+        }
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failUnaryTypeError(self: *State, thread: *Thread, value: Value, op: UnaryMetamethodOp) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        const operation = switch (op) {
+            .unm => "arithmetic",
+            .bnot => "bitwise operation",
+        };
+        appendFmt(self.allocator, &detail, "attempt to perform {s} on a {s} value", .{ operation, luaTypeName(value) }) catch return self.fail("attempt to perform operation on unsupported value");
+        self.appendSiteOrigin(&detail, self.currentErrorSite(thread), 0, op == .bnot) catch return self.fail("attempt to perform operation on unsupported value");
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failCompareTypeError(self: *State, thread: *Thread, lhs: Value, rhs: Value) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        appendFmt(self.allocator, &detail, "attempt to compare {s} with {s}", .{ luaTypeName(lhs), luaTypeName(rhs) }) catch return self.fail("attempt to compare unsupported values");
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failLengthTypeError(self: *State, thread: *Thread, value: Value) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        appendFmt(self.allocator, &detail, "attempt to get length of a {s} value", .{luaTypeName(value)}) catch return self.fail("attempt to get length of a non-string value");
+        self.appendSiteOrigin(&detail, self.currentErrorSite(thread), 0, false) catch return self.fail("attempt to get length of a non-string value");
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failIndexTypeError(self: *State, thread: ?*Thread, value: Value) RuntimeError {
+        return self.failAccessTypeError(thread, value, indexErrorMessage(value));
+    }
+
+    fn failNewIndexTypeError(self: *State, thread: ?*Thread, value: Value) RuntimeError {
+        return self.failAccessTypeError(thread, value, indexErrorMessage(value));
+    }
+
+    fn failCallTypeError(self: *State, thread: *Thread, value: Value) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        appendFmt(self.allocator, &detail, "attempt to call a {s} value", .{luaTypeName(value)}) catch return self.fail(callErrorMessage(value));
+        self.appendCallOrigin(&detail, self.currentErrorSite(thread)) catch return self.fail(callErrorMessage(value));
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failAccessTypeError(self: *State, thread: ?*Thread, value: Value, fallback: []const u8) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        appendFmt(self.allocator, &detail, "attempt to index a {s} value", .{luaTypeName(value)}) catch return self.fail(fallback);
+        const site = if (thread) |active| self.currentErrorSite(active) else null;
+        self.appendSiteOrigin(&detail, site, 0, false) catch return self.fail(fallback);
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn failForTypeError(self: *State, thread: *Thread, which: ForValueKind, value: Value) RuntimeError {
+        var detail = std.ArrayList(u8).empty;
+        defer detail.deinit(self.allocator);
+        appendFmt(self.allocator, &detail, "bad 'for' {s} (number expected, got {s})", .{ forValueName(which), luaTypeName(value) }) catch return self.fail("bad 'for' value");
+        return self.failRuntimeDetail(thread, detail.items);
+    }
+
+    fn appendRuntimeErrorPrefix(self: *State, out: *std.ArrayList(u8), thread: ?*Thread) !void {
+        const active = thread orelse return;
+        if (active.frames.items.len == 0) return;
+        if (active.frames.items[active.frames.items.len - 1].closure.stripped_debug) {
+            try out.appendSlice(self.allocator, "?:?: ");
+            return;
+        }
+        const site = self.currentErrorSite(active) orelse return;
+        const frame = active.frames.items[active.frames.items.len - 1];
+        try appendFmt(self.allocator, out, "{s}:{d}: ", .{ runtimeSourceName(frame.proto.source_name), site.line });
+    }
+
+    fn currentErrorSite(self: *State, thread: *Thread) ?proto_mod.ErrorSite {
+        _ = self;
+        if (thread.frames.items.len == 0) return null;
+        const frame = thread.frames.items[thread.frames.items.len - 1];
+        if (frame.closure.stripped_debug) return null;
+        if (frame.pc == 0) return null;
+        return frame.proto.errorSiteAt(frame.pc - 1) orelse blk: {
+            if (frame.proto.line_info.items.len == 0) return null;
+            const pc = @min(frame.pc - 1, frame.proto.line_info.items.len - 1);
+            break :blk proto_mod.ErrorSite{ .line = frame.proto.line_info.items[pc].line, .op = .call };
+        };
+    }
+
+    fn appendSiteOrigin(self: *State, out: *std.ArrayList(u8), site: ?proto_mod.ErrorSite, operand_index: usize, allow_constant: bool) !void {
+        const active_site = site orelse return;
+        if (operand_index >= active_site.operands.len) return;
+        try self.appendOrigin(out, active_site.operands[operand_index], allow_constant);
+    }
+
+    fn appendCallOrigin(self: *State, out: *std.ArrayList(u8), site: ?proto_mod.ErrorSite) !void {
+        const active_site = site orelse return;
+        if (active_site.call_name) |origin| return self.appendOrigin(out, origin, false);
+        if (active_site.operands.len != 0) return self.appendOrigin(out, active_site.operands[0], false);
+    }
+
+    fn appendOrigin(self: *State, out: *std.ArrayList(u8), origin: proto_mod.OperandOrigin, allow_constant: bool) !void {
+        switch (origin) {
+            .temporary => {},
+            .local => |name| try appendFmt(self.allocator, out, " (local '{s}')", .{name}),
+            .upvalue => |name| try appendFmt(self.allocator, out, " (upvalue '{s}')", .{name}),
+            .global => |name| try appendFmt(self.allocator, out, " (global '{s}')", .{name}),
+            .field => |name| try appendFmt(self.allocator, out, " (field '{s}')", .{name}),
+            .method => |name| try appendFmt(self.allocator, out, " (method '{s}')", .{name}),
+            .metamethod => |name| try appendFmt(self.allocator, out, " (metamethod '{s}')", .{name}),
+            .constant => |value| if (allow_constant) try appendFmt(self.allocator, out, " (constant '{s}')", .{value}),
+        }
+    }
+
     pub fn errorDetailAlloc(self: *State, allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
         if (self.last_error == null) return allocator.dupe(u8, @errorName(err));
         var out = std.ArrayList(u8).empty;
@@ -4489,6 +4637,77 @@ fn sourceFailureResult(allocator: std.mem.Allocator, source: []const u8, diagnos
 const BinaryOp = enum { add, sub, mul, div, idiv, mod, pow, band, bor, bxor, shl, shr, concat };
 const UnaryMetamethodOp = enum { unm, bnot };
 pub const CompareOp = enum { lt, le };
+const ForValueKind = enum { initial, limit, step };
+
+fn arithmeticVerb(op: BinaryOp) []const u8 {
+    return switch (op) {
+        .add => "add",
+        .sub => "sub",
+        .mul => "mul",
+        .div => "div",
+        .idiv => "idiv",
+        .mod => "mod",
+        .pow => "pow",
+        else => "perform arithmetic on",
+    };
+}
+
+fn forValueName(kind: ForValueKind) []const u8 {
+    return switch (kind) {
+        .initial => "initial value",
+        .limit => "limit",
+        .step => "step",
+    };
+}
+
+fn luaTypeName(value: Value) []const u8 {
+    return switch (value) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .string => "string",
+        .table => "table",
+        .thread => "thread",
+        .closure,
+        .coroutine_wrapper,
+        .gmatch_iterator,
+        .native_print,
+        .native_tostring,
+        .native_getmetatable,
+        .native_setmetatable,
+        .native_rawequal,
+        .native_rawget,
+        .native_rawset,
+        .native_rawlen,
+        .native_next,
+        .native_pairs,
+        .native_ipairs,
+        .native_ipairs_iter,
+        .native_table_create,
+        .native_select,
+        .native_assert,
+        .native_error,
+        .native_pcall,
+        .native_xpcall,
+        .native_collectgarbage,
+        .native_debug_traceback,
+        .native_coroutine_create,
+        .native_coroutine_resume,
+        .native_coroutine_yield,
+        .native_coroutine_status,
+        .native_coroutine_running,
+        .native_coroutine_isyieldable,
+        .native_coroutine_close,
+        .native_coroutine_wrap,
+        .native,
+        => "function",
+    };
+}
+
+fn runtimeSourceName(name: []const u8) []const u8 {
+    if (name.len > 0 and (name[0] == '@' or name[0] == '=')) return name[1..];
+    return name;
+}
 
 fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
     switch (op) {
