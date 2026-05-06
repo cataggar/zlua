@@ -4773,7 +4773,8 @@ fn constantString(proto: *const proto_mod.Proto, index: bytecode.ConstantIndex) 
 
 fn parseIntegerLiteral(lexeme: []const u8) !Value {
     if (isHex(lexeme)) {
-        const unsigned = try std.fmt.parseInt(u64, lexeme[2..], 16);
+        var unsigned: u64 = 0;
+        for (lexeme[2..]) |byte| unsigned = unsigned *% 16 +% hexValue(byte);
         return .{ .integer = @as(i64, @bitCast(unsigned)) };
     }
     if (std.fmt.parseInt(i64, lexeme, 10)) |integer| {
