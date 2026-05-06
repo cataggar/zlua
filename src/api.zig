@@ -84,6 +84,15 @@ pub const TableOptions = struct {
     hash_hint: u32 = 0,
 };
 
+pub const HostFn = *const fn (ctx: *Context) anyerror!void;
+
+const RegisteredCallback = struct {
+    name: []const u8,
+    callback: HostFn,
+};
+
+const callback_dispatch_global = "__zlua_api_callback";
+
 pub const GcBudget = struct {
     steps: usize = 0,
 };
@@ -98,6 +107,7 @@ pub const State = struct {
     last_error_root: ?usize = null,
     memory_files: std.ArrayList(MemoryFile) = .empty,
     owned_memory_file_start: usize = 0,
+    callbacks: std.ArrayList(RegisteredCallback) = .empty,
 
     pub fn init(state_allocator: std.mem.Allocator, options: Options) !State {
         var state = State{
@@ -121,6 +131,8 @@ pub const State = struct {
         self.raw_state.deinit();
         self.deinitOwnedMemoryFiles(state_allocator);
         self.memory_files.deinit(state_allocator);
+        self.deinitCallbacks(state_allocator);
+        self.callbacks.deinit(state_allocator);
         self.* = undefined;
     }
 
@@ -159,6 +171,46 @@ pub const State = struct {
 
     pub fn getGlobal(self: *State, name: []const u8, comptime T: type) !T {
         return fromRuntimeValue(self, self.raw_state.getGlobal(name), T);
+    }
+
+    pub fn register(self: *State, name: []const u8, callback: HostFn) !void {
+        if (std.mem.eql(u8, name, callback_dispatch_global)) return error.UnsupportedOption;
+        try self.ensureCallbackDispatcher();
+
+        const name_copy = try self.allocator().dupe(u8, name);
+        errdefer self.allocator().free(name_copy);
+
+        try self.callbacks.append(self.allocator(), .{ .name = name_copy, .callback = callback });
+        var callback_installed = false;
+        errdefer if (!callback_installed) {
+            const entry = self.callbacks.pop().?;
+            self.allocator().free(entry.name);
+        };
+
+        const callback_id = self.callbacks.items.len;
+        const source = try std.fmt.allocPrint(self.allocator(),
+            \\return function(...)
+            \\  return __zlua_api_callback({d}, ...)
+            \\end
+        , .{callback_id});
+        defer self.allocator().free(source);
+
+        var chunk = try self.loadString(source, .{ .name = "=zlua api callback wrapper" });
+        defer chunk.deinit();
+        var function = try chunk.call(.{}, Function);
+        defer function.deinit();
+        try self.setGlobal(name, function);
+        callback_installed = true;
+    }
+
+    pub fn registerTyped(self: *State, name: []const u8, comptime function: anytype) !void {
+        const Wrapper = struct {
+            fn call(ctx: *Context) !void {
+                try callTyped(function, ctx);
+            }
+        };
+
+        try self.register(name, Wrapper.call);
     }
 
     pub fn createTable(self: *State, options: TableOptions) !Table {
@@ -262,6 +314,12 @@ pub const State = struct {
         }
     }
 
+    fn ensureCallbackDispatcher(self: *State) !void {
+        self.raw_state.setApiCallbackDispatch(apiCallbackDispatch, self);
+        const raw_name = try self.raw_state.intern(callback_dispatch_global);
+        self.raw_state.putGlobal(raw_name, .{ .native = .api_callback_dispatch }) catch |err| return self.captureLuaError(err);
+    }
+
     fn ensurePackageLibrary(self: *State) !void {
         if (self.raw_state.globals.get("package") == null) {
             try stdlib.openLibraries(&self.raw_state, .{ .libraries = .{ .package = true } });
@@ -284,6 +342,10 @@ pub const State = struct {
             state_allocator.free(file.path);
             state_allocator.free(file.contents);
         }
+    }
+
+    fn deinitCallbacks(self: *State, state_allocator: std.mem.Allocator) void {
+        for (self.callbacks.items) |entry| state_allocator.free(entry.name);
     }
 
     fn rootCountForTest(self: *State) usize {
@@ -493,7 +555,80 @@ pub fn Tuple(comptime types: []const type) type {
     };
 }
 
-pub const Context = opaque {};
+pub const Context = struct {
+    lua: *State,
+    raw: *runtime.ApiCallbackContext,
+
+    pub fn state(self: *Context) *State {
+        return self.lua;
+    }
+
+    pub fn argCount(self: *Context) usize {
+        return self.raw.argCount();
+    }
+
+    pub fn arg(self: *Context, index: usize, comptime T: type) !T {
+        const raw = self.raw.callbackArgValue(index);
+        return fromRuntimeValue(self.lua, raw, T) catch |err| return self.argConversionError(index, T, raw, err);
+    }
+
+    pub fn optionalArg(self: *Context, index: usize, comptime T: type) !?T {
+        if (index >= self.argCount()) return null;
+        const raw = self.raw.callbackArgValue(index);
+        if (raw == .nil) return null;
+        return self.arg(index, T);
+    }
+
+    pub fn pushReturn(self: *Context, value: anytype) !void {
+        const raw_value = toRuntimeValue(self.lua, value) catch |err| return self.returnConversionError(err);
+        try self.raw.appendReturn(raw_value);
+    }
+
+    pub fn returnValues(self: *Context, values: anytype) !void {
+        self.raw.clearReturns();
+        try self.appendReturnValues(values);
+    }
+
+    pub fn raise(self: *Context, value: anytype) error{ LuaError, OutOfMemory } {
+        const raw_value = toRuntimeValue(self.lua, value) catch |err| return raiseConversionError(err);
+        return self.raw.raise(raw_value);
+    }
+
+    fn argConversionError(self: *Context, index: usize, comptime T: type, raw: runtime.Value, err: anyerror) anyerror {
+        return switch (err) {
+            error.TypeMismatch => self.raw.failArgumentType(index, expectedLuaType(T), raw),
+            error.IntegerOutOfRange => self.raw.failArgumentMessage(index, "integer out of range"),
+            error.UnsupportedType => self.raw.failArgumentMessage(index, "unsupported host argument type"),
+            else => err,
+        };
+    }
+
+    fn returnConversionError(self: *Context, err: anyerror) anyerror {
+        return switch (err) {
+            error.IntegerOutOfRange => self.raw.fail("host callback return integer out of range"),
+            error.UnsupportedType => self.raw.fail("unsupported host callback return type"),
+            else => err,
+        };
+    }
+
+    fn raiseConversionError(err: anyerror) error{ LuaError, OutOfMemory } {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.LuaError,
+        };
+    }
+
+    fn appendReturnValues(self: *Context, values: anytype) !void {
+        const T = @TypeOf(values);
+        const info = @typeInfo(T);
+        if (info == .@"struct" and info.@"struct".is_tuple) {
+            inline for (info.@"struct".fields, 0..) |_, index| try self.pushReturn(values[index]);
+            return;
+        }
+
+        try self.pushReturn(values);
+    }
+};
 pub const AnyUserdata = opaque {};
 pub const Thread = opaque {};
 
@@ -530,6 +665,86 @@ fn validateLoadOptions(options: LoadOptions) UnsupportedOption!void {
     switch (options.mode) {
         .source_only => {},
     }
+}
+
+fn apiCallbackDispatch(raw: *runtime.ApiCallbackContext) anyerror!void {
+    const user_data = raw.user_data orelse return raw.raise(.{ .string = try raw.state.intern("host callback state unavailable") });
+    const state: *State = @ptrCast(@alignCast(user_data));
+    if (raw.callback_id == 0 or raw.callback_id > state.callbacks.items.len) {
+        return raw.raise(.{ .string = try raw.state.intern("unknown host callback") });
+    }
+
+    const entry = state.callbacks.items[raw.callback_id - 1];
+    raw.function_name = entry.name;
+    var context = Context{ .lua = state, .raw = raw };
+    try entry.callback(&context);
+}
+
+fn callTyped(comptime function: anytype, ctx: *Context) !void {
+    const FunctionType = @TypeOf(function);
+    const SignatureType = switch (@typeInfo(FunctionType)) {
+        .@"fn" => FunctionType,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => pointer.child,
+            else => @compileError("registerTyped requires a function or function pointer"),
+        },
+        else => @compileError("registerTyped requires a function or function pointer"),
+    };
+    const function_info = switch (@typeInfo(FunctionType)) {
+        .@"fn" => |info| info,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => |info| info,
+            else => @compileError("registerTyped requires a function or function pointer"),
+        },
+        else => @compileError("registerTyped requires a function or function pointer"),
+    };
+
+    if (function_info.is_var_args) @compileError("registerTyped does not support varargs functions");
+
+    var args: std.meta.ArgsTuple(SignatureType) = undefined;
+    inline for (function_info.params, 0..) |param, index| {
+        const Param = param.type orelse @compileError("registerTyped requires typed parameters");
+        args[index] = try ctx.arg(index, Param);
+    }
+
+    const Return = function_info.return_type orelse void;
+    if (Return == void) {
+        @call(.auto, function, args);
+        try ctx.returnValues(.{});
+        return;
+    }
+
+    switch (@typeInfo(Return)) {
+        .error_union => |error_union| {
+            const result = try @call(.auto, function, args);
+            if (error_union.payload == void) {
+                try ctx.returnValues(.{});
+            } else {
+                try ctx.returnValues(result);
+            }
+        },
+        else => {
+            const result = @call(.auto, function, args);
+            try ctx.returnValues(result);
+        },
+    }
+}
+
+fn expectedLuaType(comptime T: type) []const u8 {
+    if (T == Value or T == Ref or T == ErrorRef) return "value";
+    if (T == Table) return "table";
+    if (T == Function) return "function";
+
+    return switch (@typeInfo(T)) {
+        .bool => "boolean",
+        .int, .comptime_int, .float, .comptime_float => "number",
+        .optional => |optional| expectedLuaType(optional.child),
+        .pointer => |pointer| switch (pointer.size) {
+            .slice => if (pointer.child == u8) "string" else "value",
+            else => "value",
+        },
+        else => "value",
+    };
 }
 
 fn convertArgs(state: *State, args: anytype) ![]runtime.Value {
@@ -898,4 +1113,123 @@ test "api package path loads memory backed Lua modules" {
         \\local mathx = require('mathx')
         \\assert(mathx.double(21) == 42)
     , .{ .name = "=api-21.3-memory-require" });
+}
+
+test "api host callbacks read arguments and return multiple values" {
+    const Callbacks = struct {
+        fn add(ctx: *Context) !void {
+            const lhs = try ctx.arg(0, i64);
+            const rhs = try ctx.arg(1, i64);
+            try ctx.returnValues(.{ lhs + rhs, "ok" });
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.register("host_add", Callbacks.add);
+    try lua.doString(
+        \\local sum, label = host_add(20, 22)
+        \\assert(sum == 42)
+        \\assert(label == 'ok')
+    , .{ .name = "=api-21.4-host-add" });
+}
+
+test "api host callback argument errors become Lua errors" {
+    const Callbacks = struct {
+        fn needInteger(ctx: *Context) !void {
+            _ = try ctx.arg(0, i64);
+            try ctx.returnValues(.{});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.register("need_integer", Callbacks.needInteger);
+    var chunk = try lua.loadString("return need_integer('nope')", .{ .name = "=api-21.4-arg-error" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "need_integer") != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "number") != null);
+        },
+    }
+}
+
+test "api host callback can raise Lua error values" {
+    const Callbacks = struct {
+        fn fail(ctx: *Context) !void {
+            return ctx.raise("host boom");
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.register("host_fail", Callbacks.fail);
+    var chunk = try lua.loadString("host_fail()", .{ .name = "=api-21.4-raise" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "host boom") != null);
+        },
+    }
+}
+
+test "api host callback can hold and call Lua callback function" {
+    const Callbacks = struct {
+        fn each(ctx: *Context) !void {
+            var callback = try ctx.arg(0, Function);
+            defer callback.deinit();
+
+            const first = try callback.call(.{20}, i64);
+            const second = try callback.call(.{41}, i64);
+            try ctx.returnValues(.{ first, second });
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.register("host_each", Callbacks.each);
+    try lua.doString(
+        \\local a, b = host_each(function(value)
+        \\  return value + 1
+        \\end)
+        \\assert(a == 21)
+        \\assert(b == 42)
+    , .{ .name = "=api-21.4-lua-callback" });
+}
+
+test "api typed host callback wrapper compiles and runs" {
+    const Callbacks = struct {
+        fn clamp(value: f64, min: f64, max: f64) f64 {
+            return @min(@max(value, min), max);
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.registerTyped("clamp", Callbacks.clamp);
+    try lua.doString(
+        \\assert(clamp(5, 1, 10) == 5)
+        \\assert(clamp(-1, 1, 10) == 1)
+        \\assert(clamp(11, 1, 10) == 10)
+    , .{ .name = "=api-21.4-typed" });
 }

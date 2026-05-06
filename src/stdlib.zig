@@ -449,6 +449,7 @@ pub const NativeFn = enum {
     debug_setmetatable,
     debug_setuservalue,
     debug_getuservalue,
+    api_callback_dispatch,
 
     pub fn name(self: NativeFn) []const u8 {
         return switch (self) {
@@ -559,6 +560,7 @@ pub const NativeFn = enum {
             .debug_setmetatable => "debug.setmetatable",
             .debug_setuservalue => "debug.setuservalue",
             .debug_getuservalue => "debug.getuservalue",
+            .api_callback_dispatch => "__zlua_api_callback",
         };
     }
 };
@@ -672,6 +674,7 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_setmetatable => try debug.setmetatable(state, thread, op),
         .debug_setuservalue => try debug.setuservalue(state, thread, op),
         .debug_getuservalue => try debug.getuservalue(state, thread, op),
+        .api_callback_dispatch => try state.callApiCallbackDispatch(thread, op),
     }
 }
 

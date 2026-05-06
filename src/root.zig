@@ -18,6 +18,7 @@ pub const Function = api.Function;
 pub const Context = api.Context;
 pub const Error = api.Error;
 pub const Tuple = api.Tuple;
+pub const HostFn = api.HostFn;
 
 test {
     _ = frontend;

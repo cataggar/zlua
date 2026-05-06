@@ -70,6 +70,62 @@ pub const ProtectedCallResult = union(enum) {
     failure: Value,
 };
 
+pub const ApiCallbackDispatchFn = *const fn (*ApiCallbackContext) anyerror!void;
+
+pub const ApiCallbackContext = struct {
+    state: *State,
+    thread: *Thread,
+    op: bytecode.Call,
+    callback_id: usize,
+    user_data: ?*anyopaque,
+    function_name: []const u8 = "host callback",
+    returns: std.ArrayList(Value) = .empty,
+    error_value: ?Value = null,
+
+    pub fn deinit(self: *ApiCallbackContext) void {
+        self.returns.deinit(self.state.allocator);
+    }
+
+    pub fn argCount(self: *ApiCallbackContext) usize {
+        if (self.op.arg_count == 0) return 0;
+        return self.op.arg_count - 1;
+    }
+
+    pub fn callbackArgValue(self: *ApiCallbackContext, index: usize) Value {
+        const raw_index = std.math.cast(u16, index + 1) orelse return .nil;
+        return argValue(self.state, self.thread, self.op, raw_index);
+    }
+
+    pub fn clearReturns(self: *ApiCallbackContext) void {
+        self.returns.clearRetainingCapacity();
+    }
+
+    pub fn appendReturn(self: *ApiCallbackContext, value: Value) !void {
+        try self.returns.append(self.state.allocator, value);
+    }
+
+    pub fn fail(self: *ApiCallbackContext, message: []const u8) RuntimeError {
+        return self.state.fail(message);
+    }
+
+    pub fn failArgumentMessage(self: *ApiCallbackContext, index: usize, message: []const u8) RuntimeError {
+        return self.state.failArgumentMessage(self.function_name, argumentIndex(index), message);
+    }
+
+    pub fn failArgumentType(self: *ApiCallbackContext, index: usize, expected: []const u8, actual: Value) RuntimeError {
+        return self.state.failArgumentType(self.function_name, argumentIndex(index), expected, actual);
+    }
+
+    pub fn raise(self: *ApiCallbackContext, value: Value) error{LuaError} {
+        self.error_value = value;
+        return error.LuaError;
+    }
+
+    fn argumentIndex(index: usize) u16 {
+        return std.math.cast(u16, index + 1) orelse std.math.maxInt(u16);
+    }
+};
+
 pub const RuntimeErrorPayload = union(enum) {
     diagnostic: []const u8,
     argument: errors.ArgumentError,
@@ -587,6 +643,8 @@ pub const State = struct {
     last_error_in_close: bool = false,
     traceback_error_in_close: bool = false,
     current_thread: ?*Thread = null,
+    api_callback_dispatch: ?ApiCallbackDispatchFn = null,
+    api_callback_user_data: ?*anyopaque = null,
     coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
     number_metatable: ?*Table = null,
@@ -1058,6 +1116,37 @@ pub const State = struct {
             if (root != .nil) count += 1;
         }
         return count;
+    }
+
+    pub fn setApiCallbackDispatch(self: *State, dispatch: ApiCallbackDispatchFn, user_data: *anyopaque) void {
+        self.api_callback_dispatch = dispatch;
+        self.api_callback_user_data = user_data;
+    }
+
+    pub fn callApiCallbackDispatch(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const dispatch = self.api_callback_dispatch orelse return self.fail("host callback dispatcher unavailable");
+        const id_value = argValue(self, thread, op, 0);
+        const id_integer = toInteger(id_value) orelse return self.failArgumentType("__zlua_api_callback", 1, "integer", id_value);
+        if (id_integer <= 0) return self.failArgumentMessage("__zlua_api_callback", 1, "out of range");
+        const callback_id = std.math.cast(usize, id_integer) orelse return self.failArgumentMessage("__zlua_api_callback", 1, "out of range");
+
+        var context = ApiCallbackContext{
+            .state = self,
+            .thread = thread,
+            .op = op,
+            .callback_id = callback_id,
+            .user_data = self.api_callback_user_data,
+        };
+        defer context.deinit();
+
+        dispatch(&context) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => return err,
+            error.LuaError => return self.failValue(context.error_value orelse .{ .string = try self.intern("host callback raised an error") }),
+            error.OutOfMemory => return err,
+            else => return self.fail(@errorName(err)),
+        };
+
+        try self.returnValues(thread, op.base, op.return_count, context.returns.items);
     }
 
     pub fn readFileAlloc(self: *State, path: []const u8) ![]const u8 {
@@ -4573,9 +4662,13 @@ pub const State = struct {
         return self.fail(self.intern(rendered) catch return self.fail(fallback));
     }
 
-    fn throwValue(self: *State, value: Value) RuntimeError {
+    pub fn failValue(self: *State, value: Value) RuntimeError {
         self.last_error = .{ .lua_value = value };
         return error.RuntimeError;
+    }
+
+    fn throwValue(self: *State, value: Value) RuntimeError {
+        return self.failValue(value);
     }
 
     pub fn currentErrorValue(self: *State) Value {
