@@ -188,12 +188,14 @@ pub const FieldExpr = struct {
 
 pub const CallExpr = struct {
     callee: *Expr,
+    call_line: usize,
     args: []const *Expr,
 };
 
 pub const MethodCallExpr = struct {
     receiver: *Expr,
     method: Identifier,
+    call_line: usize,
     args: []const *Expr,
 };
 
@@ -206,6 +208,7 @@ pub const UnaryOp = enum {
 
 pub const UnaryExpr = struct {
     op: UnaryOp,
+    op_line: usize,
     operand: *Expr,
 };
 

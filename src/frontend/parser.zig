@@ -6,18 +6,26 @@ const source_mod = @import("source.zig");
 const token_mod = @import("token.zig");
 
 const Tag = token_mod.Tag;
+const lua_max_local_variables: usize = 200;
+const max_syntax_depth: usize = 200;
 
 const Parser = struct {
     allocator: std.mem.Allocator,
     tokens: []const token_mod.Token,
     error_diagnostic: ?*?errors.Diagnostic = null,
     index: usize = 0,
+    syntax_depth: usize = 0,
+    current_function_line: ?usize = null,
 
     fn parseChunk(self: *Parser) anyerror![]const ast.Stmt {
         return self.parseBlock(&.{});
     }
 
     fn parseBlock(self: *Parser, end_tags: []const Tag) anyerror!ast.Block {
+        if (self.syntax_depth >= max_syntax_depth) return self.failTooManySyntaxLevels();
+        self.syntax_depth += 1;
+        defer self.syntax_depth -= 1;
+
         var statements = std.ArrayList(ast.Stmt).empty;
         while (!self.atBlockEnd(end_tags)) {
             const statement = try self.parseStatement(end_tags);
@@ -146,7 +154,10 @@ const Parser = struct {
         const default_attribute = try self.parseOptionalAttribute();
         var bindings = std.ArrayList(ast.Binding).empty;
         try bindings.append(self.allocator, try self.parseBinding(default_attribute));
-        while (self.match(.comma)) |_| try bindings.append(self.allocator, try self.parseBinding(default_attribute));
+        while (self.match(.comma)) |_| {
+            try bindings.append(self.allocator, try self.parseBinding(default_attribute));
+            if (bindings.items.len > lua_max_local_variables) return self.failTooManyLocalVariables(self.current_function_line orelse bindings.items[0].name.span.start.line);
+        }
         const values = if (self.match(.equal)) |_| try self.parseExpressionList() else &.{};
         return .{ .local_decl = .{ .bindings = try bindings.toOwnedSlice(self.allocator), .values = values } };
     }
@@ -223,10 +234,14 @@ const Parser = struct {
     }
 
     fn parseExpression(self: *Parser, min_prec: u8) anyerror!*ast.Expr {
+        if (self.syntax_depth >= max_syntax_depth) return self.failTooManySyntaxLevels();
+        self.syntax_depth += 1;
+        defer self.syntax_depth -= 1;
+
         var left = if (unaryOp(self.peek().tag)) |op| blk: {
-            _ = self.advance();
+            const token = self.advance();
             const operand = try self.parseExpression(unary_precedence);
-            break :blk try self.newExpr(.{ .unary = .{ .op = op, .operand = operand } });
+            break :blk try self.newExpr(.{ .unary = .{ .op = op, .op_line = token.span.start.line, .operand = operand } });
         } else try self.parsePrimaryExpression();
 
         while (binaryInfo(self.peek().tag)) |info| {
@@ -271,10 +286,12 @@ const Parser = struct {
                 expr = try self.newExpr(.{ .field = .{ .receiver = expr, .name = try self.expectIdentifier() } });
             } else if (self.match(.colon)) |_| {
                 const method = try self.expectIdentifier();
+                const call_line = self.peek().span.start.line;
                 const args = try self.parseArgs();
-                expr = try self.newExpr(.{ .method_call = .{ .receiver = expr, .method = method, .args = args } });
+                expr = try self.newExpr(.{ .method_call = .{ .receiver = expr, .method = method, .call_line = call_line, .args = args } });
             } else if (self.startsArgs()) {
-                expr = try self.newExpr(.{ .call = .{ .callee = expr, .args = try self.parseArgs() } });
+                const call_line = self.peek().span.start.line;
+                expr = try self.newExpr(.{ .call = .{ .callee = expr, .call_line = call_line, .args = try self.parseArgs() } });
             } else break;
         }
         return expr;
@@ -325,6 +342,9 @@ const Parser = struct {
         _ = try self.expect(.left_paren);
         const params = try self.parseParams();
         _ = try self.expect(.right_paren);
+        const previous_function_line = self.current_function_line;
+        self.current_function_line = defined_line;
+        defer self.current_function_line = previous_function_line;
         const body = try self.parseBlock(&.{.keyword_end});
         const end = try self.expect(.keyword_end);
         return params.withBody(body, defined_line, end.span.start.line);
@@ -412,6 +432,17 @@ const Parser = struct {
     fn failUnexpected(self: *Parser, message: errors.SyntaxMessage) error{ParseError} {
         if (self.error_diagnostic) |slot| if (slot.* == null) {
             slot.* = .{ .syntax = .{ .unexpected = .{ .token = errors.tokenRef(self.peek()), .message = message } } };
+        };
+        return error.ParseError;
+    }
+
+    fn failTooManySyntaxLevels(self: *Parser) error{ParseError} {
+        return self.failUnexpected(.too_many_syntax_levels);
+    }
+
+    fn failTooManyLocalVariables(self: *Parser, line: usize) error{ParseError} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .compile = .{ .too_many_local_variables = .{ .line = line } } };
         };
         return error.ParseError;
     }

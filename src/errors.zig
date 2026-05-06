@@ -64,6 +64,7 @@ pub const SyntaxMessage = enum {
     missing_open_brace,
     missing_close_brace,
     unfinished_long_bracket,
+    too_many_syntax_levels,
 };
 
 pub const ExpectedSyntax = struct {
@@ -165,8 +166,8 @@ fn appendDiagnosticDetail(allocator: std.mem.Allocator, out: *std.ArrayList(u8),
         .compile => |compile| switch (compile) {
             .too_many_returns => try out.appendSlice(allocator, "too many returns"),
             .register_overflow => try out.appendSlice(allocator, "too many registers"),
-            .too_many_local_variables => try out.appendSlice(allocator, "too many local variables"),
-            .too_many_upvalues => try out.appendSlice(allocator, "too many upvalues"),
+            .too_many_local_variables => |err| try appendFmt(allocator, out, "too many local variables (line {d})", .{err.line}),
+            .too_many_upvalues => |err| try appendFmt(allocator, out, "too many upvalues (line {d})", .{err.line}),
             .jump_out_of_range => try out.appendSlice(allocator, "control structure too long"),
             .invalid_ast => try out.appendSlice(allocator, "internal compiler error"),
         },
@@ -234,20 +235,21 @@ fn syntaxMessageText(message: SyntaxMessage) []const u8 {
         .missing_open_brace => "missing '{'",
         .missing_close_brace => "missing '}'",
         .unfinished_long_bracket => "unfinished long string",
+        .too_many_syntax_levels => "too many syntax levels",
     };
 }
 
 fn appendNearToken(allocator: std.mem.Allocator, out: *std.ArrayList(u8), token: TokenRef) !void {
-    if (token.unquoted or token.tag == .eof) {
-        if (token.unquoted and token.lexeme.len == 1) {
-            try appendFmt(allocator, out, "<\\{d}>", .{token.lexeme[0]});
-        } else {
-            try out.appendSlice(allocator, tokenText(token));
-        }
+    if (token.tag == .eof or (token.unquoted and token.lexeme.len != 1)) {
+        try out.appendSlice(allocator, tokenText(token));
         return;
     }
     try out.append(allocator, '\'');
-    try out.appendSlice(allocator, tokenText(token));
+    if (token.unquoted and token.lexeme.len == 1) {
+        try appendFmt(allocator, out, "<\\{d}>", .{token.lexeme[0]});
+    } else {
+        try out.appendSlice(allocator, tokenText(token));
+    }
     try out.append(allocator, '\'');
 }
 

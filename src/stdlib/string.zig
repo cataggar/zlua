@@ -564,10 +564,11 @@ fn luaTypeName(value: Value) []const u8 {
 
 fn integerArgument(state: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !i64 {
     const value = runtime.argValue(state, thread, op, index);
+    const display_index = state.argumentDisplayIndex(thread, function_name, index);
     const integer = switch (value) {
-        .number => |number| runtime.floatToInteger(number) orelse return state.failArgumentMessage(function_name, index + 1, "number has no integer representation"),
+        .number => |number| runtime.floatToInteger(number) orelse return state.failArgumentMessage(function_name, display_index, "number has no integer representation"),
         else => runtime.toInteger(value),
-    } orelse return state.failArgumentType(function_name, index + 1, "number", value);
+    } orelse return state.failArgumentType(function_name, display_index, "number", value);
     return integer;
 }
 

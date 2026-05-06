@@ -360,6 +360,9 @@ pub fn setmetatable(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn setuservalue(state: *State, thread: *Thread, op: bytecode.Call) !void {
+    const target = runtime.argValue(state, thread, op, 0);
+    if (isLightUserdataPlaceholder(target)) return state.failArgumentMessage("debug.setuservalue", 1, "userdata expected, got light userdata");
+    if (target != .table or !runtime.isFileValue(target)) return state.failArgumentType("debug.setuservalue", 1, "userdata", target);
     try state.returnValues(thread, op.base, op.return_count, &.{.nil});
 }
 
@@ -371,6 +374,11 @@ fn upvalueIndex(value: Value) ?usize {
     const integer = runtime.toInteger(value) orelse return null;
     if (integer <= 0) return null;
     return @intCast(integer - 1);
+}
+
+fn isLightUserdataPlaceholder(value: Value) bool {
+    if (value != .string) return false;
+    return std.mem.startsWith(u8, value.string, "upvalue:") or std.mem.startsWith(u8, value.string, "native:string.gmatch:");
 }
 
 const ClosureLineRange = struct {

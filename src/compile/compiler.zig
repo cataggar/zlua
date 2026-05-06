@@ -1,20 +1,37 @@
 const std = @import("std");
+const errors = @import("../errors.zig");
 const frontend = @import("../frontend.zig");
 const ast = frontend.ast;
 const bytecode = @import("bytecode.zig");
 const proto_mod = @import("proto.zig");
 
+const lua_rk_constant_limit: bytecode.ConstantIndex = 255;
+const lua_max_registers: bytecode.Register = 255;
+const lua_max_local_variables: usize = 200;
+const lua_max_upvalues: usize = 255;
+
 pub const CompileError = error{
     CompileError,
     RegisterOverflow,
     TooManyReturns,
+    TooManyLocalVariables,
+    TooManyUpvalues,
 };
 
 pub fn compile(allocator: std.mem.Allocator, tree: *const ast.Ast) !proto_mod.Proto {
     var root = proto_mod.Proto.init(allocator);
     errdefer root.deinit();
 
-    var context = FunctionCompiler.init(allocator, &root, null);
+    var context = FunctionCompiler.init(allocator, &root, null, null);
+    try context.compileChunk(tree.statements);
+    return root;
+}
+
+pub fn compileWithDiagnostic(allocator: std.mem.Allocator, tree: *const ast.Ast, error_diagnostic: *?errors.Diagnostic) !proto_mod.Proto {
+    var root = proto_mod.Proto.init(allocator);
+    errdefer root.deinit();
+
+    var context = FunctionCompiler.init(allocator, &root, null, error_diagnostic);
     try context.compileChunk(tree.statements);
     return root;
 }
@@ -89,6 +106,7 @@ const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
     proto: *proto_mod.Proto,
     parent: ?*FunctionCompiler,
+    error_diagnostic: ?*?errors.Diagnostic,
     decls: std.ArrayList(Decl) = .empty,
     locals: std.ArrayList(Local) = .empty,
     scopes: std.ArrayList(Scope) = .empty,
@@ -100,8 +118,8 @@ const FunctionCompiler = struct {
     current_line: usize = 1,
     forced_line: ?usize = null,
 
-    fn init(allocator: std.mem.Allocator, proto: *proto_mod.Proto, parent: ?*FunctionCompiler) FunctionCompiler {
-        return .{ .allocator = allocator, .proto = proto, .parent = parent };
+    fn init(allocator: std.mem.Allocator, proto: *proto_mod.Proto, parent: ?*FunctionCompiler, error_diagnostic: ?*?errors.Diagnostic) FunctionCompiler {
+        return .{ .allocator = allocator, .proto = proto, .parent = parent, .error_diagnostic = error_diagnostic };
     }
 
     fn deinit(self: *FunctionCompiler) void {
@@ -140,7 +158,7 @@ const FunctionCompiler = struct {
         child.defined_line = body.defined_line;
         child.last_defined_line = body.end_line;
 
-        var child_context = FunctionCompiler.init(self.allocator, child, self);
+        var child_context = FunctionCompiler.init(self.allocator, child, self, self.error_diagnostic);
         errdefer child_context.deinit();
         try child_context.enterScope();
         if (method) _ = try child_context.declareLocal("self");
@@ -235,6 +253,7 @@ const FunctionCompiler = struct {
         defer pending.deinit(self.allocator);
 
         for (decl.bindings) |binding| {
+            if (self.locals.items.len + pending.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
             const register = try self.allocReg();
             const debug_index = try self.proto.addLocal(.{
                 .name = binding.name.name,
@@ -280,6 +299,7 @@ const FunctionCompiler = struct {
 
         for (decl.names, 0..) |binding, index| {
             const value = first_value + @as(bytecode.Register, @intCast(index));
+            self.current_line = binding.name.span.start.line;
             if (try self.environmentRegister()) |env| {
                 _ = try self.emit(.{ .declare_global = .{ .table = env, .value = value, .name = try self.nameConstant(binding.name.name) } });
             } else {
@@ -306,8 +326,10 @@ const FunctionCompiler = struct {
         _ = try self.emit(.{ .closure = .{ .dest = closure_reg, .proto = child_index } });
 
         if (decl.name.fields.len == 0 and decl.name.method == null) {
+            self.current_line = decl.name.root.span.start.line;
             try self.assignName(decl.name.root.name, closure_reg);
         } else {
+            self.current_line = decl.name.root.span.start.line;
             var receiver = try self.allocReg();
             try self.loadName(decl.name.root.name, receiver);
             const prefix_len = if (decl.name.method != null) decl.name.fields.len else decl.name.fields.len - 1;
@@ -411,6 +433,7 @@ const FunctionCompiler = struct {
             _ = try self.emit(.{ .load_const = .{ .dest = step, .constant = one } });
         }
 
+        if (self.locals.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
         const debug_index = try self.proto.addLocal(.{ .name = stmt.name.name, .register = base, .start_pc = self.proto.pc() });
         try self.locals.append(self.allocator, .{ .name = stmt.name.name, .register = base, .debug_index = debug_index });
         try self.decls.append(self.allocator, .{ .name = stmt.name.name, .kind = .local, .local_index = self.locals.items.len - 1 });
@@ -680,6 +703,7 @@ const FunctionCompiler = struct {
             .not => .compare,
         };
         const origin = try self.exprOrigin(unary.operand);
+        self.current_line = unary.op_line;
         _ = try self.emitWithErrorSite(instruction, site_op, &.{origin}, null);
         self.release(mark);
     }
@@ -694,20 +718,19 @@ const FunctionCompiler = struct {
         }
 
         const mark = self.registerMark();
-        const left = try self.allocReg();
         const right = try self.allocReg();
         var left_origin = try self.exprOrigin(binary.left);
         var right_origin = try self.exprOrigin(binary.right);
-        try self.compileExprForcedLine(binary.left, left, binary.op_line);
+        try self.compileExprForcedLine(binary.left, dest, binary.op_line);
         try self.compileExpr(binary.right, right);
         const right_line = exprLine(binary.right.*);
         self.current_line = binary.op_line;
         if (binary.op == .ne) {
-            _ = try self.emitWithErrorSite(.{ .eq = .{ .dest = dest, .left = left, .right = right } }, .compare, &.{ left_origin, right_origin }, null);
+            _ = try self.emitWithErrorSite(.{ .eq = .{ .dest = dest, .left = dest, .right = right } }, .compare, &.{ left_origin, right_origin }, null);
             _ = try self.emit(.{ .not = .{ .dest = dest, .source = dest } });
         } else {
             if (binary.op == .gt or binary.op == .ge) std.mem.swap(proto_mod.OperandOrigin, &left_origin, &right_origin);
-            _ = try self.emitWithErrorSite(binaryInstruction(binary.op, dest, left, right), binaryErrorOp(binary.op), &.{ left_origin, right_origin }, null);
+            _ = try self.emitWithErrorSite(binaryInstruction(binary.op, dest, dest, right), binaryErrorOp(binary.op), &.{ left_origin, right_origin }, null);
         }
         self.current_line = right_line;
         self.release(mark);
@@ -727,6 +750,7 @@ const FunctionCompiler = struct {
                 const call_name = try self.callOrigin(expr);
                 try self.compileExpr(call.callee, dest);
                 const arg_count = try self.compileCallArgs(call.args, dest + 1, 0);
+                self.current_line = call.call_line;
                 _ = try self.emitWithErrorSite(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } }, .call, &.{call_name}, call_name);
                 self.release(callReleaseMark(dest, returns));
                 return dest;
@@ -735,10 +759,15 @@ const FunctionCompiler = struct {
                 const receiver = dest + 1;
                 try self.reserveRegistersUntil(dest + 2);
                 const receiver_origin = try self.exprOrigin(call.receiver);
+                const method_name = try self.nameConstant(call.method.name);
                 try self.compileExpr(call.receiver, receiver);
-                _ = try self.emitWithErrorSite(.{ .get_field = .{ .dest = dest, .table = receiver, .name = try self.nameConstant(call.method.name) } }, .index, &.{receiver_origin}, null);
+                _ = try self.emitWithErrorSite(.{ .get_field = .{ .dest = dest, .table = receiver, .name = method_name } }, .index, &.{receiver_origin}, null);
                 const arg_count = try self.compileCallArgs(call.args, dest + 2, 1);
-                const method_origin = proto_mod.OperandOrigin{ .method = call.method.name };
+                const method_origin = if (method_name <= lua_rk_constant_limit)
+                    proto_mod.OperandOrigin{ .method = call.method.name }
+                else
+                    proto_mod.OperandOrigin{ .field = call.method.name };
+                self.current_line = call.call_line;
                 _ = try self.emitWithErrorSite(if (tail) .{ .tail_call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } } else .{ .call = .{ .base = dest, .arg_count = arg_count, .return_count = returns } }, .call, &.{method_origin}, method_origin);
                 self.release(callReleaseMark(dest, returns));
                 return dest;
@@ -1034,15 +1063,23 @@ const FunctionCompiler = struct {
             switch (parent.lookupName(name)) {
                 .local => |local| {
                     if (parent.lookupLocalIndex(name)) |local_index| parent.locals.items[local_index].captured = true;
-                    return try self.proto.addUpvalue(.{ .name = name, .in_stack = true, .index = local.register });
+                    return try self.addUpvalue(.{ .name = name, .in_stack = true, .index = local.register });
                 },
                 .global => return null,
                 .undeclared => if (try parent.lookupUpvalue(name)) |parent_upvalue| {
-                    return try self.proto.addUpvalue(.{ .name = name, .in_stack = false, .index = parent_upvalue });
+                    return try self.addUpvalue(.{ .name = name, .in_stack = false, .index = parent_upvalue });
                 },
             }
         }
         return null;
+    }
+
+    fn addUpvalue(self: *FunctionCompiler, upvalue: proto_mod.UpvalueDesc) !bytecode.UpvalueIndex {
+        for (self.proto.upvalues.items, 0..) |existing, index| {
+            if (existing.in_stack == upvalue.in_stack and existing.index == upvalue.index and std.mem.eql(u8, existing.name, upvalue.name)) return @intCast(index);
+        }
+        if (self.proto.upvalues.items.len >= lua_max_upvalues) return self.failTooManyUpvalues();
+        return self.proto.addUpvalue(upvalue);
     }
 
     fn enterScope(self: *FunctionCompiler) !void {
@@ -1091,11 +1128,34 @@ const FunctionCompiler = struct {
     }
 
     fn declareLocalAt(self: *FunctionCompiler, name: []const u8, register: bytecode.Register, to_close: bool) !bytecode.Register {
+        if (self.locals.items.len >= lua_max_local_variables) return self.failTooManyLocalVariables();
         const debug_index = try self.proto.addLocal(.{ .name = name, .register = register, .start_pc = self.proto.pc() });
         self.proto.locals.items[debug_index].to_close = to_close;
         try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close });
         try self.decls.append(self.allocator, .{ .name = name, .kind = .local, .local_index = self.locals.items.len - 1 });
         return register;
+    }
+
+    fn failTooManyLocalVariables(self: *FunctionCompiler) error{TooManyLocalVariables} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .compile = .{ .too_many_local_variables = .{ .line = self.current_line } } };
+        };
+        return error.TooManyLocalVariables;
+    }
+
+    fn failRegisterOverflow(self: *FunctionCompiler) error{ RegisterOverflow, TooManyUpvalues } {
+        if (self.proto.upvalues.items.len >= lua_max_upvalues - 1) return self.failTooManyUpvalues();
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .compile = .{ .register_overflow = .{ .line = self.current_line } } };
+        };
+        return error.RegisterOverflow;
+    }
+
+    fn failTooManyUpvalues(self: *FunctionCompiler) error{TooManyUpvalues} {
+        if (self.error_diagnostic) |slot| if (slot.* == null) {
+            slot.* = .{ .compile = .{ .too_many_upvalues = .{ .line = self.current_line } } };
+        };
+        return error.TooManyUpvalues;
     }
 
     fn enterLoop(self: *FunctionCompiler, close_register: bytecode.Register) !void {
@@ -1123,7 +1183,7 @@ const FunctionCompiler = struct {
     }
 
     fn allocReg(self: *FunctionCompiler) !bytecode.Register {
-        if (self.next_register == std.math.maxInt(bytecode.Register)) return error.RegisterOverflow;
+        if (self.next_register >= lua_max_registers or self.next_register == std.math.maxInt(bytecode.Register)) return self.failRegisterOverflow();
         const register = self.next_register;
         self.next_register += 1;
         self.proto.max_registers = @max(self.proto.max_registers, self.next_register);
@@ -1362,9 +1422,9 @@ fn exprLine(expr: ast.Expr) usize {
         .grouped => |inner| exprLine(inner.*),
         .index => |index| exprLine(index.receiver.*),
         .field => |field| exprLine(field.receiver.*),
-        .call => |call| exprLine(call.callee.*),
-        .method_call => |call| exprLine(call.receiver.*),
-        .unary => |unary| exprLine(unary.operand.*),
+        .call => |call| call.call_line,
+        .method_call => |call| call.call_line,
+        .unary => |unary| unary.op_line,
         .binary => |binary| binary.op_line,
     };
 }

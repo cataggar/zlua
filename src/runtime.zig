@@ -16,6 +16,7 @@ pub const RuntimeError = error{
 
 const max_stack_values: usize = 65536;
 const max_call_frames: usize = 256;
+const max_error_handler_depth: usize = 200;
 const max_metamethod_depth: usize = 15;
 pub const binary_chunk_signature = "\x1bLua";
 pub const binary_chunk_payload_magic = "zlua\x00dump";
@@ -109,6 +110,7 @@ const ProtectedContinuation = struct {
     return_count: u16,
     kind: ProtectedContinuationKind,
     handler: Value = .nil,
+    handler_depth: usize = 0,
 };
 
 const GenericForContinuation = struct {
@@ -870,9 +872,10 @@ pub const State = struct {
     }
 
     pub fn fileMetatable(state: *State) !*Table {
-        const value = try state.newTableWithHints(0, 2);
+        const value = try state.newTableWithHints(0, 3);
         try value.table.set(state.allocator, .{ .string = try state.intern("__name") }, .{ .string = try state.intern("FILE*") });
         try value.table.set(state.allocator, .{ .string = try state.intern("__close") }, .{ .native = .io_file_close });
+        try value.table.set(state.allocator, .{ .string = try state.intern("__gc") }, .{ .native = .io_file_close });
         return value.table;
     }
 
@@ -1029,7 +1032,7 @@ pub const State = struct {
 
     fn declareGlobal(self: *State, thread: *Thread, name: []const u8, table_register: bytecode.Register, value_register: bytecode.Register) !void {
         const table_value = self.get(thread, table_register);
-        if (table_value != .table) return self.fail("attempt to index a nil value");
+        if (table_value != .table) return self.failRuntimeDetail(thread, "attempt to index a nil value");
         const key = Value{ .string = try self.intern(name) };
         if (table_value.table.get(key) != .nil) {
             const message = try std.fmt.allocPrint(self.allocator, "global '{s}' already defined", .{name});
@@ -2100,6 +2103,7 @@ pub const State = struct {
             .native_getmetatable => try self.returnValues(thread, resolved.base, resolved.return_count, &.{try self.getMetatableValue(argValue(self, thread, resolved, 0))}),
             .native_setmetatable => {
                 const table_value = argValue(self, thread, resolved, 0);
+                if (table_value != .table) return self.failArgumentType("setmetatable", 1, "table", table_value);
                 try self.setMetatableValue(table_value, argValue(self, thread, resolved, 1));
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{table_value});
             },
@@ -2380,13 +2384,14 @@ pub const State = struct {
         return failure;
     }
 
-    fn pushProtectedContinuation(self: *State, thread: *Thread, context: ProtectedCallContext, base: bytecode.Register, return_count: u16, kind: ProtectedContinuationKind, handler: Value) !void {
+    fn pushProtectedContinuation(self: *State, thread: *Thread, context: ProtectedCallContext, base: bytecode.Register, return_count: u16, kind: ProtectedContinuationKind, handler: Value, handler_depth: usize) !void {
         try thread.protected_continuations.append(self.allocator, .{
             .context = context,
             .base = base,
             .return_count = return_count,
             .kind = kind,
             .handler = handler,
+            .handler_depth = handler_depth,
         });
     }
 
@@ -2445,7 +2450,7 @@ pub const State = struct {
         switch (continuation.kind) {
             .pcall => try self.returnProtectedResult(thread, continuation.base, continuation.return_count, .{ .failure = failure }),
             .xpcall => try self.returnXpcallFailure(thread, continuation.base, continuation.return_count, continuation.handler, failure),
-            .xpcall_handler => try self.returnValues(thread, continuation.base, continuation.return_count, &.{ .{ .boolean = false }, .{ .string = try self.intern("error in error handling") } }),
+            .xpcall_handler => try self.returnXpcallFailureFromDepth(thread, continuation.base, continuation.return_count, continuation.handler, failure, continuation.handler_depth + 1),
         }
     }
 
@@ -3001,11 +3006,8 @@ pub const State = struct {
 
         const condition = argValue(self, thread, op, 0);
         if (!truthy(condition)) {
-            const message = if (op.arg_count >= 2)
-                try self.errorObjectValue(argValue(self, thread, op, 1))
-            else
-                Value{ .string = try self.intern("assertion failed!") };
-            return self.throwValue(message);
+            if (op.arg_count >= 2) return self.throwValue(try self.errorObjectValue(argValue(self, thread, op, 1)));
+            return self.throwStringWithLocation(thread, "assertion failed!", 1);
         }
 
         const values = try self.allocator.alloc(Value, op.arg_count);
@@ -3021,9 +3023,13 @@ pub const State = struct {
         if (level <= 0 or value != .string or raw_value == .nil) return self.throwValue(value);
 
         const level_index = std.math.cast(usize, level) orelse return self.throwValue(value);
-        const line = self.lineForErrorLevel(thread, level_index) orelse return self.throwValue(value);
-        const source = self.sourceForErrorLevel(thread, level_index) orelse "zlua";
-        const message = try std.fmt.allocPrint(self.allocator, "{s}:{d}: {s}", .{ source, line, value.string });
+        return self.throwStringWithLocation(thread, value.string, level_index);
+    }
+
+    fn throwStringWithLocation(self: *State, thread: *Thread, message_text: []const u8, level: usize) !void {
+        const line = self.lineForErrorLevel(thread, level) orelse return self.throwValue(.{ .string = try self.intern(message_text) });
+        const source = self.sourceForErrorLevel(thread, level) orelse "zlua";
+        const message = try std.fmt.allocPrint(self.allocator, "{s}:{d}: {s}", .{ source, line, message_text });
         defer self.allocator.free(message);
         return self.throwValue(.{ .string = try self.intern(message) });
     }
@@ -3044,7 +3050,7 @@ pub const State = struct {
         defer thread.traceback_native_name = previous_traceback_native_name;
         const result = self.runProtectedCall(thread, context, argValue(self, thread, op, 0), args) catch |err| switch (err) {
             error.CoroutineYield => {
-                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .pcall, .nil);
+                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .pcall, .nil, 0);
                 return err;
             },
             else => return err,
@@ -3062,7 +3068,7 @@ pub const State = struct {
         const context = self.protectedCallContextWithErrors(thread);
         const result = self.runProtectedCall(thread, context, argValue(self, thread, op, 0), args) catch |err| switch (err) {
             error.CoroutineYield => {
-                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .xpcall, handler);
+                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .xpcall, handler, 0);
                 return err;
             },
             else => return err,
@@ -3075,23 +3081,47 @@ pub const State = struct {
     }
 
     fn returnXpcallFailure(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value) !void {
-        const context = self.protectedCallContextWithErrors(thread);
-        const previous_traceback_close = self.traceback_error_in_close;
-        self.traceback_error_in_close = self.last_error_in_close;
-        defer self.traceback_error_in_close = previous_traceback_close;
-        const handler_result = self.runProtectedCall(thread, context, handler, &.{error_value}) catch |err| switch (err) {
-            error.CoroutineYield => {
-                try self.pushProtectedContinuation(thread, context, base, return_count, .xpcall_handler, .nil);
-                return err;
-            },
-            else => return err,
-        };
-        defer freeProtectedResult(self.allocator, handler_result);
-        const handled = switch (handler_result) {
-            .success => |values| if (values.len == 0) Value.nil else values[0],
-            .failure => Value{ .string = try self.intern("error in error handling") },
-        };
-        try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, handled });
+        try self.returnXpcallFailureFromDepth(thread, base, return_count, handler, error_value, 0);
+    }
+
+    fn returnXpcallFailureFromDepth(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value, initial_depth: usize) !void {
+        var current_error = error_value;
+        var depth = initial_depth;
+        while (true) : (depth += 1) {
+            const handler_error = if (depth >= max_error_handler_depth)
+                Value{ .string = try self.intern("C stack overflow") }
+            else
+                current_error;
+            const context = self.protectedCallContextWithErrors(thread);
+            const previous_traceback_close = self.traceback_error_in_close;
+            self.traceback_error_in_close = self.last_error_in_close;
+            const handler_result = self.runProtectedCall(thread, context, handler, &.{handler_error}) catch |err| switch (err) {
+                error.CoroutineYield => {
+                    try self.pushProtectedContinuation(thread, context, base, return_count, .xpcall_handler, handler, depth);
+                    return err;
+                },
+                else => {
+                    self.traceback_error_in_close = previous_traceback_close;
+                    return err;
+                },
+            };
+            self.traceback_error_in_close = previous_traceback_close;
+            switch (handler_result) {
+                .success => |values| {
+                    defer self.allocator.free(values);
+                    const handled = if (values.len == 0) Value.nil else values[0];
+                    try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, handled });
+                    return;
+                },
+                .failure => |failure| {
+                    if (depth >= max_error_handler_depth) {
+                        try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, .{ .string = try self.intern("error in error handling") } });
+                        return;
+                    }
+                    current_error = failure;
+                },
+            }
+        }
     }
 
     fn tracebackValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -3760,7 +3790,7 @@ pub const State = struct {
             try self.returnValues(thread, op.base, op.return_count, &.{.{ .integer = old }});
             return;
         }
-        return self.fail("bad argument #1 to 'collectgarbage'");
+        return self.failArgumentMessage("collectgarbage", 1, "invalid option");
     }
 
     fn collectGarbageParam(self: *State, value: Value) !GcParam {
@@ -4639,8 +4669,27 @@ pub const State = struct {
         const value = argValue(self, thread, op, index);
         return switch (value) {
             .string => |string| string,
-            else => self.failArgumentType(function_name, index + 1, "string", value),
+            else => if (index == 0 and self.isMethodSelfArgument(thread, function_name))
+                self.failArgumentMessage(function_name, 1, "bad self")
+            else
+                self.failArgumentType(function_name, index + 1, "string", value),
         };
+    }
+
+    fn isMethodSelfArgument(self: *State, thread: *Thread, function_name: []const u8) bool {
+        const site = self.currentErrorSite(thread) orelse return false;
+        const origin = site.call_name orelse return false;
+        const method = switch (origin) {
+            .method => |name| name,
+            else => return false,
+        };
+        const dot = std.mem.lastIndexOfScalar(u8, function_name, '.') orelse return false;
+        return std.mem.eql(u8, function_name[dot + 1 ..], method);
+    }
+
+    pub fn argumentDisplayIndex(self: *State, thread: *Thread, function_name: []const u8, index: u16) u16 {
+        if (index > 0 and self.isMethodSelfArgument(thread, function_name)) return index;
+        return index + 1;
     }
 
     pub fn expectArgumentTable(self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16) !*Table {

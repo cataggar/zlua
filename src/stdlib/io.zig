@@ -18,7 +18,7 @@ pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
 pub fn write(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const file = try currentFile(state, "__zlua_output");
     if (runtime.isClosedFileValue(.{ .table = file })) return state.fail(" output file is closed");
-    try writeToFile(state, thread, op, file, 0);
+    try writeToFile(state, thread, op, file, 0, "io.write");
 }
 
 pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -118,7 +118,7 @@ pub fn fileRead(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn fileWrite(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const file = try expectFileArgument(state, runtime.argValue(state, thread, op, 0), "file:write", 1);
-    try writeToFile(state, thread, op, file, 1);
+    try writeToFile(state, thread, op, file, 1, "file:write");
 }
 
 pub fn fileClose(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -374,7 +374,7 @@ fn invalidHexPrefix(token: []const u8) bool {
     return unsigned.len >= 3 and unsigned[0] == '0' and (unsigned[1] == 'x' or unsigned[1] == 'X') and !std.ascii.isHex(unsigned[2]);
 }
 
-fn writeToFile(state: *State, thread: *Thread, op: bytecode.Call, file: *runtime.Table, first_arg: u16) !void {
+fn writeToFile(state: *State, thread: *Thread, op: bytecode.Call, file: *runtime.Table, first_arg: u16, function_name: []const u8) !void {
     try ensureOpen(state, file);
     if (!fileWritable(file)) {
         try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("file is not writable") }, .{ .integer = 9 } });
@@ -383,9 +383,14 @@ fn writeToFile(state: *State, thread: *Thread, op: bytecode.Call, file: *runtime
     var wrote_newline = false;
     var index = first_arg;
     while (index < op.arg_count) : (index += 1) {
+        const value = runtime.argValue(state, thread, op, index);
+        switch (value) {
+            .string, .integer, .number => {},
+            else => return state.failArgumentType(function_name, index + 1 - first_arg, "string", value),
+        }
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(state.allocator);
-        try runtime.appendLuaString(state.allocator, &bytes, runtime.argValue(state, thread, op, index));
+        try runtime.appendLuaString(state.allocator, &bytes, value);
         if (std.mem.indexOfScalar(u8, bytes.items, '\n') != null) wrote_newline = true;
         try writeBytes(state, file, bytes.items);
     }

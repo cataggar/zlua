@@ -277,7 +277,8 @@ const FunctionContext = struct {
                 const lookup = try self.lookupName(name.name, true);
                 switch (lookup) {
                     .global => try self.ensureEnvironmentIsLocal(name.name, name.span),
-                    .local, .undeclared => {},
+                    .local => {},
+                    .undeclared => return self.fail(.{ .undeclared_global = .{ .name = name.name, .span = name.span } }),
                 }
             },
             .table_constructor => |constructor| {
@@ -373,6 +374,7 @@ const FunctionContext = struct {
     fn localLookup(self: *FunctionContext, name: []const u8) LocalLookup {
         var result: LocalLookup = .{};
         var star: ?Decl = null;
+        const looking_for_env = std.mem.eql(u8, name, "_ENV");
 
         var index = self.decls.items.len;
         while (index > 0) {
@@ -382,11 +384,11 @@ const FunctionContext = struct {
                 .local => if (std.mem.eql(u8, decl.name, name)) return .{ .lookup = .{ .local = decl } },
                 .global_name => if (std.mem.eql(u8, decl.name, name)) {
                     return .{ .lookup = .{ .global = decl } };
-                } else {
+                } else if (!looking_for_env) {
                     result.blocked = true;
                 },
                 .global_all => {
-                    if (star == null) star = decl;
+                    if (!looking_for_env and star == null) star = decl;
                 },
             }
         }
@@ -585,9 +587,11 @@ test "resolver rejects read-only assignments" {
 test "resolver validates global declarations" {
     try expectResolve("global x\nx = 1");
     try expectResolve("global x\nglobal *\ny = 1");
+    try expectResolve("global *\n_ENV.x = 1");
     try expectResolveError("global x\ny = 1");
     try expectResolveError("global<close> x");
     try expectResolveError("global<const> *\ny = 1");
+    try expectResolveError("global _ENV, a\na = 1");
 }
 
 test "resolver validates gotos and labels" {
