@@ -32,9 +32,13 @@ pub const Stdlib = enum {
 
 pub const MemoryFile = runtime.MemoryFile;
 
-pub const IoCapability = union(enum) {
-    disabled,
-    runtime: std.Io,
+pub const IoCapability = struct {
+    runtime: ?std.Io = null,
+    stdin: []const u8 = "",
+    stdout: ?*std.Io.Writer = null,
+    stderr: ?*std.Io.Writer = null,
+
+    pub const disabled: IoCapability = .{};
 };
 
 pub const FilesystemCapability = runtime.FilesystemCapability;
@@ -795,10 +799,9 @@ pub const Thread = opaque {};
 fn runtimeOptions(options: Options) runtime.StateOptions {
     return .{
         .stdlib = toRuntimeStdlib(options.stdlib),
-        .io = switch (options.capabilities.io) {
-            .disabled => null,
-            .runtime => |io| io,
-        },
+        .io = options.capabilities.io.runtime,
+        .stdout = options.capabilities.io.stdout,
+        .stderr = options.capabilities.io.stderr,
         .filesystem = options.capabilities.filesystem,
         .environment = switch (options.capabilities.environment) {
             .disabled => null,
@@ -806,6 +809,9 @@ fn runtimeOptions(options: Options) runtime.StateOptions {
         },
         .clock = options.capabilities.clock,
         .process = options.capabilities.process,
+        .stdin = options.capabilities.io.stdin,
+        .max_memory = options.limits.max_memory,
+        .max_instructions = options.limits.max_instructions,
         .debug_errors = options.debug.errors,
         .trace_vm = options.debug.trace_vm,
     };
@@ -1642,4 +1648,138 @@ test "api userdata close metamethod runs for to-be-closed locals" {
         \\end
     , .{ .name = "=api-21.5-close" });
     try std.testing.expectEqual(@as(usize, 1), closed);
+}
+
+test "api full stdlib still denies ambient host access by default" {
+    var lua = try State.init(std.testing.allocator, .{ .stdlib = .full });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\assert(os.getenv('ZLUA_API_ENV') == nil)
+        \\local ok, err = pcall(os.execute, 'true')
+        \\assert(ok == false and tostring(err):find('process access disabled'))
+        \\local file = io.open('missing.lua', 'r')
+        \\assert(file == nil)
+        \\local loaded, load_err = loadfile('missing.lua')
+        \\assert(loaded == nil and load_err == 'cannot open file')
+        \\local ok_file, file_err = pcall(dofile, 'missing.lua')
+        \\assert(ok_file == false and tostring(file_err):find('filesystem access disabled'))
+    , .{ .name = "=api-21.6-safe-host-access" });
+}
+
+test "api custom stdout captures print and io writes" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var errors = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer errors.deinit();
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .io = .{ .stdin = "input\n", .stdout = &output.writer, .stderr = &errors.writer } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\print('alpha', io.read('*l'))
+        \\io.write('beta', '\n')
+        \\io.stderr:write('gamma', '\n')
+        \\io.flush()
+        \\io.stderr:flush()
+    , .{ .name = "=api-21.6-stdout" });
+
+    try std.testing.expectEqualStrings("alpha\tinput\nbeta\n", output.writer.buffered());
+    try std.testing.expectEqualStrings("gamma\n", errors.writer.buffered());
+}
+
+test "api memory filesystem backs loadfile dofile and require" {
+    const files = [_]MemoryFile{
+        .{ .path = "script.lua", .contents = "return 42" },
+        .{ .path = "moddir/chunk.lua", .contents = "return 7" },
+        .{ .path = "plugins/plugin.lua", .contents = "return { value = 9 }" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+    try lua.setPackagePath("plugins/?.lua");
+
+    try lua.doString(
+        \\assert(dofile('script.lua') == 42)
+        \\local chunk = assert(loadfile('moddir/chunk.lua'))
+        \\assert(chunk() == 7)
+        \\local plugin = require('plugin')
+        \\assert(plugin.value == 9)
+    , .{ .name = "=api-21.6-memory-fs" });
+}
+
+test "api environment and fixed clock capabilities are explicit" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("ZLUA_API_ENV", "present");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{
+            .environment = .{ .map = &env },
+            .clock = .{ .fixed = 123 },
+        },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\assert(os.getenv('ZLUA_API_ENV') == 'present')
+        \\assert(os.time() == 123)
+        \\assert(os.date('!%Y', 0) == '1970')
+    , .{ .name = "=api-21.6-env-clock" });
+}
+
+test "api instruction limit returns a protected Lua error" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_instructions = 50 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString("while true do end", .{ .name = "=api-21.6-instruction-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "instruction limit exceeded") != null);
+        },
+    }
+}
+
+test "api memory limit returns a protected Lua error" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_memory = 96 * 1024 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local t = {}
+        \\for i = 1, 20000 do
+        \\  t[i] = { i, i, i, i }
+        \\end
+        \\return t
+    , .{ .name = "=api-21.6-memory-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "memory limit exceeded") != null);
+        },
+    }
 }

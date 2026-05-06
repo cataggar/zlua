@@ -402,11 +402,11 @@ fn writeToFile(state: *State, thread: *Thread, op: bytecode.Call, file: *runtime
 fn writeBytes(state: *State, file: *runtime.Table, bytes: []const u8) !void {
     const path = try fileString(state, file, "__zlua_file_path");
     if (std.mem.eql(u8, path, "stdout")) {
-        try state.stdout.appendSlice(state.allocator, bytes);
+        try state.writeStdout(bytes);
         return;
     }
     if (std.mem.eql(u8, path, "stderr")) {
-        try state.stderr.appendSlice(state.allocator, bytes);
+        try state.writeStderr(bytes);
         return;
     }
     if (std.mem.eql(u8, path, "/dev/null") or std.mem.eql(u8, path, "/dev/full")) return;
@@ -452,7 +452,9 @@ fn closeFile(state: *State, file: *runtime.Table, from_iterator: bool) !void {
 
 fn flushFile(state: *State, file: *runtime.Table) !void {
     const path = try fileString(state, file, "__zlua_file_path");
-    if (std.mem.eql(u8, path, "stdout") or std.mem.eql(u8, path, "stderr") or std.mem.eql(u8, path, "/dev/null") or std.mem.eql(u8, path, "/dev/full")) return;
+    if (std.mem.eql(u8, path, "stdout")) return state.flushStdout();
+    if (std.mem.eql(u8, path, "stderr")) return state.flushStderr();
+    if (std.mem.eql(u8, path, "/dev/null") or std.mem.eql(u8, path, "/dev/full")) return;
     if (fileWritable(file)) try state.writeFile(path, try fileString(state, file, "__zlua_file_content"));
 }
 

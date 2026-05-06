@@ -624,11 +624,15 @@ pub const ProcessCapability = enum {
 pub const StateOptions = struct {
     stdlib: StdlibMode = .full,
     io: ?std.Io = null,
+    stdout: ?*std.Io.Writer = null,
+    stderr: ?*std.Io.Writer = null,
     filesystem: FilesystemCapability = .disabled,
     environment: ?*const std.process.Environ.Map = null,
     clock: ClockCapability = .system,
     process: ProcessCapability = .disabled,
     stdin: []const u8 = "",
+    max_memory: ?usize = null,
+    max_instructions: ?u64 = null,
     debug_errors: bool = false,
     trace_vm: bool = false,
 };
@@ -676,6 +680,7 @@ pub const State = struct {
     mark_all_stack_registers: bool = false,
     conservative_gc_depth: usize = 0,
     random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
+    instruction_count: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !State {
         return initWithOptions(allocator, .{});
@@ -834,6 +839,7 @@ pub const State = struct {
             const pc = frame.pc;
             const instruction = proto.instructions.items[pc];
             frame.pc += 1;
+            try self.checkExecutionLimits(thread);
             if (self.options.trace_vm) try self.traceInstruction(frame.*, pc, instruction);
             try self.callLineHook(thread);
             try self.callCountHook(thread);
@@ -897,6 +903,19 @@ pub const State = struct {
             }
 
             if (self.gc_running and (self.collect_after_instruction or self.shouldRunAutoGc())) try self.collectGarbageConservatively(thread);
+        }
+    }
+
+    fn checkExecutionLimits(self: *State, thread: *Thread) !void {
+        if (self.options.max_instructions) |max_instructions| {
+            if (self.instruction_count >= max_instructions) return self.failRuntimeDetail(thread, "instruction limit exceeded");
+            self.instruction_count += 1;
+        }
+
+        if (self.options.max_memory) |max_memory| {
+            if (self.allocationStats().total() <= max_memory) return;
+            if (self.gc_running and !self.is_collecting) try self.collectGarbageConservatively(thread);
+            if (self.allocationStats().total() > max_memory) return self.failRuntimeDetail(thread, "memory limit exceeded");
         }
     }
 
@@ -1182,6 +1201,24 @@ pub const State = struct {
                 return std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return self.fail("cannot open file");
             },
         }
+    }
+
+    pub fn writeStdout(self: *State, bytes: []const u8) !void {
+        try self.stdout.appendSlice(self.allocator, bytes);
+        if (self.options.stdout) |writer| try writer.writeAll(bytes);
+    }
+
+    pub fn writeStderr(self: *State, bytes: []const u8) !void {
+        try self.stderr.appendSlice(self.allocator, bytes);
+        if (self.options.stderr) |writer| try writer.writeAll(bytes);
+    }
+
+    pub fn flushStdout(self: *State) !void {
+        if (self.options.stdout) |writer| try writer.flush();
+    }
+
+    pub fn flushStderr(self: *State) !void {
+        if (self.options.stderr) |writer| try writer.flush();
     }
 
     pub fn writeFile(self: *State, path: []const u8, data: []const u8) !void {
@@ -2069,11 +2106,11 @@ pub const State = struct {
             .closure => |closure| try self.callClosure(thread, resolved, closure, call_name, call_namewhat),
             .native_print => {
                 for (0..resolved.arg_count) |index| {
-                    if (index != 0) try self.stdout.append(self.allocator, '\t');
+                    if (index != 0) try self.writeStdout("\t");
                     const text = try self.valueToString(thread, self.get(thread, resolved.base + 1 + @as(bytecode.Register, @intCast(index))));
-                    try self.stdout.appendSlice(self.allocator, text);
+                    try self.writeStdout(text);
                 }
-                try self.stdout.append(self.allocator, '\n');
+                try self.writeStdout("\n");
                 try self.returnValues(thread, resolved.base, resolved.return_count, &.{});
             },
             .native_tostring => {

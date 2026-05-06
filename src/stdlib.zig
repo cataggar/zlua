@@ -321,7 +321,8 @@ fn newStandardFile(state: *State, path: []const u8, mode: []const u8) !Value {
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file") }, .{ .boolean = true });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_path") }, .{ .string = try state.intern(path) });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_mode") }, .{ .string = try state.intern(mode) });
-    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern("") });
+    const contents = if (std.mem.eql(u8, path, "stdin")) state.options.stdin else "";
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern(contents) });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_standard") }, .{ .boolean = true });
