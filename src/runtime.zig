@@ -68,6 +68,37 @@ pub const ProtectedCallResult = union(enum) {
     failure: Value,
 };
 
+const ProtectedCallContext = struct {
+    frame_count: usize,
+    relative_base: bytecode.Register,
+    absolute_base: usize,
+    stack_len: usize,
+    last_result_base: usize,
+    last_result_count: usize,
+    last_error: ?[]const u8,
+    last_error_value: Value,
+};
+
+const ProtectedContinuationKind = enum {
+    pcall,
+    xpcall,
+    xpcall_handler,
+};
+
+const ProtectedContinuation = struct {
+    context: ProtectedCallContext,
+    base: bytecode.Register,
+    return_count: u16,
+    kind: ProtectedContinuationKind,
+    handler: Value = .nil,
+};
+
+const GenericForContinuation = struct {
+    frame_count: usize,
+    op: bytecode.GenericFor,
+    jump_on_nil: bool,
+};
+
 pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
     try out.appendSlice(allocator, binary_chunk_signature);
     try out.append(allocator, 0x55);
@@ -263,6 +294,8 @@ pub const Thread = struct {
     stack: std.ArrayList(Value) = .empty,
     frames: std.ArrayList(CallFrame) = .empty,
     yield_values: std.ArrayList(Value) = .empty,
+    protected_continuations: std.ArrayList(ProtectedContinuation) = .empty,
+    generic_for_continuations: std.ArrayList(GenericForContinuation) = .empty,
     open_upvalues: ?*Upvalue = null,
     last_result_base: usize = 0,
     last_result_count: usize = 0,
@@ -302,6 +335,8 @@ pub const Thread = struct {
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
         for (self.frames.items) |*frame| frame.deinit(allocator);
         self.yield_values.deinit(allocator);
+        self.protected_continuations.deinit(allocator);
+        self.generic_for_continuations.deinit(allocator);
         self.frames.deinit(allocator);
         self.stack.deinit(allocator);
         self.* = undefined;
@@ -760,6 +795,9 @@ pub const State = struct {
 
     fn runThreadUntil(self: *State, thread: *Thread, target_frame_count: usize) anyerror!void {
         while (thread.frames.items.len > target_frame_count) {
+            if (try self.completeReadyGenericForContinuation(thread)) continue;
+            if (try self.completeReadyProtectedContinuation(thread)) continue;
+
             var frame = &thread.frames.items[thread.frames.items.len - 1];
             const proto = frame.proto;
             if (frame.pc >= proto.instructions.items.len) {
@@ -815,8 +853,8 @@ pub const State = struct {
                 .vararg => |op| try self.loadVarargs(thread, op),
                 .for_prep => |op| try self.forPrep(thread, op),
                 .for_loop => |op| try self.forLoop(thread, op),
-                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op))) try self.jumpThread(thread, op.offset, false),
-                .tfor_call => |op| _ = try self.advanceGenericFor(thread, op),
+                .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op, true))) try self.jumpThread(thread, op.offset, false),
+                .tfor_call => |op| _ = try self.advanceGenericFor(thread, op, false),
                 .tfor_loop => |op| try self.jumpThread(thread, op.offset, false),
                 .closure => |op| self.set(thread, op.dest, try self.newClosure(thread, proto.children.items[op.proto])),
                 .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
@@ -1712,34 +1750,54 @@ pub const State = struct {
     }
 
     pub fn protectedCall(self: *State, thread: *Thread, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
+        const context = self.protectedCallContextWithErrors(thread);
+        return self.runProtectedCall(thread, context, callable, args);
+    }
+
+    fn protectedCallContext(_: *State, thread: *Thread) ProtectedCallContext {
         const frame_count = thread.frames.items.len;
         const frame = thread.frames.items[frame_count - 1];
         const relative_base: bytecode.Register = frame.proto.max_registers;
-        const base = frame.base + @as(usize, relative_base);
-        const old_stack_len = thread.stack.items.len;
-        const old_last_result_base = thread.last_result_base;
-        const old_last_result_count = thread.last_result_count;
-        const old_last_error = self.last_error;
-        const old_last_error_value = self.last_error_value;
+        return .{
+            .frame_count = frame_count,
+            .relative_base = relative_base,
+            .absolute_base = frame.base + @as(usize, relative_base),
+            .stack_len = thread.stack.items.len,
+            .last_result_base = thread.last_result_base,
+            .last_result_count = thread.last_result_count,
+            .last_error = undefined,
+            .last_error_value = undefined,
+        };
+    }
 
-        try thread.ensureStack(self.allocator, base + 1 + args.len);
-        thread.stack.items[base] = callable;
-        for (args, 0..) |arg, index| thread.stack.items[base + 1 + index] = arg;
+    fn protectedCallContextWithErrors(self: *State, thread: *Thread) ProtectedCallContext {
+        var context = self.protectedCallContext(thread);
+        context.last_error = self.last_error;
+        context.last_error_value = self.last_error_value;
+        return context;
+    }
+
+    fn runProtectedCall(self: *State, thread: *Thread, context: ProtectedCallContext, callable: Value, args: []const Value) anyerror!ProtectedCallResult {
+        try thread.ensureStack(self.allocator, context.absolute_base + 1 + args.len);
+        thread.stack.items[context.absolute_base] = callable;
+        for (args, 0..) |arg, index| thread.stack.items[context.absolute_base + 1 + index] = arg;
 
         self.last_error = null;
         self.last_error_value = .nil;
-        self.invokeValue(thread, .{ .base = relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
+        self.invokeValue(thread, .{ .base = context.relative_base, .arg_count = @intCast(args.len), .return_count = bytecode.multret_count }, 0) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                if (thread.frames.items.len < context.frame_count) return err;
                 const error_value = self.currentErrorValue();
-                const failure = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, error_value);
+                const failure = try self.restoreProtectedCall(thread, context, error_value);
                 return .{ .failure = failure };
             },
             else => return err,
         };
-        self.runThreadUntil(thread, frame_count) catch |err| switch (err) {
+        self.runThreadUntil(thread, context.frame_count) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                if (thread.frames.items.len < context.frame_count) return err;
                 const error_value = self.currentErrorValue();
-                const failure = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, error_value);
+                const failure = try self.restoreProtectedCall(thread, context, error_value);
                 return .{ .failure = failure };
             },
             else => return err,
@@ -1747,34 +1805,96 @@ pub const State = struct {
 
         const values = try self.allocator.alloc(Value, thread.last_result_count);
         for (values, 0..) |*value, index| value.* = thread.stack.items[thread.last_result_base + index];
-        _ = try self.restoreProtectedCall(thread, frame_count, old_stack_len, old_last_result_base, old_last_result_count, old_last_error, old_last_error_value, .nil);
+        _ = try self.restoreProtectedCall(thread, context, .nil);
         return .{ .success = values };
     }
 
     fn restoreProtectedCall(
         self: *State,
         thread: *Thread,
-        frame_count: usize,
-        stack_len: usize,
-        last_result_base: usize,
-        last_result_count: usize,
-        last_error: ?[]const u8,
-        last_error_value: Value,
+        context: ProtectedCallContext,
         error_value: Value,
     ) !Value {
         var failure = error_value;
         thread.protected_close_depth += 1;
         defer thread.protected_close_depth -= 1;
-        self.closeFramesTo(thread, frame_count, error_value) catch |err| switch (err) {
+        self.closeFramesTo(thread, context.frame_count, error_value) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => failure = self.currentErrorValue(),
             else => return err,
         };
-        thread.stack.items.len = stack_len;
-        thread.last_result_base = last_result_base;
-        thread.last_result_count = last_result_count;
-        self.last_error = last_error;
-        self.last_error_value = last_error_value;
+        thread.stack.items.len = context.stack_len;
+        thread.last_result_base = context.last_result_base;
+        thread.last_result_count = context.last_result_count;
+        self.last_error = context.last_error;
+        self.last_error_value = context.last_error_value;
         return failure;
+    }
+
+    fn pushProtectedContinuation(self: *State, thread: *Thread, context: ProtectedCallContext, base: bytecode.Register, return_count: u16, kind: ProtectedContinuationKind, handler: Value) !void {
+        try thread.protected_continuations.append(self.allocator, .{
+            .context = context,
+            .base = base,
+            .return_count = return_count,
+            .kind = kind,
+            .handler = handler,
+        });
+    }
+
+    fn readyProtectedContinuationIndex(thread: *Thread) ?usize {
+        for (thread.protected_continuations.items, 0..) |continuation, index| {
+            if (continuation.context.frame_count == thread.frames.items.len) return index;
+        }
+        return null;
+    }
+
+    fn errorProtectedContinuationIndex(thread: *Thread) ?usize {
+        var best_index: ?usize = null;
+        var best_frame_count: usize = 0;
+        for (thread.protected_continuations.items, 0..) |continuation, index| {
+            const frame_count = continuation.context.frame_count;
+            if (frame_count > thread.frames.items.len) continue;
+            if (best_index == null or frame_count > best_frame_count) {
+                best_index = index;
+                best_frame_count = frame_count;
+            }
+        }
+        return best_index;
+    }
+
+    fn completeReadyProtectedContinuation(self: *State, thread: *Thread) !bool {
+        const index = readyProtectedContinuationIndex(thread) orelse return false;
+        const continuation = thread.protected_continuations.orderedRemove(index);
+        const values = try self.copyStackSlice(thread, thread.last_result_base, thread.last_result_count);
+        defer self.allocator.free(values);
+        _ = try self.restoreProtectedCall(thread, continuation.context, .nil);
+        try self.returnProtectedContinuationSuccess(thread, continuation, values);
+        return true;
+    }
+
+    fn completeProtectedContinuationError(self: *State, thread: *Thread, error_value: Value) !bool {
+        const index = errorProtectedContinuationIndex(thread) orelse return false;
+        const continuation = thread.protected_continuations.orderedRemove(index);
+        const failure = try self.restoreProtectedCall(thread, continuation.context, error_value);
+        try self.returnProtectedContinuationFailure(thread, continuation, failure);
+        return true;
+    }
+
+    fn returnProtectedContinuationSuccess(self: *State, thread: *Thread, continuation: ProtectedContinuation, values: []Value) !void {
+        switch (continuation.kind) {
+            .pcall, .xpcall => try self.returnProtectedResult(thread, continuation.base, continuation.return_count, .{ .success = values }),
+            .xpcall_handler => {
+                const handled = if (values.len == 0) Value.nil else values[0];
+                try self.returnValues(thread, continuation.base, continuation.return_count, &.{ .{ .boolean = false }, handled });
+            },
+        }
+    }
+
+    fn returnProtectedContinuationFailure(self: *State, thread: *Thread, continuation: ProtectedContinuation, failure: Value) !void {
+        switch (continuation.kind) {
+            .pcall => try self.returnProtectedResult(thread, continuation.base, continuation.return_count, .{ .failure = failure }),
+            .xpcall => try self.returnXpcallFailure(thread, continuation.base, continuation.return_count, continuation.handler, failure),
+            .xpcall_handler => try self.returnValues(thread, continuation.base, continuation.return_count, &.{ .{ .boolean = false }, .{ .string = try self.intern("error in error handling") } }),
+        }
     }
 
     pub fn valueToString(self: *State, thread: *Thread, value: Value) anyerror![]const u8 {
@@ -2133,30 +2253,54 @@ pub const State = struct {
         const args = try self.collectArgs(thread, op, 1);
         defer self.allocator.free(args);
 
-        const result = try self.protectedCall(thread, argValue(self, thread, op, 0), args);
+        const context = self.protectedCallContextWithErrors(thread);
+        const result = self.runProtectedCall(thread, context, argValue(self, thread, op, 0), args) catch |err| switch (err) {
+            error.CoroutineYield => {
+                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .pcall, .nil);
+                return err;
+            },
+            else => return err,
+        };
         defer freeProtectedResult(self.allocator, result);
         try self.returnProtectedResult(thread, op.base, op.return_count, result);
     }
 
     fn xpcallValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
         if (op.arg_count < 2) return self.fail("bad argument #2 to 'xpcall'");
+        const handler = argValue(self, thread, op, 1);
         const args = try self.collectArgs(thread, op, 2);
         defer self.allocator.free(args);
 
-        const result = try self.protectedCall(thread, argValue(self, thread, op, 0), args);
+        const context = self.protectedCallContextWithErrors(thread);
+        const result = self.runProtectedCall(thread, context, argValue(self, thread, op, 0), args) catch |err| switch (err) {
+            error.CoroutineYield => {
+                try self.pushProtectedContinuation(thread, context, op.base, op.return_count, .xpcall, handler);
+                return err;
+            },
+            else => return err,
+        };
         defer freeProtectedResult(self.allocator, result);
         switch (result) {
             .success => try self.returnProtectedResult(thread, op.base, op.return_count, result),
-            .failure => |error_value| {
-                const handler_result = try self.protectedCall(thread, argValue(self, thread, op, 1), &.{error_value});
-                defer freeProtectedResult(self.allocator, handler_result);
-                const handled = switch (handler_result) {
-                    .success => |values| if (values.len == 0) Value.nil else values[0],
-                    .failure => Value{ .string = try self.intern("error in error handling") },
-                };
-                try self.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = false }, handled });
-            },
+            .failure => |error_value| try self.returnXpcallFailure(thread, op.base, op.return_count, handler, error_value),
         }
+    }
+
+    fn returnXpcallFailure(self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value) !void {
+        const context = self.protectedCallContextWithErrors(thread);
+        const handler_result = self.runProtectedCall(thread, context, handler, &.{error_value}) catch |err| switch (err) {
+            error.CoroutineYield => {
+                try self.pushProtectedContinuation(thread, context, base, return_count, .xpcall_handler, .nil);
+                return err;
+            },
+            else => return err,
+        };
+        defer freeProtectedResult(self.allocator, handler_result);
+        const handled = switch (handler_result) {
+            .success => |values| if (values.len == 0) Value.nil else values[0],
+            .failure => Value{ .string = try self.intern("error in error handling") },
+        };
+        try self.returnValues(thread, base, return_count, &.{ .{ .boolean = false }, handled });
     }
 
     fn tracebackValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -2255,6 +2399,7 @@ pub const State = struct {
 
         const closes_self = target == thread and target.status == .running;
         if (try self.closeCoroutine(target, null)) |error_value| {
+            if (closes_self) return self.throwValue(error_value);
             try self.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = false }, error_value });
             return;
         }
@@ -2352,18 +2497,23 @@ pub const State = struct {
             try self.setCoroutineResumeValues(target, args);
         }
 
-        self.runThreadUntil(target, 0) catch |err| switch (err) {
-            error.CoroutineYield => return .{ .success = try self.copyValues(target.yield_values.items) },
-            error.CoroutineClose => return .{ .success = try self.copyValues(&.{}) },
-            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
-                var error_value = self.currentErrorValue();
-                if (try self.closeCoroutine(target, error_value)) |close_error_value| error_value = close_error_value;
-                target.close_error_value = error_value;
-                target.status = .dead;
-                return .{ .failure = error_value };
-            },
-            else => return err,
-        };
+        while (true) {
+            self.runThreadUntil(target, 0) catch |err| switch (err) {
+                error.CoroutineYield => return .{ .success = try self.copyValues(target.yield_values.items) },
+                error.CoroutineClose => return .{ .success = try self.copyValues(&.{}) },
+                error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
+                    const error_value = self.currentErrorValue();
+                    if (try self.completeProtectedContinuationError(target, error_value)) continue;
+                    var final_error = error_value;
+                    if (try self.closeCoroutine(target, final_error)) |close_error_value| final_error = close_error_value;
+                    target.close_error_value = final_error;
+                    target.status = .dead;
+                    return .{ .failure = final_error };
+                },
+                else => return err,
+            };
+            break;
+        }
 
         target.status = .dead;
         target.close_error_value = null;
@@ -2506,7 +2656,7 @@ pub const State = struct {
         return .{ .{ .integer = next_index }, value };
     }
 
-    fn advanceGenericFor(self: *State, thread: *Thread, op: bytecode.GenericFor) !bool {
+    fn advanceGenericFor(self: *State, thread: *Thread, op: bytecode.GenericFor, jump_on_nil: bool) !bool {
         const iterator = self.get(thread, op.base);
         const state = self.get(thread, op.base + 1);
         const control = self.get(thread, op.base + 2);
@@ -2533,16 +2683,34 @@ pub const State = struct {
                 },
                 else => blk: {
                     const args = [_]Value{ state, control };
-                    owned_values = try self.callCollect(thread, iterator, &args);
+                    const frame_count = thread.frames.items.len;
+                    owned_values = self.callCollect(thread, iterator, &args) catch |err| switch (err) {
+                        error.CoroutineYield => {
+                            try self.pushGenericForContinuation(thread, frame_count, op, jump_on_nil);
+                            return err;
+                        },
+                        else => return err,
+                    };
                     break :blk owned_values.?;
                 },
             },
             else => blk: {
                 const args = [_]Value{ state, control };
-                owned_values = try self.callCollect(thread, iterator, &args);
+                const frame_count = thread.frames.items.len;
+                owned_values = self.callCollect(thread, iterator, &args) catch |err| switch (err) {
+                    error.CoroutineYield => {
+                        try self.pushGenericForContinuation(thread, frame_count, op, jump_on_nil);
+                        return err;
+                    },
+                    else => return err,
+                };
                 break :blk owned_values.?;
             },
         };
+        return self.applyGenericForValues(thread, op, values);
+    }
+
+    fn applyGenericForValues(self: *State, thread: *Thread, op: bytecode.GenericFor, values: []const Value) !bool {
         const first_value = if (values.len > 0) values[0] else Value.nil;
         self.set(thread, op.base + 2, first_value);
         for (0..op.variable_count) |index| {
@@ -2550,6 +2718,32 @@ pub const State = struct {
             self.set(thread, op.base + 4 + @as(bytecode.Register, @intCast(index)), value);
         }
         return first_value != .nil;
+    }
+
+    fn pushGenericForContinuation(self: *State, thread: *Thread, frame_count: usize, op: bytecode.GenericFor, jump_on_nil: bool) !void {
+        try thread.generic_for_continuations.append(self.allocator, .{
+            .frame_count = frame_count,
+            .op = op,
+            .jump_on_nil = jump_on_nil,
+        });
+    }
+
+    fn readyGenericForContinuationIndex(thread: *Thread) ?usize {
+        for (thread.generic_for_continuations.items, 0..) |continuation, index| {
+            if (continuation.frame_count == thread.frames.items.len) return index;
+        }
+        return null;
+    }
+
+    fn completeReadyGenericForContinuation(self: *State, thread: *Thread) !bool {
+        const index = readyGenericForContinuationIndex(thread) orelse return false;
+        const continuation = thread.generic_for_continuations.orderedRemove(index);
+        const values = try self.copyStackSlice(thread, thread.last_result_base, thread.last_result_count);
+        defer self.allocator.free(values);
+        if (!(try self.applyGenericForValues(thread, continuation.op, values)) and continuation.jump_on_nil) {
+            try self.jumpThread(thread, continuation.op.offset, false);
+        }
+        return true;
     }
 
     pub fn expectTable(self: *State, value: Value) !*Table {
@@ -2801,6 +2995,10 @@ pub const State = struct {
         self.markThreadStack(thread);
         for (thread.yield_values.items) |value| self.markValue(value);
         if (thread.close_error_value) |value| self.markValue(value);
+        for (thread.protected_continuations.items) |continuation| {
+            self.markValue(continuation.context.last_error_value);
+            self.markValue(continuation.handler);
+        }
         for (thread.frames.items) |frame| {
             self.markClosure(frame.closure);
             for (frame.varargs) |value| self.markValue(value);

@@ -33,7 +33,9 @@ Latest focused `coroutine.lua` work:
 - Coroutine wrappers keep their active resumer chain rooted during GC, avoiding the crash exposed by the official sieve-of-Eratosthenes wrapper chain.
 - `coroutine.create` and `coroutine.wrap` accept native function values through a small entry trampoline, covering official uses such as `print`, `error`, and `pcall` as coroutine bodies.
 - `pcall`/`xpcall` no longer count as unyieldable native boundaries, and protected-call close handlers expose the expected C frame to `debug.getinfo(2)` for the covered close-unwind check.
-- `coroutine.lua` still xfails later in protected-call continuation after yield; the next missing piece is preserving/resuming pcall/xpcall continuation state across coroutine yields.
+- Protected-call continuations now survive coroutine yields far enough to recover from yielded `pcall` close-unwind errors, including the official nested close-handler error ordering case.
+- `coroutine.close()` on the running coroutine no longer tries to return through frames it just closed when a close handler errors, avoiding the previous panic in the self-closing coroutine block.
+- `coroutine.lua` still xfails later in yielded generic-`for` iterator continuation under `pcall`/`xpcall`; the next missing piece is restoring the resumed iterator result correctly before the protected-call chain continues.
 
 Latest focused `strings.lua` work:
 
