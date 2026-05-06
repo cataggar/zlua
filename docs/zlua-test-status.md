@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=21`, `categorized_failed=11`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=22`, `categorized_failed=10`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,15 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `cstack.lua` work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, `just official-file attrib`, `just official-file coroutine`, and `just official-file cstack`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused `gc.lua` work verified with `just official-file gc`, `just official-file utf8`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+Latest focused `gc.lua` work:
+
+- Simple capture delimiters are now recognized by the string pattern matcher, covering the long-string `gsub` block while preserving the UTF-8 `gmatch` position-plus-character capture case.
+- Weak tables now keep string keys and values alive when Lua weak-table semantics retain them, avoiding dangling strings in weak-value and all-weak table checks.
+- Finalizer execution now respects weak-value `__gc` liveness, marks the finalized object graph before calling `__gc`, clears reachable weak tables first, and returns `false` for reentrant `collectgarbage()` calls from finalizers.
+- `string.rep` accepts integral float counts for official long-string construction without changing arithmetic result tagging.
+- `gc.lua` now passes in the basic official dashboard.
 
 Latest focused `cstack.lua` work:
 
@@ -143,7 +151,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `errors.lua` | Pass | XFail | `runtime` |
 | `events.lua` | Pass | XFail | `runtime` |
 | `files.lua` | Pass | XFail | `runtime` |
-| `gc.lua` | Pass | XFail | `runtime` |
+| `gc.lua` | Pass | Pass |  |
 | `gengc.lua` | Pass | Pass |  |
 | `goto.lua` | Pass | XFail | `runtime` |
 | `heavy.lua` | Pass | Pass |  |
@@ -172,7 +180,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 21 |
-| Categorized zlua failures | 11 |
+| zlua passes | 22 |
+| Categorized zlua failures | 10 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

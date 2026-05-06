@@ -3092,6 +3092,10 @@ pub const State = struct {
     fn collectGarbageValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const option = argValue(self, thread, op, 0);
         if (option == .nil or (option == .string and std.mem.eql(u8, option.string, "collect"))) {
+            if (self.is_collecting) {
+                try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = false }});
+                return;
+            }
             if (self.conservative_gc_depth != 0) {
                 try self.collectGarbageConservatively(thread);
             } else {
@@ -3262,9 +3266,13 @@ pub const State = struct {
         table.marked = true;
         if (table.metatable) |metatable| self.markTable(metatable);
         const weak = self.weakMode(table);
-        if (weak.keys and weak.values) return;
+        if (weak.keys and weak.values) {
+            self.markWeakTableStrings(table, true, true);
+            return;
+        }
         if (weak.values) {
             for (table.entries.items) |entry| self.markValue(entry.key);
+            self.markWeakTableStrings(table, false, true);
             return;
         }
         if (weak.keys) {
@@ -3277,6 +3285,20 @@ pub const State = struct {
             self.markValue(entry.key);
             self.markValue(entry.value);
         }
+    }
+
+    fn markWeakTableStrings(self: *State, table: *Table, keys: bool, values: bool) void {
+        if (values) {
+            for (table.array.items) |value| self.markWeakString(value);
+        }
+        for (table.entries.items) |entry| {
+            if (keys) self.markWeakString(entry.key);
+            if (values) self.markWeakString(entry.value);
+        }
+    }
+
+    fn markWeakString(self: *State, value: Value) void {
+        if (value == .string) self.markString(value.string);
     }
 
     fn markClosure(self: *State, closure: *Closure) void {
@@ -3459,8 +3481,13 @@ pub const State = struct {
             const metatable = table.metatable orelse continue;
             const finalizer = metatable.get(.{ .string = "__gc" });
             if (finalizer == .nil) continue;
-            table.marked = true;
+            if (self.weakMode(metatable).values and self.valueIsWeaklyCleared(finalizer)) continue;
+            if (!self.callableValue(finalizer)) continue;
+            self.markTable(table);
             table.finalized = true;
+            self.convergeEphemerons();
+            self.clearWeakValues();
+            self.clearWeakTables();
             {
                 const saved_stack_len = active_thread.stack.items.len;
                 const saved_last_result_base = active_thread.last_result_base;
@@ -3480,6 +3507,11 @@ pub const State = struct {
         self.markRoots();
         self.convergeEphemerons();
         self.clearWeakValues();
+    }
+
+    fn callableValue(self: *State, value: Value) bool {
+        if (functionLike(value)) return true;
+        return (self.getMetamethod(value, "__call") catch null) != null;
     }
 
     fn sweepStrings(self: *State) void {

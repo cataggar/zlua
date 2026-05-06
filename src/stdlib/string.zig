@@ -392,9 +392,17 @@ pub fn gmatchNext(state: *State, state_value: Value) ![2]Value {
     const source = try state.expectString(state_table.get(.{ .string = "s" }));
     const pattern = try state.expectString(state_table.get(.{ .string = "p" }));
     const pos = runtime.toInteger(state_table.get(.{ .string = "i" })) orelse 0;
-    const found = (try simplePatternFind(state, source, pattern, @intCast(@max(pos, 0)))) orelse return .{ .nil, .nil };
+    const capture_pattern = positionAndWholeCapturePattern(pattern);
+    const search_pattern = capture_pattern orelse pattern;
+    const found = (try simplePatternFind(state, source, search_pattern, @intCast(@max(pos, 0)))) orelse return .{ .nil, .nil };
     try state_table.set(state.allocator, .{ .string = try state.intern("i") }, .{ .integer = @intCast(if (found.end > found.start) found.end else found.end + 1) });
+    if (capture_pattern != null) return .{ .{ .integer = @intCast(found.start + 1) }, .{ .string = try state.intern(source[found.start..found.end]) } };
     return .{ .{ .string = try state.intern(source[found.start..found.end]) }, .nil };
+}
+
+fn positionAndWholeCapturePattern(pattern: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, pattern, "()(") and std.mem.endsWith(u8, pattern, ")")) return pattern[3 .. pattern.len - 1];
+    return null;
 }
 
 pub fn gsub(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -527,7 +535,11 @@ pub fn packsize(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn rep(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const source = try state.expectString(runtime.argValue(state, thread, op, 0));
-    const count = runtime.toInteger(runtime.argValue(state, thread, op, 1)) orelse return state.fail("number expected");
+    const count_value = runtime.argValue(state, thread, op, 1);
+    const count = switch (count_value) {
+        .number => |number| runtime.floatToInteger(number),
+        else => runtime.toInteger(count_value),
+    } orelse return state.fail("number expected");
     const sep = if (op.arg_count >= 3) try state.expectString(runtime.argValue(state, thread, op, 2)) else "";
     if (count > 0 and repeatedLengthTooLarge(source.len, sep.len, @intCast(count))) return state.fail("resulting string too large");
     var out = std.ArrayList(u8).empty;
@@ -681,6 +693,7 @@ fn matchPatternFrom(state: *State, source: []const u8, pattern: []const u8, sour
     if (depth > pattern_match_max_depth) return state.fail("pattern too complex");
     if (pattern_index >= pattern.len) return source_index;
     if (pattern[pattern_index] == '$' and pattern_index + 1 == pattern.len) return if (source_index == source.len) source_index else null;
+    if (pattern[pattern_index] == '(' or pattern[pattern_index] == ')') return matchPatternFrom(state, source, pattern, source_index, pattern_index + 1, depth + 1);
 
     const atom_start = pattern_index;
     const atom_end = nextPatternAtom(pattern, atom_start);
