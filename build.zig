@@ -47,6 +47,17 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(official_exe);
 
+    const bench_exe = b.addExecutable(.{
+        .name = "zlua-test-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_bench_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zlua", .module = mod }},
+        }),
+    });
+    b.installArtifact(bench_exe);
+
     const run_step = b.step("run", "Run zlua");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -70,6 +81,16 @@ pub fn build(b: *std.Build) void {
     run_official_cmd.addArtifactArg(exe);
     if (b.args) |args| run_official_cmd.addArgs(args);
     run_official_step.dependOn(&run_official_cmd.step);
+
+    const run_bench_step = b.step("run-test-bench", "Run zlua vs CLua benchmark harness");
+    const run_bench_cmd = b.addRunArtifact(bench_exe);
+    run_bench_cmd.step.dependOn(b.getInstallStep());
+    run_bench_cmd.addArg("--clua");
+    run_bench_cmd.addArtifactArg(clua_exe);
+    run_bench_cmd.addArg("--zlua");
+    run_bench_cmd.addArtifactArg(exe);
+    if (b.args) |args| run_bench_cmd.addArgs(args);
+    run_bench_step.dependOn(&run_bench_cmd.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);

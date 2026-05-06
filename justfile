@@ -48,6 +48,10 @@ diff *args:
 official *args:
     {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 {{args}}
 
+# Run zlua vs CLua benchmarks, or one benchmark file/directory.
+bench *args:
+    {{zig}} build --summary all run-test-bench -- {{args}}
+
 # Remove build outputs and Zig cache directories.
 clean:
     rm -rf zig-out .zig-cache
