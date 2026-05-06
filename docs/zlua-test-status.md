@@ -10,7 +10,7 @@ This document tracks the test layers currently used for zlua and the current sta
 | --- | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Pass | Runs Zig tests for the library module and CLI root module. |
 | CLua differential fixtures | `zig build test-diff` or `just diff-ci` | Pass | Current summary: `passed=51`, `failed=0`, `unexpected_failed=0`. Individual handwritten fixtures are not listed here. |
-| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=23`, `categorized_failed=9`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
+| Official Lua 5.5 quick subset | `zig build test-official` or `just official-ci` | Pass | Runs every per-file official test except memory-stress `heavy.lua`. Current summary: `clua_passed=32`, `clua_failed=0`, `zlua_passed=24`, `categorized_failed=8`, `skipped=1`, `timed_out=0`, `unexpected_failed=0`. |
 | Official Lua 5.5 heavy dashboard | `zig build test-official-heavy` or `just official-heavy` | Pass as dashboard | Full official dashboard. Last recorded summary: `clua_passed=33`, `clua_failed=0`, `zlua_passed=13`, `categorized_failed=20`, `unexpected_failed=0`. Not rerun during the latest focused official-test work. Categorized zlua failures remain expected work items. |
 | Full CI aggregate | `zig build ci` or `just ci` | Pass if child layers pass | Build step depends on unit tests, differential fixtures, and the quick official subset. |
 | Focused official file runner | `just official-file NAME` | Helper | Runs one official test file through zlua with the basic official prelude. Accepts names with or without `.lua`. |
@@ -25,7 +25,17 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused `locals.lua` work verified with `just official-file locals`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused `goto.lua` work verified with `just official-file goto`, `just diff-file tests/diff/runtime/to_be_closed.lua`, `just official-file locals`, `zig build test`, `zig build test-diff`, and `zig build test-official`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+Latest focused `goto.lua` work:
+
+- `load` diagnostics now report official-compatible goto/label/scope and global-declaration errors for the covered invalid chunks.
+- `repeat` body labels no longer use the trailing-label scope reset before the `until` condition, so jumps into locals used by the condition are rejected.
+- Goto code generation now patches pending gotos with scope-aware label targets and closes upvalues from the target label boundary instead of closing the whole frame.
+- Trailing labels close the current scope before the label target, and jump-time to-be-closed handling treats local end PCs as exclusive while ignoring reused non-closable slots.
+- Compiler name resolution now tracks ordered local/global declarations, including `global *`, `global function`, `_ENV` environments, global initialization order, and runtime global redefinition checks.
+- `global` can be parsed as a normal identifier in assignment/expression positions when it is not a global declaration.
+- `goto.lua` now passes in the basic official dashboard.
 
 Latest focused `db.lua` work:
 
@@ -166,7 +176,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | `files.lua` | Pass | XFail | `runtime` |
 | `gc.lua` | Pass | Pass |  |
 | `gengc.lua` | Pass | Pass |  |
-| `goto.lua` | Pass | XFail | `runtime` |
+| `goto.lua` | Pass | Pass |  |
 | `heavy.lua` | Pass | Pass |  |
 | `literals.lua` | Pass | Pass |  |
 | `locals.lua` | Pass | Pass |  |
@@ -193,7 +203,7 @@ The dashboard runs with the basic official prelude: `_U=true; _soft=true; _port=
 | Files run by the heavy per-file dashboard | 33 |
 | CLua passes | 32 |
 | CLua failures | 0 |
-| zlua passes | 23 |
-| Categorized zlua failures | 9 |
+| zlua passes | 24 |
+| Categorized zlua failures | 8 |
 | Timeouts | 0 |
 | Unexpected failures | 0 |

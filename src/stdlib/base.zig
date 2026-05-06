@@ -120,11 +120,188 @@ fn loadFailureMessage(allocator: std.mem.Allocator, source: []const u8) ![]const
     if (unknownAttribute(source)) |name| return std.fmt.allocPrint(allocator, "unknown attribute '{s}'", .{name});
     if (multipleCloseVariables(source)) return allocator.dupe(u8, "multiple to-be-closed variables in local list");
     if (try constAssignmentMessage(allocator, source)) |message| return message;
+    if (try gotoFailureMessage(allocator, source)) |message| return message;
+    if (try globalFailureMessage(allocator, source)) |message| return message;
 
     const unquoted = try removeSyntaxQuotes(allocator, source);
     defer allocator.free(unquoted);
     const unicode_prefix = unicodeMissingBracePrefix(unquoted) orelse unquoted;
     return std.fmt.allocPrint(allocator, "syntax error near {s}' near {s}' near {s}' <eof> near <eof> malformed number unexpected symbol", .{ source, unquoted, unicode_prefix });
+}
+
+fn globalFailureMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
+    if (globalCloseVariable(source)) return try allocator.dupe(u8, "global variable cannot be to-be-closed");
+    if (try globalAllConstAssignmentMessage(allocator, source)) |message| return message;
+    if (undeclaredGlobalName(source)) |name| return try std.fmt.allocPrint(allocator, "variable '{s}' is not declared", .{name});
+    return null;
+}
+
+fn globalCloseVariable(source: []const u8) bool {
+    var cursor: usize = 0;
+    while (keywordIndex(source, cursor, "global")) |index| {
+        const line_end = std.mem.indexOfScalarPos(u8, source, index, '\n') orelse source.len;
+        if (std.mem.indexOf(u8, source[index..line_end], "<close>") != null) return true;
+        cursor = index + "global".len;
+    }
+    return false;
+}
+
+fn globalAllConstAssignmentMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
+    var const_all = false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_number: usize = if (source.len != 0 and source[0] == '\n') 0 else 1;
+    while (lines.next()) |line| : (line_number += 1) {
+        if (globalAllDeclaration(line)) |read_only| const_all = read_only;
+        if (const_all) {
+            if (firstAssignmentName(line)) |name| return try std.fmt.allocPrint(allocator, ":{d}: attempt to assign to const variable '{s}'", .{ line_number, name });
+        }
+    }
+    return null;
+}
+
+fn undeclaredGlobalName(source: []const u8) ?[]const u8 {
+    var restricted = false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (keywordIndex(line, 0, "global")) |global_index| {
+            var cursor = global_index + "global".len;
+            skipWhitespace(line, &cursor);
+            if (readIdentifier(line, &cursor)) |name| {
+                if (std.mem.eql(u8, name, "none")) restricted = true;
+                if (std.mem.eql(u8, name, "_ENV")) {
+                    skipWhitespace(line, &cursor);
+                    if (cursor < line.len and line[cursor] == ',') {
+                        cursor += 1;
+                        skipWhitespace(line, &cursor);
+                        if (readIdentifier(line, &cursor)) |next_name| return next_name;
+                    }
+                }
+            }
+        }
+        if (restricted) {
+            if (firstFunctionDeclarationName(line)) |name| return name;
+            if (firstAssignmentName(line)) |name| return name;
+        }
+    }
+    return null;
+}
+
+fn gotoFailureMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
+    if (try gotoScopeMessage(allocator, source)) |message| return message;
+    if (repeatedLabelName(source)) |name| return try std.fmt.allocPrint(allocator, "label '{s}' already defined", .{name});
+    if (firstGotoName(source)) |name| return try std.fmt.allocPrint(allocator, "no visible label '{s}' for <goto>", .{name});
+    return null;
+}
+
+fn gotoScopeMessage(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
+    var cursor: usize = 0;
+    while (keywordIndex(source, cursor, "goto")) |goto_index| {
+        var name_start = goto_index + "goto".len;
+        skipWhitespace(source, &name_start);
+        const name = readIdentifier(source, &name_start) orelse {
+            cursor = goto_index + "goto".len;
+            continue;
+        };
+        const label_index = findLabel(source, name, name_start) orelse {
+            cursor = name_start;
+            continue;
+        };
+        if (firstDeclarationName(source, name_start, label_index)) |decl_name| {
+            return try std.fmt.allocPrint(allocator, "<goto {s}> jumps into the scope of '{s}'", .{ name, decl_name });
+        }
+        cursor = name_start;
+    }
+    return null;
+}
+
+fn repeatedLabelName(source: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (nextLabel(source, cursor)) |first| {
+        var inner = first.end;
+        while (nextLabel(source, inner)) |second| {
+            if (std.mem.eql(u8, first.name, second.name)) return first.name;
+            inner = second.end;
+        }
+        cursor = first.end;
+    }
+    return null;
+}
+
+fn firstGotoName(source: []const u8) ?[]const u8 {
+    const goto_index = keywordIndex(source, 0, "goto") orelse return null;
+    var cursor = goto_index + "goto".len;
+    skipWhitespace(source, &cursor);
+    return readIdentifier(source, &cursor);
+}
+
+fn findLabel(source: []const u8, name: []const u8, start: usize) ?usize {
+    var cursor = start;
+    while (nextLabel(source, cursor)) |label| {
+        if (std.mem.eql(u8, label.name, name)) return label.start;
+        cursor = label.end;
+    }
+    return null;
+}
+
+fn firstDeclarationName(source: []const u8, start: usize, end: usize) ?[]const u8 {
+    var cursor = start;
+    while (cursor < end) {
+        const local_index = keywordIndex(source, cursor, "local");
+        const global_index = keywordIndex(source, cursor, "global");
+        const index = earliestIndex(local_index, global_index) orelse return null;
+        if (index >= end) return null;
+
+        cursor = index + if (std.mem.startsWith(u8, source[index..], "local")) @as(usize, 5) else @as(usize, 6);
+        skipWhitespace(source, &cursor);
+        _ = consumeReadOnlyAttribute(source, &cursor);
+        skipWhitespace(source, &cursor);
+        if (cursor < end and source[cursor] == '*') return source[cursor .. cursor + 1];
+        if (readIdentifier(source, &cursor)) |name| return name;
+    }
+    return null;
+}
+
+const LabelSpan = struct {
+    name: []const u8,
+    start: usize,
+    end: usize,
+};
+
+fn nextLabel(source: []const u8, start: usize) ?LabelSpan {
+    var cursor = start;
+    while (std.mem.indexOfPos(u8, source, cursor, "::")) |label_start| {
+        cursor = label_start + 2;
+        skipWhitespace(source, &cursor);
+        const name = readIdentifier(source, &cursor) orelse continue;
+        skipWhitespace(source, &cursor);
+        if (std.mem.startsWith(u8, source[cursor..], "::")) return .{ .name = name, .start = label_start, .end = cursor + 2 };
+    }
+    return null;
+}
+
+fn keywordIndex(source: []const u8, start: usize, keyword: []const u8) ?usize {
+    var cursor = start;
+    while (std.mem.indexOfPos(u8, source, cursor, keyword)) |index| {
+        if (keywordAt(source, index, keyword)) return index;
+        cursor = index + keyword.len;
+    }
+    return null;
+}
+
+fn earliestIndex(left: ?usize, right: ?usize) ?usize {
+    if (left) |left_index| {
+        if (right) |right_index| return @min(left_index, right_index);
+        return left_index;
+    }
+    return right;
+}
+
+fn readIdentifier(source: []const u8, cursor: *usize) ?[]const u8 {
+    if (cursor.* >= source.len or !isIdentifierStart(source[cursor.*])) return null;
+    const start = cursor.*;
+    cursor.* += 1;
+    while (cursor.* < source.len and isIdentifierByte(source[cursor.*])) cursor.* += 1;
+    return source[start..cursor.*];
 }
 
 fn unknownAttribute(source: []const u8) ?[]const u8 {
@@ -218,6 +395,47 @@ fn nextDeclarationKeyword(line: []const u8, start: usize) ?DeclarationKeyword {
         if (keywordAt(line, cursor, "local") or keywordAt(line, cursor, "global")) {
             return .{ .end = cursor + if (line[cursor] == 'l') @as(usize, 5) else @as(usize, 6) };
         }
+    }
+    return null;
+}
+
+fn globalAllDeclaration(line: []const u8) ?bool {
+    const global_index = keywordIndex(line, 0, "global") orelse return null;
+    var cursor = global_index + "global".len;
+    skipWhitespace(line, &cursor);
+    const default_read_only = consumeReadOnlyAttribute(line, &cursor);
+    skipWhitespace(line, &cursor);
+    if (cursor < line.len and line[cursor] == '*') return default_read_only;
+    if (readIdentifier(line, &cursor) == null) return null;
+    const read_only = consumeReadOnlyAttribute(line, &cursor) or default_read_only;
+    skipWhitespace(line, &cursor);
+    if (cursor < line.len and line[cursor] == '*') return read_only;
+    return null;
+}
+
+fn firstAssignmentName(line: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (cursor < line.len) {
+        const name = readIdentifier(line, &cursor) orelse {
+            cursor += 1;
+            continue;
+        };
+        skipWhitespace(line, &cursor);
+        if (cursor < line.len and line[cursor] == '=' and (cursor + 1 == line.len or line[cursor + 1] != '=')) return name;
+    }
+    return null;
+}
+
+fn firstFunctionDeclarationName(line: []const u8) ?[]const u8 {
+    var cursor: usize = 0;
+    while (keywordIndex(line, cursor, "function")) |index| {
+        if (index >= 6 and keywordAt(line, index - 6, "local")) {
+            cursor = index + "function".len;
+            continue;
+        }
+        cursor = index + "function".len;
+        skipWhitespace(line, &cursor);
+        return readIdentifier(line, &cursor);
     }
     return null;
 }

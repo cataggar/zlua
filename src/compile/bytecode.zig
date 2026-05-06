@@ -35,6 +35,7 @@ pub const Instruction = union(enum) {
 
     get_global: GlobalAccess,
     set_global: GlobalAccess,
+    declare_global: GlobalDeclare,
     get_upvalue: UpvalueAccess,
     set_upvalue: UpvalueAccess,
     get_table: TableAccess,
@@ -106,6 +107,12 @@ pub const Move = struct {
 
 pub const GlobalAccess = struct {
     register: Register,
+    name: ConstantIndex,
+};
+
+pub const GlobalDeclare = struct {
+    table: Register,
+    value: Register,
     name: ConstantIndex,
 };
 

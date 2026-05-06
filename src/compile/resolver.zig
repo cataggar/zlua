@@ -58,7 +58,7 @@ pub fn resolve(allocator: std.mem.Allocator, tree: *const ast.Ast) !void {
 
     try context.enterScope();
     try context.declareLocal(.{ .name = "_ENV", .span = zero_span }, .regular, false);
-    try context.resolveBlock(tree.statements);
+    try context.resolveBlock(tree.statements, true);
     try context.leaveScope();
 }
 
@@ -109,15 +109,15 @@ const FunctionContext = struct {
         self.scopes.items.len -= 1;
     }
 
-    fn resolveBlock(self: *FunctionContext, block: ast.Block) anyerror!void {
+    fn resolveBlock(self: *FunctionContext, block: ast.Block, allow_trailing_label_scope_reset: bool) anyerror!void {
         for (block, 0..) |statement, index| {
-            try self.resolveStatement(statement, labelIsLastNoOp(block, index));
+            try self.resolveStatement(statement, allow_trailing_label_scope_reset and labelIsLastNoOp(block, index));
         }
     }
 
     fn resolveScopedBlock(self: *FunctionContext, block: ast.Block) anyerror!void {
         try self.enterScope();
-        try self.resolveBlock(block);
+        try self.resolveBlock(block, true);
         try self.leaveScope();
     }
 
@@ -151,7 +151,7 @@ const FunctionContext = struct {
             .repeat_stmt => |stmt| {
                 self.loop_depth += 1;
                 try self.enterScope();
-                try self.resolveBlock(stmt.body);
+                try self.resolveBlock(stmt.body, false);
                 try self.resolveExpr(stmt.condition);
                 try self.leaveScope();
                 self.loop_depth -= 1;
@@ -163,7 +163,7 @@ const FunctionContext = struct {
                 self.loop_depth += 1;
                 try self.enterScope();
                 try self.declareLocal(stmt.name, .regular, true);
-                try self.resolveBlock(stmt.body);
+                try self.resolveBlock(stmt.body, true);
                 try self.leaveScope();
                 self.loop_depth -= 1;
             },
@@ -172,7 +172,7 @@ const FunctionContext = struct {
                 self.loop_depth += 1;
                 try self.enterScope();
                 for (stmt.names) |name| try self.declareLocal(name, .regular, false);
-                try self.resolveBlock(stmt.body);
+                try self.resolveBlock(stmt.body, true);
                 try self.leaveScope();
                 self.loop_depth -= 1;
             },
@@ -215,6 +215,7 @@ const FunctionContext = struct {
 
         for (decl.values) |value| try self.resolveExpr(value);
         for (decl.names) |binding| {
+            if (std.mem.eql(u8, binding.name.name, "_ENV")) return error.ResolveError;
             const attr = if (binding.attribute) |_| try parseAttribute(binding.attribute) else default_attr;
             if (attr == .to_close) return error.ResolveError;
             try self.decls.append(self.allocator, .{
@@ -245,7 +246,7 @@ const FunctionContext = struct {
         }
         for (body.params) |param| try child.declareLocal(param, .regular, false);
         if (body.vararg_name) |name| try child.declareLocal(name, .constant, false);
-        try child.resolveBlock(body.body);
+        try child.resolveBlock(body.body, true);
         try child.leaveScope();
     }
 

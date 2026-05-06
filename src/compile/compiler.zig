@@ -41,19 +41,41 @@ const PreparedTarget = union(enum) {
 };
 
 const Scope = struct {
+    decl_start: usize,
     local_start: usize,
     label_start: usize,
+    goto_start: usize,
     next_register: bytecode.Register,
+};
+
+const DeclKind = enum {
+    local,
+    global_name,
+    global_all,
+};
+
+const Decl = struct {
+    name: []const u8,
+    kind: DeclKind,
+    local_index: ?usize = null,
+};
+
+const Lookup = union(enum) {
+    local: Local,
+    global,
+    undeclared,
 };
 
 const Label = struct {
     name: []const u8,
     pc: usize,
     scope_depth: usize,
+    close_register: bytecode.Register,
 };
 
 const PendingGoto = struct {
     name: []const u8,
+    close_pc: usize,
     pc: usize,
     scope_depth: usize,
 };
@@ -67,6 +89,7 @@ const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
     proto: *proto_mod.Proto,
     parent: ?*FunctionCompiler,
+    decls: std.ArrayList(Decl) = .empty,
     locals: std.ArrayList(Local) = .empty,
     scopes: std.ArrayList(Scope) = .empty,
     labels: std.ArrayList(Label) = .empty,
@@ -88,6 +111,7 @@ const FunctionCompiler = struct {
         self.labels.deinit(self.allocator);
         self.scopes.deinit(self.allocator);
         self.locals.deinit(self.allocator);
+        self.decls.deinit(self.allocator);
     }
 
     fn compileChunk(self: *FunctionCompiler, block: ast.Block) !void {
@@ -98,7 +122,7 @@ const FunctionCompiler = struct {
         const env_upvalue = try self.proto.addUpvalue(.{ .name = "_ENV", .in_stack = false, .index = 0 });
         self.current_line = 0;
         _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = env_upvalue } });
-        try self.compileBlock(block);
+        try self.compileBlock(block, true);
         if (!blockEndsWithReturn(block)) {
             self.current_line = 0;
             _ = try self.emit(.{ .ret = .{ .first = 0, .count = 0 } });
@@ -127,7 +151,7 @@ const FunctionCompiler = struct {
             const name = if (body.vararg_name) |vararg_name| vararg_name.name else "...";
             _ = try child_context.declareLocal(name);
         }
-        try child_context.compileBlock(body.body);
+        try child_context.compileBlock(body.body, true);
         if (!blockEndsWithReturn(body.body)) {
             child_context.current_line = body.end_line;
             _ = try child_context.emit(.{ .ret = .{ .first = 0, .count = 0 } });
@@ -139,13 +163,22 @@ const FunctionCompiler = struct {
         return child;
     }
 
-    fn compileBlock(self: *FunctionCompiler, block: ast.Block) !void {
-        for (block) |statement| try self.compileStatement(statement);
+    fn compileBlock(self: *FunctionCompiler, block: ast.Block, allow_trailing_label_scope_reset: bool) !void {
+        for (block, 0..) |statement, index| {
+            switch (statement) {
+                .label_stmt => |name| if (allow_trailing_label_scope_reset and labelIsLastNoOp(block, index)) {
+                    try self.compileTrailingLabel(name);
+                } else {
+                    try self.compileLabel(name);
+                },
+                else => try self.compileStatement(statement),
+            }
+        }
     }
 
     fn compileScopedBlock(self: *FunctionCompiler, block: ast.Block) !void {
         try self.enterScope();
-        try self.compileBlock(block);
+        try self.compileBlock(block, true);
         try self.leaveScope();
     }
 
@@ -223,6 +256,9 @@ const FunctionCompiler = struct {
             .debug_index = local.debug_index,
             .to_close = local.to_close,
         });
+        for (pending.items, self.locals.items.len - pending.items.len..) |local, local_index| {
+            try self.decls.append(self.allocator, .{ .name = local.name, .kind = .local, .local_index = local_index });
+        }
 
         for (pending.items) |local| {
             if (local.to_close) _ = try self.emit(.{ .check_close = local.register });
@@ -230,16 +266,34 @@ const FunctionCompiler = struct {
     }
 
     fn compileGlobalDecl(self: *FunctionCompiler, decl: ast.GlobalDecl) anyerror!void {
-        if (decl.values.len == 0) return;
+        if (decl.values.len == 0) {
+            try self.recordGlobalDecl(decl);
+            return;
+        }
+        const declare_before_values = decl.names.len == 1 and decl.values.len == 1 and decl.values[0].* == .function_literal;
+        if (declare_before_values) try self.recordGlobalDecl(decl);
         const mark = self.registerMark();
         const first_value = try self.allocRegs(@intCast(decl.names.len));
         try self.compileExprListAdjusted(decl.values, first_value, @intCast(decl.names.len));
+        if (!declare_before_values) try self.recordGlobalDecl(decl);
 
         for (decl.names, 0..) |binding, index| {
-            const name = try self.nameConstant(binding.name.name);
-            _ = try self.emit(.{ .set_global = .{ .register = first_value + @as(bytecode.Register, @intCast(index)), .name = name } });
+            const value = first_value + @as(bytecode.Register, @intCast(index));
+            if (try self.environmentRegister()) |env| {
+                _ = try self.emit(.{ .declare_global = .{ .table = env, .value = value, .name = try self.nameConstant(binding.name.name) } });
+            } else {
+                _ = try self.emit(.{ .set_global = .{ .register = value, .name = try self.nameConstant(binding.name.name) } });
+            }
         }
         self.release(mark);
+    }
+
+    fn recordGlobalDecl(self: *FunctionCompiler, decl: ast.GlobalDecl) !void {
+        if (decl.all) {
+            try self.decls.append(self.allocator, .{ .name = "*", .kind = .global_all });
+        } else {
+            for (decl.names) |binding| try self.decls.append(self.allocator, .{ .name = binding.name.name, .kind = .global_name });
+        }
     }
 
     fn compileFunctionDecl(self: *FunctionCompiler, decl: ast.FunctionDecl) anyerror!void {
@@ -327,7 +381,7 @@ const FunctionCompiler = struct {
         const loop_start = self.proto.pc();
         try self.enterLoop(self.registerMark());
         try self.enterScope();
-        try self.compileBlock(stmt.body);
+        try self.compileBlock(stmt.body, false);
         const mark = self.registerMark();
         const condition = try self.allocReg();
         try self.compileExpr(stmt.condition, condition);
@@ -358,6 +412,7 @@ const FunctionCompiler = struct {
 
         const debug_index = try self.proto.addLocal(.{ .name = stmt.name.name, .register = base, .start_pc = self.proto.pc() });
         try self.locals.append(self.allocator, .{ .name = stmt.name.name, .register = base, .debug_index = debug_index });
+        try self.decls.append(self.allocator, .{ .name = stmt.name.name, .kind = .local, .local_index = self.locals.items.len - 1 });
 
         const prep = try self.emit(.{ .for_prep = .{ .base = base, .offset = 0 } });
         const body_start = self.proto.pc();
@@ -425,28 +480,28 @@ const FunctionCompiler = struct {
     }
 
     fn compileGoto(self: *FunctionCompiler, name: ast.Identifier) !void {
-        try self.emitCloseActiveToCloseLocals();
-        const close_register = if (self.loops.items.len == 0) @as(bytecode.Register, 0) else self.loops.items[self.loops.items.len - 1].close_register;
-        _ = try self.emit(.{ .close = close_register });
+        const close_pc = try self.emit(.{ .close = 0 });
         const pc = try self.emit(.{ .jmp = 0 });
         var label_index = self.labels.items.len;
         while (label_index > 0) {
             label_index -= 1;
             const label = self.labels.items[label_index];
             if (label.scope_depth <= self.scopes.items.len and std.mem.eql(u8, label.name, name.name)) {
+                self.patchClose(close_pc, label.close_register);
                 try self.proto.patchJump(pc, label.pc);
                 return;
             }
         }
-        try self.gotos.append(self.allocator, .{ .name = name.name, .pc = pc, .scope_depth = self.scopes.items.len });
+        try self.gotos.append(self.allocator, .{ .name = name.name, .close_pc = close_pc, .pc = pc, .scope_depth = self.scopes.items.len });
     }
 
     fn compileLabel(self: *FunctionCompiler, name: ast.Identifier) !void {
-        const label: Label = .{ .name = name.name, .pc = self.proto.pc(), .scope_depth = self.scopes.items.len };
+        const label: Label = .{ .name = name.name, .pc = self.proto.pc(), .scope_depth = self.scopes.items.len, .close_register = self.next_register };
         try self.labels.append(self.allocator, label);
         var index: usize = 0;
         while (index < self.gotos.items.len) {
             if (self.gotos.items[index].scope_depth >= label.scope_depth and std.mem.eql(u8, self.gotos.items[index].name, name.name)) {
+                self.patchClose(self.gotos.items[index].close_pc, label.close_register);
                 try self.proto.patchJump(self.gotos.items[index].pc, self.proto.pc());
                 _ = self.gotos.swapRemove(index);
             } else {
@@ -455,13 +510,35 @@ const FunctionCompiler = struct {
         }
     }
 
-    fn emitCloseActiveToCloseLocals(self: *FunctionCompiler) !void {
+    fn compileTrailingLabel(self: *FunctionCompiler, name: ast.Identifier) !void {
+        try self.closeCurrentScopeLocals();
+        try self.compileLabel(name);
+    }
+
+    fn patchClose(self: *FunctionCompiler, pc: usize, register: bytecode.Register) void {
+        self.proto.instructions.items[pc].close = register;
+    }
+
+    fn closeCurrentScopeLocals(self: *FunctionCompiler) !void {
+        const scope = self.scopes.items[self.scopes.items.len - 1];
+        var has_captured = false;
+        for (self.locals.items[scope.local_start..]) |local| {
+            has_captured = has_captured or local.captured;
+            if (!local.to_close) self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
+        }
         var index = self.locals.items.len;
-        while (index > 0) {
+        while (index > scope.local_start) {
             index -= 1;
             const local = self.locals.items[index];
             if (local.to_close) _ = try self.emit(.{ .close_tbc = local.register });
         }
+        for (self.locals.items[scope.local_start..]) |local| {
+            if (local.to_close) self.proto.locals.items[local.debug_index].end_pc = self.proto.pc();
+        }
+        if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
+        self.locals.items.len = scope.local_start;
+        self.decls.items.len = scope.decl_start;
+        self.next_register = scope.next_register;
     }
 
     fn compileReturn(self: *FunctionCompiler, stmt: ast.ReturnStmt) anyerror!void {
@@ -774,7 +851,7 @@ const FunctionCompiler = struct {
     fn prepareAssignmentTarget(self: *FunctionCompiler, target: *const ast.Expr) anyerror!PreparedTarget {
         return switch (target.*) {
             .identifier => |identifier| blk: {
-                if (self.lookupLocal(identifier.name) == null) _ = try self.lookupUpvalue(identifier.name);
+                if (self.lookupName(identifier.name) != .local) _ = try self.lookupUpvalue(identifier.name);
                 break :blk .{ .expr = target };
             },
             .field => |field| blk: {
@@ -802,26 +879,30 @@ const FunctionCompiler = struct {
     }
 
     fn loadName(self: *FunctionCompiler, name: []const u8, dest: bytecode.Register) !void {
-        if (self.lookupLocal(name)) |local| {
-            _ = try self.emit(.{ .move = .{ .dest = dest, .source = local.register } });
-        } else if (try self.lookupUpvalue(name)) |upvalue| {
-            _ = try self.emit(.{ .get_upvalue = .{ .register = dest, .upvalue = upvalue } });
-        } else if (!std.mem.eql(u8, name, "_ENV") and try self.loadFromEnvironment(name, dest)) {
-            return;
-        } else {
-            _ = try self.emit(.{ .get_global = .{ .register = dest, .name = try self.nameConstant(name) } });
+        switch (self.lookupName(name)) {
+            .local => |local| _ = try self.emit(.{ .move = .{ .dest = dest, .source = local.register } }),
+            .global => try self.loadGlobalName(name, dest),
+            .undeclared => if (try self.lookupUpvalue(name)) |upvalue| {
+                _ = try self.emit(.{ .get_upvalue = .{ .register = dest, .upvalue = upvalue } });
+            } else if (!std.mem.eql(u8, name, "_ENV") and try self.loadFromEnvironment(name, dest)) {
+                return;
+            } else {
+                _ = try self.emit(.{ .get_global = .{ .register = dest, .name = try self.nameConstant(name) } });
+            },
         }
     }
 
     fn assignName(self: *FunctionCompiler, name: []const u8, value_reg: bytecode.Register) !void {
-        if (self.lookupLocal(name)) |local| {
-            _ = try self.emit(.{ .move = .{ .dest = local.register, .source = value_reg } });
-        } else if (try self.lookupUpvalue(name)) |upvalue| {
-            _ = try self.emit(.{ .set_upvalue = .{ .register = value_reg, .upvalue = upvalue } });
-        } else if (!std.mem.eql(u8, name, "_ENV") and try self.storeInEnvironment(name, value_reg)) {
-            return;
-        } else {
-            _ = try self.emit(.{ .set_global = .{ .register = value_reg, .name = try self.nameConstant(name) } });
+        switch (self.lookupName(name)) {
+            .local => |local| _ = try self.emit(.{ .move = .{ .dest = local.register, .source = value_reg } }),
+            .global => try self.storeGlobalName(name, value_reg),
+            .undeclared => if (try self.lookupUpvalue(name)) |upvalue| {
+                _ = try self.emit(.{ .set_upvalue = .{ .register = value_reg, .upvalue = upvalue } });
+            } else if (!std.mem.eql(u8, name, "_ENV") and try self.storeInEnvironment(name, value_reg)) {
+                return;
+            } else {
+                _ = try self.emit(.{ .set_global = .{ .register = value_reg, .name = try self.nameConstant(name) } });
+            },
         }
     }
 
@@ -844,6 +925,26 @@ const FunctionCompiler = struct {
         }
         self.release(mark);
         return false;
+    }
+
+    fn loadGlobalName(self: *FunctionCompiler, name: []const u8, dest: bytecode.Register) !void {
+        if (!std.mem.eql(u8, name, "_ENV") and try self.loadFromEnvironment(name, dest)) return;
+        _ = try self.emit(.{ .get_global = .{ .register = dest, .name = try self.nameConstant(name) } });
+    }
+
+    fn storeGlobalName(self: *FunctionCompiler, name: []const u8, value_reg: bytecode.Register) !void {
+        if (!std.mem.eql(u8, name, "_ENV") and try self.storeInEnvironment(name, value_reg)) return;
+        _ = try self.emit(.{ .set_global = .{ .register = value_reg, .name = try self.nameConstant(name) } });
+    }
+
+    fn environmentRegister(self: *FunctionCompiler) !?bytecode.Register {
+        if (self.lookupLocal("_ENV")) |local| return local.register;
+        if (try self.lookupUpvalue("_ENV")) |upvalue| {
+            const env = try self.allocReg();
+            _ = try self.emit(.{ .get_upvalue = .{ .register = env, .upvalue = upvalue } });
+            return env;
+        }
+        return null;
     }
 
     fn storeInEnvironment(self: *FunctionCompiler, name: []const u8, value_reg: bytecode.Register) !bool {
@@ -872,6 +973,22 @@ const FunctionCompiler = struct {
         return self.locals.items[index];
     }
 
+    fn lookupName(self: *FunctionCompiler, name: []const u8) Lookup {
+        var star = false;
+        var index = self.decls.items.len;
+        while (index > 0) {
+            index -= 1;
+            const decl = self.decls.items[index];
+            switch (decl.kind) {
+                .local => if (std.mem.eql(u8, decl.name, name)) return .{ .local = self.locals.items[decl.local_index.?] },
+                .global_name => if (std.mem.eql(u8, decl.name, name)) return .global,
+                .global_all => star = true,
+            }
+        }
+        if (star) return .global;
+        return .undeclared;
+    }
+
     fn lookupLocalIndex(self: *FunctionCompiler, name: []const u8) ?usize {
         var index = self.locals.items.len;
         while (index > 0) {
@@ -891,24 +1008,38 @@ const FunctionCompiler = struct {
 
     fn lookupUpvalue(self: *FunctionCompiler, name: []const u8) !?bytecode.UpvalueIndex {
         if (self.parent) |parent| {
-            if (parent.lookupLocalIndex(name)) |local_index| {
-                parent.locals.items[local_index].captured = true;
-                const local = parent.locals.items[local_index];
-                return try self.proto.addUpvalue(.{ .name = name, .in_stack = true, .index = local.register });
-            }
-            if (try parent.lookupUpvalue(name)) |parent_upvalue| {
-                return try self.proto.addUpvalue(.{ .name = name, .in_stack = false, .index = parent_upvalue });
+            switch (parent.lookupName(name)) {
+                .local => |local| {
+                    if (parent.lookupLocalIndex(name)) |local_index| parent.locals.items[local_index].captured = true;
+                    return try self.proto.addUpvalue(.{ .name = name, .in_stack = true, .index = local.register });
+                },
+                .global => return null,
+                .undeclared => if (try parent.lookupUpvalue(name)) |parent_upvalue| {
+                    return try self.proto.addUpvalue(.{ .name = name, .in_stack = false, .index = parent_upvalue });
+                },
             }
         }
         return null;
     }
 
     fn enterScope(self: *FunctionCompiler) !void {
-        try self.scopes.append(self.allocator, .{ .local_start = self.locals.items.len, .label_start = self.labels.items.len, .next_register = self.next_register });
+        try self.scopes.append(self.allocator, .{
+            .decl_start = self.decls.items.len,
+            .local_start = self.locals.items.len,
+            .label_start = self.labels.items.len,
+            .goto_start = self.gotos.items.len,
+            .next_register = self.next_register,
+        });
     }
 
     fn leaveScope(self: *FunctionCompiler) !void {
         const scope = self.scopes.items[self.scopes.items.len - 1];
+        const depth = self.scopes.items.len;
+        var goto_index = scope.goto_start;
+        while (goto_index < self.gotos.items.len) : (goto_index += 1) {
+            if (self.gotos.items[goto_index].scope_depth == depth) self.gotos.items[goto_index].scope_depth = depth - 1;
+        }
+
         var has_captured = false;
         for (self.locals.items[scope.local_start..]) |local| {
             has_captured = has_captured or local.captured;
@@ -925,6 +1056,7 @@ const FunctionCompiler = struct {
         }
         if (has_captured) _ = try self.emit(.{ .close = scope.next_register });
         self.locals.items.len = scope.local_start;
+        self.decls.items.len = scope.decl_start;
         self.labels.items.len = scope.label_start;
         self.next_register = scope.next_register;
         self.scopes.items.len -= 1;
@@ -939,6 +1071,7 @@ const FunctionCompiler = struct {
         const debug_index = try self.proto.addLocal(.{ .name = name, .register = register, .start_pc = self.proto.pc() });
         self.proto.locals.items[debug_index].to_close = to_close;
         try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close });
+        try self.decls.append(self.allocator, .{ .name = name, .kind = .local, .local_index = self.locals.items.len - 1 });
         return register;
     }
 
@@ -957,6 +1090,7 @@ const FunctionCompiler = struct {
         for (self.gotos.items) |pending| {
             for (self.labels.items) |label| {
                 if (std.mem.eql(u8, label.name, pending.name)) {
+                    self.patchClose(pending.close_pc, label.close_register);
                     try self.proto.patchJump(pending.pc, label.pc);
                     break;
                 }
@@ -1030,6 +1164,17 @@ fn binaryInstruction(op: ast.BinaryOp, dest: bytecode.Register, left: bytecode.R
 fn blockEndsWithReturn(block: ast.Block) bool {
     if (block.len == 0) return false;
     return block[block.len - 1] == .return_stmt;
+}
+
+fn labelIsLastNoOp(block: ast.Block, index: usize) bool {
+    var cursor = index + 1;
+    while (cursor < block.len) : (cursor += 1) {
+        switch (block[cursor]) {
+            .empty, .label_stmt => {},
+            else => return false,
+        }
+    }
+    return true;
 }
 
 fn isCallExpr(expr: *const ast.Expr) bool {

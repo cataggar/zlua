@@ -40,7 +40,11 @@ const Parser = struct {
         if (self.match(.keyword_for)) |_| return self.parseFor();
         if (self.match(.keyword_function)) |_| return self.parseFunctionDeclaration();
         if (self.match(.keyword_local)) |_| return self.parseLocalStatement();
-        if (self.match(.keyword_global)) |_| return self.parseGlobalDeclaration();
+        if (self.check(.keyword_global)) {
+            if (self.peekN(1).tag == .equal) return self.parseAssignmentOrCallStatement();
+            _ = self.advance();
+            return self.parseGlobalDeclaration();
+        }
         if (self.match(.keyword_return)) |tok| return self.parseReturn(tok.span.start.line);
         return self.parseAssignmentOrCallStatement();
     }
@@ -233,7 +237,7 @@ const Parser = struct {
     }
 
     fn parsePrimaryExpression(self: *Parser) anyerror!*ast.Expr {
-        if (self.check(.identifier) or self.check(.left_paren)) return self.parsePrefixExpression();
+        if (self.check(.identifier) or self.check(.keyword_global) or self.check(.left_paren)) return self.parsePrefixExpression();
         if (self.match(.keyword_nil)) |tok| return self.newExpr(.{ .nil = tok.span });
         if (self.match(.keyword_false)) |tok| return self.newExpr(.{ .boolean = .{ .value = false, .span = tok.span } });
         if (self.match(.keyword_true)) |tok| return self.newExpr(.{ .boolean = .{ .value = true, .span = tok.span } });
@@ -247,7 +251,7 @@ const Parser = struct {
     }
 
     fn parsePrefixExpression(self: *Parser) anyerror!*ast.Expr {
-        var expr = if (self.match(.identifier)) |tok|
+        var expr = if (self.match(.identifier) orelse self.match(.keyword_global)) |tok|
             try self.newExpr(.{ .identifier = .{ .name = tok.lexeme, .span = tok.span } })
         else if (self.match(.left_paren)) |_| blk: {
             const inner = try self.parseExpression(0);
@@ -413,6 +417,7 @@ const Parser = struct {
     fn canStartExpression(self: Parser) bool {
         return switch (self.peek().tag) {
             .identifier,
+            .keyword_global,
             .left_paren,
             .keyword_nil,
             .keyword_false,

@@ -58,6 +58,7 @@ fn writeInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instr
         .move => |op| try appendFmt(allocator, out, "MOVE r{d} r{d}", .{ op.dest, op.source }),
         .get_global => |op| try appendFmt(allocator, out, "GET_GLOBAL r{d} K{d}", .{ op.register, op.name }),
         .set_global => |op| try appendFmt(allocator, out, "SET_GLOBAL r{d} K{d}", .{ op.register, op.name }),
+        .declare_global => |op| try appendFmt(allocator, out, "DECLARE_GLOBAL r{d} K{d} r{d}", .{ op.table, op.name, op.value }),
         .get_upvalue => |op| try appendFmt(allocator, out, "GET_UPVALUE r{d} U{d}", .{ op.register, op.upvalue }),
         .set_upvalue => |op| try appendFmt(allocator, out, "SET_UPVALUE r{d} U{d}", .{ op.register, op.upvalue }),
         .get_table => |op| try appendFmt(allocator, out, "GET_TABLE r{d} r{d} r{d}", .{ op.dest, op.table, op.key }),

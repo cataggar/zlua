@@ -898,6 +898,7 @@ pub const State = struct {
                 .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
                 .get_global => |op| self.set(thread, op.register, self.getGlobalValue(constantString(proto, op.name))),
                 .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
+                .declare_global => |op| try self.declareGlobal(thread, constantString(proto, op.name), op.table, op.value),
                 .add => |op| try self.binaryOpToRegister(thread, op, .add),
                 .sub => |op| try self.binaryOpToRegister(thread, op, .sub),
                 .mul => |op| try self.binaryOpToRegister(thread, op, .mul),
@@ -955,6 +956,18 @@ pub const State = struct {
     fn get(_: *State, thread: *Thread, register: bytecode.Register) Value {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         return thread.stack.items[frame.base + register];
+    }
+
+    fn declareGlobal(self: *State, thread: *Thread, name: []const u8, table_register: bytecode.Register, value_register: bytecode.Register) !void {
+        const table_value = self.get(thread, table_register);
+        if (table_value != .table) return self.fail("attempt to index a nil value");
+        const key = Value{ .string = try self.intern(name) };
+        if (table_value.table.get(key) != .nil) {
+            const message = try std.fmt.allocPrint(self.allocator, "global '{s}' already defined", .{name});
+            defer self.allocator.free(message);
+            return self.fail(try self.intern(message));
+        }
+        try self.setTable(table_value, key, self.get(thread, value_register));
     }
 
     fn set(_: *State, thread: *Thread, register: bytecode.Register, value: Value) void {
@@ -1666,6 +1679,8 @@ pub const State = struct {
             const local = frame.proto.locals.items[index];
             if (!local.to_close) continue;
             if (!localActiveAt(local, source_pc) or localActiveAt(local, target_pc)) continue;
+            const value = thread.stack.items[frame.base + local.register];
+            if (value != .nil and !(value == .boolean and !value.boolean) and (try self.getMetamethod(value, "__close")) == null) continue;
 
             self.closeToBeClosedRegister(thread, local.register, pending_error) catch |err| {
                 if (isRuntimeError(err)) {
@@ -4621,7 +4636,7 @@ fn forLoopContinuesNumber(current: f64, limit: f64, step: f64) bool {
 }
 
 fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
-    return local.start_pc <= pc and (local.end_pc == 0 or pc <= local.end_pc);
+    return local.start_pc <= pc and (local.end_pc == 0 or pc < local.end_pc);
 }
 
 fn isRuntimeError(err: anyerror) bool {
