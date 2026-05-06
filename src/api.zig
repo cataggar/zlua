@@ -79,6 +79,11 @@ pub const LoadOptions = struct {
 
 pub const DoOptions = LoadOptions;
 
+pub const TableOptions = struct {
+    array_hint: u32 = 0,
+    hash_hint: u32 = 0,
+};
+
 pub const GcBudget = struct {
     steps: usize = 0,
 };
@@ -91,15 +96,31 @@ pub const GcStepResult = enum {
 pub const State = struct {
     raw_state: runtime.State,
     last_error_root: ?usize = null,
+    memory_files: std.ArrayList(MemoryFile) = .empty,
+    owned_memory_file_start: usize = 0,
 
     pub fn init(state_allocator: std.mem.Allocator, options: Options) !State {
-        return .{
+        var state = State{
             .raw_state = try runtime.State.initWithOptions(state_allocator, runtimeOptions(options)),
         };
+        errdefer state.raw_state.deinit();
+        errdefer state.memory_files.deinit(state_allocator);
+
+        if (options.capabilities.filesystem == .memory) {
+            const files = options.capabilities.filesystem.memory;
+            try state.memory_files.appendSlice(state_allocator, files);
+            state.owned_memory_file_start = files.len;
+            state.raw_state.options.filesystem = .{ .memory = state.memory_files.items };
+        }
+
+        return state;
     }
 
     pub fn deinit(self: *State) void {
+        const state_allocator = self.raw_state.allocator;
         self.raw_state.deinit();
+        self.deinitOwnedMemoryFiles(state_allocator);
+        self.memory_files.deinit(state_allocator);
         self.* = undefined;
     }
 
@@ -128,6 +149,59 @@ pub const State = struct {
 
     pub fn read(self: *State, value: Value, comptime T: type) !T {
         return fromRuntimeValue(self, try value.toRuntime(), T);
+    }
+
+    pub fn setGlobal(self: *State, name: []const u8, value: anytype) !void {
+        const raw_name = try self.raw_state.intern(name);
+        const raw_value = try toRuntimeValue(self, value);
+        self.raw_state.putGlobal(raw_name, raw_value) catch |err| return self.captureLuaError(err);
+    }
+
+    pub fn getGlobal(self: *State, name: []const u8, comptime T: type) !T {
+        return fromRuntimeValue(self, self.raw_state.getGlobal(name), T);
+    }
+
+    pub fn createTable(self: *State, options: TableOptions) !Table {
+        const raw = self.raw_state.newTableWithHints(options.array_hint, options.hash_hint) catch |err| return self.captureLuaError(err);
+        return Table.fromRuntime(self, raw);
+    }
+
+    pub fn createModule(self: *State, name: []const u8) !Table {
+        _ = name;
+        return self.createTable(.{ .hash_hint = 4 });
+    }
+
+    pub fn preloadModule(self: *State, name: []const u8, module: Table) !void {
+        try self.ensurePackageLibrary();
+
+        var package = try self.getGlobal("package", Table);
+        defer package.deinit();
+        var loaded = try package.get("loaded", Table);
+        defer loaded.deinit();
+        try loaded.set(name, module);
+    }
+
+    pub fn setPackagePath(self: *State, path: []const u8) !void {
+        try self.ensurePackageLibrary();
+
+        var package = try self.getGlobal("package", Table);
+        defer package.deinit();
+        try package.set("path", path);
+    }
+
+    pub fn addMemoryFile(self: *State, path: []const u8, contents: []const u8) !void {
+        switch (self.raw_state.options.filesystem) {
+            .disabled, .memory => {},
+            .host_cwd => return error.UnsupportedOption,
+        }
+
+        const path_copy = try self.allocator().dupe(u8, path);
+        errdefer self.allocator().free(path_copy);
+        const contents_copy = try self.allocator().dupe(u8, contents);
+        errdefer self.allocator().free(contents_copy);
+
+        try self.memory_files.append(self.allocator(), .{ .path = path_copy, .contents = contents_copy });
+        self.raw_state.options.filesystem = .{ .memory = self.memory_files.items };
     }
 
     pub fn loadString(self: *State, source: []const u8, options: LoadOptions) !Function {
@@ -185,6 +259,30 @@ pub const State = struct {
                 return error.LuaError;
             },
             else => return err,
+        }
+    }
+
+    fn ensurePackageLibrary(self: *State) !void {
+        if (self.raw_state.globals.get("package") == null) {
+            try stdlib.openLibraries(&self.raw_state, .{ .libraries = .{ .package = true } });
+        }
+
+        try self.syncOpenedGlobal("loadfile");
+        try self.syncOpenedGlobal("dofile");
+        try self.syncOpenedGlobal("require");
+        try self.syncOpenedGlobal("package");
+    }
+
+    fn syncOpenedGlobal(self: *State, name: []const u8) !void {
+        const value = self.raw_state.globals.get(name) orelse return;
+        const raw_name = try self.raw_state.intern(name);
+        self.raw_state.putGlobal(raw_name, value) catch |err| return self.captureLuaError(err);
+    }
+
+    fn deinitOwnedMemoryFiles(self: *State, state_allocator: std.mem.Allocator) void {
+        for (self.memory_files.items[self.owned_memory_file_start..]) |file| {
+            state_allocator.free(file.path);
+            state_allocator.free(file.contents);
         }
     }
 
@@ -463,7 +561,8 @@ fn toRuntimeValue(state: *State, value: anytype) !runtime.Value {
         .array => |array| if (array.child == u8)
             .{ .string = try state.raw_state.intern(value[0..]) }
         else
-            error.UnsupportedType,
+            arrayToRuntimeValue(state, value[0..]),
+        .@"struct" => |info| structToRuntimeValue(state, value, info),
         else => error.UnsupportedType,
     };
 }
@@ -471,18 +570,55 @@ fn toRuntimeValue(state: *State, value: anytype) !runtime.Value {
 fn pointerToRuntimeValue(state: *State, value: anytype, comptime pointer: std.builtin.Type.Pointer) !runtime.Value {
     switch (pointer.size) {
         .slice => {
-            if (pointer.child != u8) return error.UnsupportedType;
-            return .{ .string = try state.raw_state.intern(value) };
+            if (pointer.child == u8) return .{ .string = try state.raw_state.intern(value) };
+            return arrayToRuntimeValue(state, value);
         },
         .one => switch (@typeInfo(pointer.child)) {
             .array => |array| {
-                if (array.child != u8) return error.UnsupportedType;
-                return .{ .string = try state.raw_state.intern(value[0..]) };
+                if (array.child == u8) return .{ .string = try state.raw_state.intern(value[0..]) };
+                return arrayToRuntimeValue(state, value[0..]);
             },
+            .@"struct" => return toRuntimeValue(state, value.*),
             else => return error.UnsupportedType,
         },
         else => return error.UnsupportedType,
     }
+}
+
+fn arrayToRuntimeValue(state: *State, values: anytype) !runtime.Value {
+    const array_hint = std.math.cast(u32, values.len) orelse return error.IntegerOutOfRange;
+    const table = state.raw_state.newTableWithHints(array_hint, 0) catch |err| return state.captureLuaError(err);
+    for (values, 0..) |item, index| {
+        const raw_item = try toRuntimeValue(state, item);
+        const raw_index: i64 = @intCast(index + 1);
+        state.raw_state.setTableValue(table, .{ .integer = raw_index }, raw_item) catch |err| return state.captureLuaError(err);
+    }
+    return table;
+}
+
+fn structToRuntimeValue(state: *State, value: anytype, comptime info: std.builtin.Type.Struct) !runtime.Value {
+    if (info.is_tuple) return tupleToRuntimeValue(state, value, info.fields.len);
+
+    const hash_hint = std.math.cast(u32, info.fields.len) orelse return error.IntegerOutOfRange;
+
+    const table = state.raw_state.newTableWithHints(0, hash_hint) catch |err| return state.captureLuaError(err);
+    inline for (info.fields) |field| {
+        const raw_key = runtime.Value{ .string = try state.raw_state.intern(field.name) };
+        const raw_value = try toRuntimeValue(state, @field(value, field.name));
+        state.raw_state.setTableValue(table, raw_key, raw_value) catch |err| return state.captureLuaError(err);
+    }
+    return table;
+}
+
+fn tupleToRuntimeValue(state: *State, value: anytype, comptime len: usize) !runtime.Value {
+    const array_hint = std.math.cast(u32, len) orelse return error.IntegerOutOfRange;
+    const table = state.raw_state.newTableWithHints(array_hint, 0) catch |err| return state.captureLuaError(err);
+    inline for (0..len) |index| {
+        const raw_item = try toRuntimeValue(state, value[index]);
+        const raw_index: i64 = @intCast(index + 1);
+        state.raw_state.setTableValue(table, .{ .integer = raw_index }, raw_item) catch |err| return state.captureLuaError(err);
+    }
+    return table;
 }
 
 fn fromRuntimeResults(state: *State, results: []const runtime.Value, comptime R: type) !R {
@@ -525,6 +661,10 @@ fn fromRuntimeValue(state: *State, raw: runtime.Value, comptime T: type) !T {
             .number => |value| @as(T, @floatCast(value)),
             else => error.TypeMismatch,
         },
+        .optional => |optional| if (raw == .nil)
+            null
+        else
+            try fromRuntimeValue(state, raw, optional.child),
         .pointer => |pointer| switch (pointer.size) {
             .slice => if (pointer.child == u8) switch (raw) {
                 .string => |value| value,
@@ -684,4 +824,78 @@ test "api released handles remove runtime roots" {
     try std.testing.expectEqual(@as(usize, 0), lua.rootCountForTest());
 
     try lua.collect();
+}
+
+test "api globals tables arrays and structs build Lua environments" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.setGlobal("answer", 42);
+    try std.testing.expectEqual(@as(i64, 42), try lua.getGlobal("answer", i64));
+
+    var config = try lua.createTable(.{ .hash_hint = 4 });
+    defer config.deinit();
+    try config.set("title", "demo");
+    try config.set("max_players", 8);
+    try config.set("debug", true);
+    try lua.setGlobal("config", config);
+
+    try lua.setGlobal("search_path", &.{ "scripts/?.lua", "scripts/?/init.lua" });
+    try lua.setGlobal("app", .{
+        .name = "zlua-host",
+        .version = 1,
+        .features = &.{ "plugins", "sandbox" },
+    });
+
+    try lua.doString(
+        \\assert(config.title == 'demo')
+        \\assert(config.max_players == 8)
+        \\assert(config.debug == true)
+        \\assert(search_path[1] == 'scripts/?.lua')
+        \\assert(search_path[2] == 'scripts/?/init.lua')
+        \\assert(app.name == 'zlua-host')
+        \\assert(app.version == 1)
+        \\assert(app.features[1] == 'plugins')
+        \\assert(app.features[2] == 'sandbox')
+    , .{ .name = "=api-21.3-env" });
+
+    var app = try lua.getGlobal("app", Table);
+    defer app.deinit();
+    var features = try app.get("features", Table);
+    defer features.deinit();
+    try std.testing.expectEqualStrings("sandbox", try features.get(2, []const u8));
+}
+
+test "api preloaded module is returned by require" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var host = try lua.createModule("host");
+    defer host.deinit();
+    try host.set("name", "host-module");
+    try host.set("version", 3);
+    try lua.preloadModule("host", host);
+
+    try lua.doString(
+        \\local host = require('host')
+        \\assert(host.name == 'host-module')
+        \\assert(host.version == 3)
+    , .{ .name = "=api-21.3-preload" });
+}
+
+test "api package path loads memory backed Lua modules" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.addMemoryFile("plugins/mathx.lua",
+        \\local M = {}
+        \\function M.double(x) return x * 2 end
+        \\return M
+    );
+    try lua.setPackagePath("plugins/?.lua");
+
+    try lua.doString(
+        \\local mathx = require('mathx')
+        \\assert(mathx.double(21) == 42)
+    , .{ .name = "=api-21.3-memory-require" });
 }
