@@ -25,7 +25,15 @@ This document tracks the test layers currently used for zlua and the current sta
 
 ## Focused Official Progress
 
-Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, `just official-file closure`, `just official-file literals`, and `just official-file strings`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+Latest focused work verified with `zig build test`, `zig build test-diff`, `zig build test-official`, `just official-file coroutine`, `just official-file closure`, `just official-file literals`, and `just official-file strings`. `heavy.lua`, `zig build test-official-heavy`, and `zig build ci` were not rerun during the latest focused work.
+
+Latest focused `coroutine.lua` work:
+
+- `coroutine.isyieldable` and `coroutine.close` are now available, including dead/main/normal coroutine checks and basic to-be-closed unwinding.
+- Coroutine wrappers keep their active resumer chain rooted during GC, avoiding the crash exposed by the official sieve-of-Eratosthenes wrapper chain.
+- `coroutine.create` and `coroutine.wrap` accept native function values through a small entry trampoline, covering official uses such as `print`, `error`, and `pcall` as coroutine bodies.
+- `pcall`/`xpcall` no longer count as unyieldable native boundaries, and protected-call close handlers expose the expected C frame to `debug.getinfo(2)` for the covered close-unwind check.
+- `coroutine.lua` still xfails later in protected-call continuation after yield; the next missing piece is preserving/resuming pcall/xpcall continuation state across coroutine yields.
 
 Latest focused `strings.lua` work:
 

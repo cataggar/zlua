@@ -20,9 +20,9 @@ pub fn getinfo(state: *State, thread: *Thread, op: bytecode.Call) !void {
     try table.set(state.allocator, .{ .string = try state.intern("nparams") }, .{ .integer = 0 });
     try table.set(state.allocator, .{ .string = try state.intern("isvararg") }, .{ .boolean = false });
     const what = switch (target) {
-        .integer => "Lua",
+        .integer => state.currentWhat(thread, target.integer),
         .closure => "Lua",
-        .gmatch_iterator, .native, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_wrap => "C",
+        .gmatch_iterator, .native, .native_print, .native_tostring, .native_getmetatable, .native_setmetatable, .native_rawequal, .native_rawget, .native_rawset, .native_rawlen, .native_next, .native_pairs, .native_ipairs, .native_ipairs_iter, .native_table_create, .native_select, .native_assert, .native_error, .native_pcall, .native_xpcall, .native_collectgarbage, .native_debug_traceback, .native_coroutine_create, .native_coroutine_resume, .native_coroutine_yield, .native_coroutine_status, .native_coroutine_running, .native_coroutine_isyieldable, .native_coroutine_close, .native_coroutine_wrap => "C",
         else => return state.fail("function or level expected"),
     };
     try table.set(state.allocator, .{ .string = try state.intern("what") }, .{ .string = try state.intern(what) });

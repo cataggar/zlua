@@ -55,6 +55,8 @@ pub const Value = union(enum) {
     native_coroutine_yield,
     native_coroutine_status,
     native_coroutine_running,
+    native_coroutine_isyieldable,
+    native_coroutine_close,
     native_coroutine_wrap,
     native: NativeFn,
 };
@@ -270,15 +272,19 @@ pub const Thread = struct {
     yield_tail_base: bytecode.Register = 0,
     yield_tail_count: u16 = 0,
     native_call_depth: usize = 0,
-    entry: ?*Closure = null,
+    protected_close_depth: usize = 0,
+    close_error_value: ?Value = null,
+    resume_parent: ?*Thread = null,
+    entry: Value = .nil,
     marked: bool = false,
     started: bool = false,
     is_main: bool = false,
+    closing: bool = false,
     status: ThreadStatus = .suspended,
 
     pub fn initRoot(allocator: std.mem.Allocator, closure: *Closure) !Thread {
         var thread = Thread{};
-        thread.entry = closure;
+        thread.entry = .{ .closure = closure };
         thread.started = true;
         thread.is_main = true;
         thread.status = .running;
@@ -289,8 +295,8 @@ pub const Thread = struct {
         return thread;
     }
 
-    pub fn initCoroutine(closure: *Closure) Thread {
-        return .{ .entry = closure, .status = .suspended };
+    pub fn initCoroutine(entry: Value) Thread {
+        return .{ .entry = entry, .status = .suspended };
     }
 
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
@@ -634,12 +640,14 @@ pub const State = struct {
         try state.setTable(utf8_lib, .{ .string = try state.intern("offset") }, .{ .native = .utf8_offset });
         try state.globals.put(try state.intern("utf8"), utf8_lib);
 
-        const coroutine_lib = try state.newTableWithHints(0, 6);
+        const coroutine_lib = try state.newTableWithHints(0, 8);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("create") }, .native_coroutine_create);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("resume") }, .native_coroutine_resume);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("yield") }, .native_coroutine_yield);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("status") }, .native_coroutine_status);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("running") }, .native_coroutine_running);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("isyieldable") }, .native_coroutine_isyieldable);
+        try state.setTable(coroutine_lib, .{ .string = try state.intern("close") }, .native_coroutine_close);
         try state.setTable(coroutine_lib, .{ .string = try state.intern("wrap") }, .native_coroutine_wrap);
         try state.globals.put(try state.intern("coroutine"), coroutine_lib);
     }
@@ -869,6 +877,11 @@ pub const State = struct {
         if (depth > thread.frames.items.len) return null;
         const frame = thread.frames.items[thread.frames.items.len - depth];
         return frame.varargs.len;
+    }
+
+    pub fn currentWhat(self: *State, thread: *Thread, level: i64) []const u8 {
+        _ = self;
+        return if (level == 2 and thread.protected_close_depth != 0) "C" else "Lua";
     }
 
     pub fn currentFunctionName(self: *State, thread: *Thread, level: i64) ?[]const u8 {
@@ -1585,7 +1598,7 @@ pub const State = struct {
             return;
         }
 
-        const entering_native = isNativeCallable(callee);
+        const entering_native = isYieldBlockingNative(callee);
         if (entering_native) thread.native_call_depth += 1;
         defer {
             if (entering_native) thread.native_call_depth -= 1;
@@ -1655,6 +1668,8 @@ pub const State = struct {
             .native_coroutine_yield => try self.coroutineYield(thread, resolved),
             .native_coroutine_status => try self.coroutineStatus(thread, resolved),
             .native_coroutine_running => try self.coroutineRunning(thread, resolved),
+            .native_coroutine_isyieldable => try self.coroutineIsYieldable(thread, resolved),
+            .native_coroutine_close => try self.coroutineClose(thread, resolved),
             .native_coroutine_wrap => try self.coroutineWrap(thread, resolved),
             .gmatch_iterator => |state_table| {
                 const values = try stdlib.string.gmatchNext(self, .{ .table = state_table });
@@ -1748,6 +1763,8 @@ pub const State = struct {
         error_value: Value,
     ) !Value {
         var failure = error_value;
+        thread.protected_close_depth += 1;
+        defer thread.protected_close_depth -= 1;
         self.closeFramesTo(thread, frame_count, error_value) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => failure = self.currentErrorValue(),
             else => return err,
@@ -2168,11 +2185,9 @@ pub const State = struct {
     }
 
     fn coroutineCreate(self: *State, thread: *Thread, op: bytecode.Call) !void {
-        const closure = switch (argValue(self, thread, op, 0)) {
-            .closure => |closure| closure,
-            else => return self.fail("function expected"),
-        };
-        try self.returnValues(thread, op.base, op.return_count, &.{.{ .thread = try self.newCoroutineThread(closure) }});
+        const entry = argValue(self, thread, op, 0);
+        if (!functionLike(entry)) return self.fail("function expected");
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .thread = try self.newCoroutineThread(entry) }});
     }
 
     fn coroutineResume(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -2187,6 +2202,7 @@ pub const State = struct {
 
     fn coroutineYield(self: *State, thread: *Thread, op: bytecode.Call) !void {
         if (thread.is_main) return self.fail("attempt to yield from outside a coroutine");
+        if (thread.closing) return self.fail("attempt to yield from a __close metamethod");
         if (thread.native_call_depth > 1) return self.fail("attempt to yield across a native-call boundary");
 
         thread.yield_values.clearRetainingCapacity();
@@ -2209,16 +2225,51 @@ pub const State = struct {
         try self.returnValues(thread, op.base, op.return_count, &.{ .{ .thread = thread }, .{ .boolean = thread.is_main } });
     }
 
+    fn coroutineIsYieldable(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const target = if (op.arg_count == 0) thread else try self.expectThread(argValue(self, thread, op, 0));
+        const yieldable = if (target == thread)
+            !thread.is_main and thread.status == .running and thread.native_call_depth <= 1 and !thread.closing
+        else
+            !target.is_main and target.status != .dead and !target.closing;
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = yieldable }});
+    }
+
+    fn coroutineClose(self: *State, thread: *Thread, op: bytecode.Call) !void {
+        const target = if (op.arg_count == 0) thread else try self.expectThread(argValue(self, thread, op, 0));
+        if (target.status == .normal) return self.fail("cannot close a normal coroutine");
+        if (target.is_main) return self.fail("cannot close main coroutine");
+        if (target.closing) {
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            return;
+        }
+        if (target.status == .dead) {
+            if (target.close_error_value) |error_value| {
+                target.close_error_value = null;
+                try self.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = false }, error_value });
+            } else {
+                try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+            }
+            return;
+        }
+        if (target.status == .running and target != thread) return self.fail("cannot close a running coroutine");
+
+        const closes_self = target == thread and target.status == .running;
+        if (try self.closeCoroutine(target, null)) |error_value| {
+            try self.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = false }, error_value });
+            return;
+        }
+        if (closes_self) return error.CoroutineClose;
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
+    }
+
     fn coroutineWrap(self: *State, thread: *Thread, op: bytecode.Call) !void {
         if (argValue(self, thread, op, 0) == .gmatch_iterator) {
             try self.returnValues(thread, op.base, op.return_count, &.{argValue(self, thread, op, 0)});
             return;
         }
-        const closure = switch (argValue(self, thread, op, 0)) {
-            .closure => |closure| closure,
-            else => return self.fail("function expected"),
-        };
-        try self.returnValues(thread, op.base, op.return_count, &.{.{ .coroutine_wrapper = try self.newCoroutineThread(closure) }});
+        const entry = argValue(self, thread, op, 0);
+        if (!functionLike(entry)) return self.fail("function expected");
+        try self.returnValues(thread, op.base, op.return_count, &.{.{ .coroutine_wrapper = try self.newCoroutineThread(entry) }});
     }
 
     fn callCoroutineWrapper(self: *State, thread: *Thread, op: bytecode.Call, target: *Thread) !void {
@@ -2236,13 +2287,39 @@ pub const State = struct {
         }
     }
 
-    fn newCoroutineThread(self: *State, closure: *Closure) !*Thread {
+    fn newCoroutineThread(self: *State, entry: Value) !*Thread {
         const thread = try self.allocator.create(Thread);
         errdefer self.allocator.destroy(thread);
-        thread.* = Thread.initCoroutine(closure);
+        thread.* = Thread.initCoroutine(entry);
         errdefer thread.deinit(self.allocator);
         try self.thread_allocations.append(self.allocator, thread);
         return thread;
+    }
+
+    fn closeCoroutine(self: *State, target: *Thread, error_value: ?Value) !?Value {
+        const previous_thread = self.current_thread;
+        const previous_parent = target.resume_parent;
+        const previous_status = target.status;
+        self.current_thread = target;
+        target.resume_parent = previous_thread;
+        target.status = .running;
+        target.closing = true;
+        defer {
+            target.closing = false;
+            target.status = .dead;
+            target.resume_parent = previous_parent;
+            self.current_thread = previous_thread;
+        }
+
+        self.closeFramesTo(target, 0, error_value) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => return self.currentErrorValue(),
+            else => {
+                target.status = previous_status;
+                return err;
+            },
+        };
+        target.close_error_value = null;
+        return null;
     }
 
     fn resumeCoroutine(self: *State, target: *Thread, args: []const Value) !CoroutineResumeResult {
@@ -2257,10 +2334,13 @@ pub const State = struct {
             if (parent_thread.status == .running) parent_thread.status = .normal;
         }
         const previous_thread = self.current_thread;
+        const previous_parent = target.resume_parent;
         self.current_thread = target;
+        target.resume_parent = parent;
         target.status = .running;
         defer {
             self.current_thread = previous_thread;
+            target.resume_parent = previous_parent;
             if (parent) |parent_thread| {
                 if (parent_thread.status == .normal) parent_thread.status = .running;
             }
@@ -2274,12 +2354,11 @@ pub const State = struct {
 
         self.runThreadUntil(target, 0) catch |err| switch (err) {
             error.CoroutineYield => return .{ .success = try self.copyValues(target.yield_values.items) },
+            error.CoroutineClose => return .{ .success = try self.copyValues(&.{}) },
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => {
                 var error_value = self.currentErrorValue();
-                self.closeFramesTo(target, 0, error_value) catch |close_err| switch (close_err) {
-                    error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => error_value = self.currentErrorValue(),
-                    else => return close_err,
-                };
+                if (try self.closeCoroutine(target, error_value)) |close_error_value| error_value = close_error_value;
+                target.close_error_value = error_value;
                 target.status = .dead;
                 return .{ .failure = error_value };
             },
@@ -2287,18 +2366,54 @@ pub const State = struct {
         };
 
         target.status = .dead;
+        target.close_error_value = null;
         return .{ .success = try self.copyStackSlice(target, target.last_result_base, target.last_result_count) };
     }
 
     fn startCoroutine(self: *State, target: *Thread, args: []const Value) !void {
-        const closure = target.entry orelse return self.fail("coroutine has no entry function");
-        try target.ensureStack(self.allocator, 1 + args.len);
-        target.stack.items[0] = .{ .closure = closure };
-        for (args, 0..) |arg, index| target.stack.items[1 + index] = arg;
-        var frame = try self.prepareClosureFrame(target, closure, 0, 0, args.len, 0, bytecode.multret_count);
+        const closure, const arg_count = switch (target.entry) {
+            .closure => |closure| blk: {
+                try target.ensureStack(self.allocator, 1 + args.len);
+                target.stack.items[0] = .{ .closure = closure };
+                for (args, 0..) |arg, index| target.stack.items[1 + index] = arg;
+                break :blk .{ closure, args.len };
+            },
+            else => blk: {
+                const trampoline = try self.callableEntryClosure();
+                try target.ensureStack(self.allocator, 2 + args.len);
+                target.stack.items[0] = .{ .closure = trampoline };
+                target.stack.items[1] = target.entry;
+                for (args, 0..) |arg, index| target.stack.items[2 + index] = arg;
+                break :blk .{ trampoline, 1 + args.len };
+            },
+        };
+        var frame = try self.prepareClosureFrame(target, closure, 0, 0, arg_count, 0, bytecode.multret_count);
         errdefer frame.deinit(self.allocator);
         try target.frames.append(self.allocator, frame);
         target.started = true;
+    }
+
+    fn callableEntryClosure(self: *State) !*Closure {
+        const proto = try self.allocator.create(proto_mod.Proto);
+        errdefer self.allocator.destroy(proto);
+        proto.* = proto_mod.Proto.init(self.allocator);
+        errdefer proto.deinit();
+        proto.max_registers = 2;
+        proto.param_count = 1;
+        proto.is_vararg = true;
+        proto.source_name = "=(coroutine entry)";
+        _ = try proto.emit(.{ .vararg = .{ .dest = 1, .count = bytecode.multret_count } }, 0);
+        _ = try proto.emit(.{ .call = .{ .base = 0, .arg_count = bytecode.multret_count, .return_count = bytecode.multret_count } }, 0);
+        _ = try proto.emit(.{ .ret = .{ .first = 0, .count = bytecode.multret_count } }, 0);
+        try self.proto_allocations.append(self.allocator, proto);
+
+        const upvalues = try self.allocator.alloc(*Upvalue, 0);
+        errdefer self.allocator.free(upvalues);
+        const closure = try self.allocator.create(Closure);
+        closure.* = .{ .proto = proto, .upvalues = upvalues };
+        errdefer self.destroyClosure(closure);
+        try self.closure_allocations.append(self.allocator, closure);
+        return closure;
     }
 
     fn setCoroutineResumeValues(self: *State, target: *Thread, args: []const Value) !void {
@@ -2604,7 +2719,10 @@ pub const State = struct {
         for (self.upvalue_allocations.items) |upvalue| upvalue.marked = false;
         for (self.thread_allocations.items) |thread| thread.marked = false;
         if (self.current_thread) |thread| {
-            if (!self.isTrackedThread(thread)) thread.marked = false;
+            var active: ?*Thread = thread;
+            while (active) |active_thread| : (active = active_thread.resume_parent) {
+                if (!self.isTrackedThread(active_thread)) active_thread.marked = false;
+            }
         }
     }
 
@@ -2678,9 +2796,11 @@ pub const State = struct {
     fn markThread(self: *State, thread: *Thread) void {
         if (thread.marked) return;
         thread.marked = true;
-        if (thread.entry) |entry| self.markClosure(entry);
+        self.markValue(thread.entry);
+        if (thread.resume_parent) |parent| self.markThread(parent);
         self.markThreadStack(thread);
         for (thread.yield_values.items) |value| self.markValue(value);
+        if (thread.close_error_value) |value| self.markValue(value);
         for (thread.frames.items) |frame| {
             self.markClosure(frame.closure);
             for (frame.varargs) |value| self.markValue(value);
@@ -3299,6 +3419,8 @@ pub fn valuesEqual(lhs: Value, rhs: Value) bool {
         .native_coroutine_yield => rhs == .native_coroutine_yield,
         .native_coroutine_status => rhs == .native_coroutine_status,
         .native_coroutine_running => rhs == .native_coroutine_running,
+        .native_coroutine_isyieldable => rhs == .native_coroutine_isyieldable,
+        .native_coroutine_close => rhs == .native_coroutine_close,
         .native_coroutine_wrap => rhs == .native_coroutine_wrap,
         .native => |native| rhs == .native and rhs.native == native,
     };
@@ -3341,8 +3463,10 @@ fn hashValue(value: Value) u64 {
         .native_coroutine_yield => hashTag(32),
         .native_coroutine_status => hashTag(33),
         .native_coroutine_running => hashTag(34),
-        .native_coroutine_wrap => hashTag(35),
-        .native => |payload| hashEnum(36, payload),
+        .native_coroutine_isyieldable => hashTag(35),
+        .native_coroutine_close => hashTag(36),
+        .native_coroutine_wrap => hashTag(37),
+        .native => |payload| hashEnum(38, payload),
     };
 }
 
@@ -3406,10 +3530,26 @@ fn isNativeCallable(value: Value) bool {
         .native_coroutine_yield,
         .native_coroutine_status,
         .native_coroutine_running,
+        .native_coroutine_isyieldable,
+        .native_coroutine_close,
         .native_coroutine_wrap,
         .native,
         => true,
         else => false,
+    };
+}
+
+fn isYieldBlockingNative(value: Value) bool {
+    return switch (value) {
+        .native_pcall, .native_xpcall => false,
+        else => isNativeCallable(value),
+    };
+}
+
+fn functionLike(value: Value) bool {
+    return switch (value) {
+        .closure, .coroutine_wrapper, .gmatch_iterator => true,
+        else => isNativeCallable(value),
     };
 }
 
@@ -3708,6 +3848,8 @@ pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value:
         .native_coroutine_yield => try out.appendSlice(allocator, "function: coroutine.yield"),
         .native_coroutine_status => try out.appendSlice(allocator, "function: coroutine.status"),
         .native_coroutine_running => try out.appendSlice(allocator, "function: coroutine.running"),
+        .native_coroutine_isyieldable => try out.appendSlice(allocator, "function: coroutine.isyieldable"),
+        .native_coroutine_close => try out.appendSlice(allocator, "function: coroutine.close"),
         .native_coroutine_wrap => try out.appendSlice(allocator, "function: coroutine.wrap"),
         .native => |native| {
             try out.appendSlice(allocator, "function: ");
