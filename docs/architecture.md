@@ -33,7 +33,7 @@ The testing and benchmark harnesses are first-class build artifacts, not externa
 | `zlua-test-c-api` | `src/test_c_api_main.zig` | C API differential fixture runner. |
 | `zlua-embed-*` | `examples/embed/*.zig` | Zig embedding examples. |
 
-`zig build ci` runs unit tests, compiles embedding examples, runs differential fixtures, runs the official dashboard, and builds/tests the C API compatibility harness.
+Testing policy and CI composition are documented in [testing.md](testing.md).
 
 ## Public Facade
 
@@ -369,14 +369,4 @@ These are the rules to preserve when changing internals:
 | Bytecode is internal. | Binary chunks are zlua-specific and should not freeze compiler/VM representation. |
 | Benchmarks do not replace compatibility tests. | Performance changes must preserve differential and official behavior. |
 
-## Change Workflow
-
-For behavior changes, use this loop:
-
-1. Add or update a Lua fixture, C API fixture, Zig unit test, or embedding example that captures the behavior.
-2. Verify CLua behavior when the behavior is Lua-visible.
-3. Make the smallest implementation change that preserves existing dashboard results.
-4. Run the narrow relevant command first.
-5. Run broader checks before considering the work complete.
-
-For architecture changes, add one more rule: identify which boundary is moving. Most risky changes cross one of these boundaries: compiler to runtime, runtime to stdlib, runtime to embedding API, runtime to C API, or host capability to stdlib.
+Architecture changes should identify which boundary is moving. Most risky changes cross one of these boundaries: compiler to runtime, runtime to stdlib, runtime to embedding API, runtime to C API, or host capability to stdlib. Use the workflow in [development.md](development.md) for behavior changes.

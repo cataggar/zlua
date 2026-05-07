@@ -1,6 +1,6 @@
 # Development
 
-This document covers day-to-day zlua development conventions: project shape, commands, source conventions, and local workflow. For test methodology, see [testing.md](testing.md). For implementation structure, see [architecture.md](architecture.md).
+This document covers day-to-day zlua development conventions: project shape, common commands, source conventions, and local workflow. For test methodology and detailed harness flags, see [testing.md](testing.md). For benchmark methodology, see [benchmark.md](benchmark.md). For implementation structure, see [architecture.md](architecture.md).
 
 ## Project Shape
 
@@ -8,27 +8,7 @@ zlua is a Zig package targeting Zig `0.16.0`. `build.zig.zon` has no external Zi
 
 The build downloads Lua 5.5 source and official tests into `.zlua-deps/`, which is ignored by Git. The CLua oracle is built from `.zlua-deps/lua-5.5.0/src`; do not assume a system Lua is required.
 
-`zig build ci` runs the default CI-equivalent checks:
-
-```text
-unit tests
-embedding examples
-CLua differential fixtures
-official Lua 5.5 dashboard
-C API fixtures
-```
-
-Build artifacts installed or produced by `build.zig` include:
-
-| Artifact | Purpose |
-| --- | --- |
-| `zlua` | CLI executable from `src/main.zig`. |
-| `lua5.5` | Downloaded CLua oracle built from `.zlua-deps/lua-5.5.0/src`. |
-| `zlua-test-diff` | CLua differential harness. |
-| `zlua-test-official` | Official Lua 5.5 dashboard harness. |
-| `zlua-test-bench` | Benchmark harness. |
-| `zlua-c` | Static Lua C API compatibility library. |
-| `zlua-test-c-api` | C API differential fixture harness. |
+`zig build ci` is the default CI-equivalent aggregate. See [testing.md](testing.md) for the exact layers it runs and [architecture.md](architecture.md) for the build artifacts behind those layers.
 
 The library facade is `src/root.zig`. It exports `api`, `frontend`, `compile`, `runtime`, `stdlib`, and `testing`, plus top-level embedding aliases like `State`, `Table`, `Function`, and `Context`.
 
@@ -38,7 +18,7 @@ The CLI currently wires directly to `runtime.State` with full host capabilities.
 
 Runtime and standard-library compatibility are dashboard-driven. Use downloaded CLua behavior and official Lua 5.5 tests as the oracle instead of guessing from docs.
 
-Historical planning docs under `docs/old/` are not authoritative. Prefer `build.zig`, `justfile`, CI, and current `src/` behavior when historical docs differ.
+Prefer `build.zig`, `justfile`, CI, and current `src/` behavior when documentation differs.
 
 ## Commands
 
@@ -65,54 +45,28 @@ just run path/to/file.lua
 just version
 ```
 
-Run checks:
+Run common local checks:
 
 ```sh
 zig build ci
 just ci
 zig build test
 just test
-zig build test-diff
-just diff
-zig build test-official
-just official
 zig build examples
 just example
-zig build ci-c-api
-just c-api
 ```
 
-Run targeted examples:
+Use [testing.md](testing.md) for focused differential, official-suite, C API, and failure-debugging commands.
 
-```sh
-zig build run-example -Dexample=run_script
-just example run_script
-```
-
-Run targeted differential fixtures:
-
-```sh
-just diff tests/diff/runtime/tables.lua
-just diff --stage=parse
-just diff --stage=compile
-just diff --feature=table
-```
-
-Run targeted official files:
-
-```sh
-just official attrib calls.lua
-just official calls db locals nextvar
-```
+Use [embedding.md](embedding.md) for focused embedding example commands.
 
 Run benchmarks:
 
 ```sh
 just bench
-just bench table/pairs_iteration --iterations=20
-just bench --category table
-just bench --json /tmp/zlua-bench.json
 ```
+
+Use [benchmark.md](benchmark.md) for focused benchmark runs, report formats, and interpretation.
 
 Format Zig sources:
 
@@ -143,8 +97,6 @@ const std = @import("std");
 Keep public embedding changes in `src/api.zig` unless there is a deliberate API decision to expose something else. Prefer adding a small facade method to exposing runtime internals.
 
 The zlua binary chunk format is zlua-specific. It is not PUC Lua `luac` compatibility and should not be treated as a stable external ABI.
-
-Markdown-only GitHub changes are ignored by CI through `paths-ignore: '**/*.md'`. Run relevant local checks when documentation mentions commands, examples, or behavior.
 
 ## Development Workflow
 

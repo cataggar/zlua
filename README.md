@@ -89,8 +89,6 @@ Start with [docs/README.md](docs/README.md).
 | [Embedding](docs/embedding.md) | Zig-native embedding API. |
 | [Next Steps](docs/next-steps.md) | Remaining hardening, performance, API, and release-documentation work. |
 
-Historical planning documents live under `docs/old/` and are not authoritative.
-
 ## Repository Layout
 
 ```text

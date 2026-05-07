@@ -52,5 +52,3 @@ Detailed conventions live in:
 | [Benchmarking](docs/benchmark.md) | Performance workflow and benchmark interpretation. |
 | [Architecture](docs/architecture.md) | Implementation structure and invariants. |
 | [Embedding](docs/embedding.md) | Public Zig embedding API. |
-
-Historical planning docs under `docs/old/` are not authoritative.

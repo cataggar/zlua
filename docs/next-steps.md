@@ -4,10 +4,10 @@ The original milestone plan is largely implemented. Remaining work is now about 
 
 ## Performance
 
-Current performance work should stay measurement-first:
+Current performance work should stay measurement-first. [benchmark.md](benchmark.md) owns the current baseline and interpretation; this document tracks follow-up work.
 
 1. Capture JSON benchmark snapshots for optimization work and keep before/after comparisons in PR notes.
-2. Profile `gc/short_lived_tables.lua`, `table/metatable_index.lua`, `vm/function_calls.lua`, `vm/upvalues.lua`, and the highest string fixtures before broad runtime changes.
+2. Profile the current worst benchmark fixtures before broad runtime changes.
 3. Attribute process-level benchmark time versus in-process VM execution time for the worst fixtures.
 4. Preserve the existing fast paths with focused regression benchmarks.
 5. Defer CI performance thresholds until enough cross-machine benchmark history exists.
@@ -99,9 +99,8 @@ Recommended documentation follow-up:
 1. Expand root `README.md` into install, quickstart, commands, compatibility status, and links to `docs/README.md`.
 2. Add a user-facing CLI document if CLI flags grow beyond the current `--help` output.
 3. Add a C API document only when support is intentionally user-facing.
-4. Keep `docs/old/` as historical context and avoid linking to it as current guidance.
-5. Update `src/root.zig` versioning and release notes when cutting a real release.
-6. Decide whether zlua binary chunks need a format/versioning document or should remain explicitly internal.
+4. Update `src/root.zig` versioning and release notes when cutting a real release.
+5. Decide whether zlua binary chunks need a format/versioning document or should remain explicitly internal.
 
 ## Compatibility Non-Goals To Keep Explicit
 

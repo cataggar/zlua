@@ -1,7 +1,3 @@
--- evil55.lua
--- Run on CLua 5.5 and zlua. Any mismatch is deliciously suspicious.
--- I have not run this in this chat sandbox, so CLua gets the final say, as always. Rude but fair.
-
 local tests = {}
 
 local function test(name, fn)
@@ -15,7 +11,7 @@ local function expect(cond, msg)
 end
 
 local function must_compile(src, env)
-  local f, err = load(src, "=evil55_chunk", "t", env)
+  local f, err = load(src, "=evil_chunk", "t", env)
   if not f then
     error("expected compile success, got: " .. tostring(err), 2)
   end
@@ -287,7 +283,7 @@ for _, t in ipairs(tests) do
 end
 
 if failures ~= 0 then
-  error(("evil55 found %d failure(s)"):format(failures), 0)
+  error(("evil found %d failure(s)"):format(failures), 0)
 end
 
 print(("all %d evil Lua 5.5 probes passed"):format(#tests))

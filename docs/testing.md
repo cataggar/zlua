@@ -148,29 +148,7 @@ just c-api tests/c-api/coroutines
 
 ## Embedding Examples
 
-Embedding examples live under `examples/embed` and are compiled by `zig build examples`, which is part of `zig build ci`.
-
-Current examples:
-
-```text
-bytecode_roundtrip.zig
-memory_rw_files.zig
-plugin_sandbox.zig
-preload_module.zig
-register_function.zig
-run_script.zig
-typed_host_function.zig
-userdata_counter.zig
-```
-
-Run them with:
-
-```sh
-zig build run-example
-zig build run-example -Dexample=plugin_sandbox
-just example
-just example typed_host_function
-```
+Embedding examples live under `examples/embed` and are compiled by `zig build examples`, which is part of `zig build ci`. They function as API smoke tests; [embedding.md](embedding.md) owns the example list and run commands.
 
 ## Debugging Failures
 
@@ -193,14 +171,4 @@ just c-api --show-build tests/c-api/values/roundtrip.c
 
 ## CI Policy
 
-`zig build ci` currently depends on:
-
-```text
-test
-examples
-test-diff
-test-official
-ci-c-api
-```
-
-The compatibility gate is correctness, not speed. Benchmarks are intentionally manual diagnostics; see [benchmark.md](benchmark.md).
+The compatibility gate is correctness, not speed. `zig build ci` is the aggregate gate for code changes, while benchmarks are intentionally manual diagnostics; see [benchmark.md](benchmark.md).
