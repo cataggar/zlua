@@ -38,34 +38,11 @@ pub fn dump(state: *State, thread: *Thread, op: bytecode.Call) !void {
     if (target != .closure) return state.fail("unable to dump given function");
 
     const strip_debug = (op.arg_count >= 2 and runtime.truthy(runtime.argValue(state, thread, op, 1))) or target.closure.stripped_debug;
-    var debug_payload = std.ArrayList(u8).empty;
-    defer debug_payload.deinit(state.allocator);
-    if (!strip_debug) {
-        try debug_payload.appendSlice(state.allocator, target.closure.proto.source_name);
-        try appendProtoDebugStrings(state.allocator, &debug_payload, target.closure.proto);
-    }
-
     var out = std.ArrayList(u8).empty;
     defer out.deinit(state.allocator);
-    try runtime.appendBinaryChunkHeader(state.allocator, &out);
-    try out.appendSlice(state.allocator, runtime.binary_chunk_payload_magic);
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..8], @intFromPtr(target.closure.proto), .little);
-    try out.appendSlice(state.allocator, bytes[0..8]);
-    std.mem.writeInt(u32, bytes[0..4], @intCast(debug_payload.items.len), .little);
-    try out.appendSlice(state.allocator, bytes[0..4]);
-    try out.appendSlice(state.allocator, debug_payload.items);
+    try runtime.dumpClosureBinary(state.allocator, &out, target.closure, strip_debug);
 
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(out.items) }});
-}
-
-fn appendProtoDebugStrings(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const compile.proto.Proto) !void {
-    for (proto.constants.items) |constant| {
-        if (constant == .string) {
-            try out.appendSlice(allocator, constant.string);
-        }
-    }
-    for (proto.children.items) |child| try appendProtoDebugStrings(allocator, out, child);
 }
 
 pub fn find(state: *State, thread: *Thread, op: bytecode.Call) !void {

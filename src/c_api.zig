@@ -19,7 +19,7 @@ const lua_WarnFunction = ?*const fn (?*anyopaque, ?[*:0]const u8, c_int) callcon
 const lua_Hook = ?*const fn (?*lua_State, ?*lua_Debug) callconv(.c) void;
 const VaList = std.builtin.VaList;
 
-pub export const lua_ident: [18:0]u8 = "zlua C API phase 6".*;
+pub export const lua_ident: [18:0]u8 = "zlua C API phase 7".*;
 
 const LUA_MULTRET: c_int = -1;
 const LUA_OK: c_int = 0;
@@ -73,6 +73,10 @@ const LUA_GCCOUNT: c_int = 3;
 const LUA_GCCOUNTB: c_int = 4;
 const LUA_GCSTEP: c_int = 5;
 const LUA_GCISRUNNING: c_int = 6;
+const LUA_GCGEN: c_int = 7;
+const LUA_GCINC: c_int = 8;
+const LUA_GCPARAM: c_int = 9;
+const LUA_GCPN: c_int = 6;
 
 const Value = union(enum) {
     nil,
@@ -103,10 +107,17 @@ const Value = union(enum) {
 };
 
 const CString = struct {
-    bytes: [:0]u8,
+    bytes: [:0]const u8,
+    external_alloc_f: lua_Alloc = null,
+    external_ud: ?*anyopaque = null,
+    marked: bool = false,
 
     fn deinit(self: *CString, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+        if (self.external_alloc_f) |alloc_f| {
+            _ = alloc_f(self.external_ud, @constCast(self.bytes.ptr), self.bytes.len + 1, 0);
+        } else {
+            allocator.free(self.bytes);
+        }
         allocator.destroy(self);
     }
 };
@@ -279,6 +290,8 @@ const CState = struct {
     userdata: std.ArrayList(*CUserdata) = .empty,
     threads: std.ArrayList(*CThread) = .empty,
     panicf: lua_CFunction = null,
+    warnf: lua_WarnFunction = null,
+    warn_ud: ?*anyopaque = null,
 
     fn allocator(self: *CState) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &lua_allocator_vtable };
@@ -429,6 +442,28 @@ fn createString(state: *CState, bytes: []const u8) ?*CString {
         return null;
     };
     return string;
+}
+
+fn createExternalString(state: *CState, bytes: [:0]const u8, alloc_f: lua_Alloc, ud: ?*anyopaque) ?*CString {
+    const allocator = state.allocator();
+    const string = allocator.create(CString) catch return null;
+    string.* = .{ .bytes = bytes, .external_alloc_f = alloc_f, .external_ud = ud };
+    state.strings.append(allocator, string) catch {
+        allocator.destroy(string);
+        return null;
+    };
+    return string;
+}
+
+fn destroyCString(state: *CState, string: *CString) void {
+    const allocator = state.allocator();
+    for (state.strings.items, 0..) |candidate, index| {
+        if (candidate == string) {
+            _ = state.strings.orderedRemove(index);
+            break;
+        }
+    }
+    string.deinit(allocator);
 }
 
 fn pushStringBytes(thread: *CThread, bytes: []const u8) ?*CString {
@@ -628,6 +663,21 @@ fn appendValueString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), valu
         .thread => |target| try appendFmt(out, allocator, "thread: 0x{x}", .{@intFromPtr(target)}),
         .light_userdata => |ptr| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(ptr)}),
         .lua_closure, .c_closure => try out.appendSlice(allocator, "function"),
+    }
+}
+
+fn appendCNumberString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !bool {
+    switch (value) {
+        .integer => |integer| {
+            try appendFmt(out, allocator, "{d}", .{integer});
+            return true;
+        },
+        .number => |number| {
+            try appendFmt(out, allocator, "{d}", .{number});
+            if (@floor(number) == number and std.math.isFinite(number)) try out.appendSlice(allocator, ".0");
+            return true;
+        },
+        else => return false,
     }
 }
 
@@ -1257,16 +1307,22 @@ fn callMetamethod(thread: *CThread, function: Value, args: []const Value) bool {
 }
 
 fn resetCMarks(state: *CState) void {
+    for (state.strings.items) |string| string.marked = false;
     for (state.tables.items) |table| table.marked = false;
     for (state.userdata.items) |userdata| userdata.marked = false;
 }
 
 fn markCValue(state: *CState, value: Value) void {
     switch (value) {
+        .string => |string| markCString(string),
         .table => |table| markCTable(state, table),
         .userdata => |userdata| markCUserdata(state, userdata),
         else => {},
     }
+}
+
+fn markCString(string: *CString) void {
+    string.marked = true;
 }
 
 fn markCTable(state: *CState, table: *CTable) void {
@@ -1313,6 +1369,20 @@ fn collectCUserdata(thread: *CThread) void {
     markCRoots(thread);
     for (state.userdata.items) |userdata| {
         if (!userdata.marked) finalizeCUserdata(thread, userdata);
+    }
+    sweepCStrings(state);
+}
+
+fn sweepCStrings(state: *CState) void {
+    var index: usize = 0;
+    while (index < state.strings.items.len) {
+        const string = state.strings.items[index];
+        if (string.marked) {
+            index += 1;
+        } else {
+            string.deinit(state.allocator());
+            _ = state.strings.orderedRemove(index);
+        }
     }
 }
 
@@ -1389,6 +1459,7 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
         freeHost(CState, f, ud, state);
         return null;
     };
+    _ = state.runtime_state.switchGcMode(.incremental);
     state.runtime_state.setCClosureDispatch(cClosureDispatch, state);
     state.runtime_state.setCClosureResumeDispatch(cClosureResumeDispatch);
     const runtime_globals = state.runtime_state.newTableWithHints(0, 1) catch {
@@ -1940,8 +2011,13 @@ pub export fn lua_pushlstring(L: ?*lua_State, s: ?[*]const u8, len: usize) callc
     return string.bytes.ptr;
 }
 
-pub export fn lua_pushexternalstring(L: ?*lua_State, s: ?[*]const u8, len: usize, _: lua_Alloc, _: ?*anyopaque) callconv(.c) ?[*:0]const u8 {
-    return lua_pushlstring(L, s, len);
+pub export fn lua_pushexternalstring(L: ?*lua_State, s: ?[*]const u8, len: usize, alloc_f: lua_Alloc, ud: ?*anyopaque) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    const ptr = s orelse return lua_pushlstring(L, null, 0);
+    const bytes: [:0]const u8 = ptr[0..len :0];
+    const string = createExternalString(thread.owner, bytes, alloc_f, ud) orelse return null;
+    if (!pushValue(thread, .{ .string = string })) return null;
+    return string.bytes.ptr;
 }
 
 pub export fn lua_pushstring(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
@@ -2318,8 +2394,16 @@ pub export fn lua_load(L: ?*lua_State, reader: lua_Reader, data: ?*anyopaque, na
     return loadBuffer(thread, source.items, cStringSlice(name), if (mode) |ptr| std.mem.span(ptr) else null);
 }
 
-pub export fn lua_dump(_: ?*lua_State, _: lua_Writer, _: ?*anyopaque, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_dump(L: ?*lua_State, writer: lua_Writer, data: ?*anyopaque, strip: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 1;
+    const write_fn = writer orelse return 1;
+    const value = valueAt(thread, -1) orelse return 1;
+    if (value != .lua_closure) return 1;
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(thread.owner.allocator());
+    runtime.dumpClosureBinary(thread.owner.allocator(), &out, value.lua_closure, strip != 0) catch return 1;
+    return write_fn(L, out.items.ptr, out.items.len, data);
 }
 
 pub export fn lua_yieldk(L: ?*lua_State, nresults: c_int, ctx: lua_KContext, k: lua_KFunction) callconv(.c) c_int {
@@ -2402,22 +2486,76 @@ pub export fn lua_isyieldable(L: ?*lua_State) callconv(.c) c_int {
     return if (thread != &thread.owner.main_thread and !thread.dead) 1 else 0;
 }
 
-pub export fn lua_setwarnf(_: ?*lua_State, _: lua_WarnFunction, _: ?*anyopaque) callconv(.c) void {}
-pub export fn lua_warning(_: ?*lua_State, _: ?[*:0]const u8, _: c_int) callconv(.c) void {}
+pub export fn lua_setwarnf(L: ?*lua_State, warnf: lua_WarnFunction, ud: ?*anyopaque) callconv(.c) void {
+    const state = stateFromThread(L) orelse return;
+    state.warnf = warnf;
+    state.warn_ud = ud;
+}
+
+pub export fn lua_warning(L: ?*lua_State, msg: ?[*:0]const u8, tocont: c_int) callconv(.c) void {
+    const state = stateFromThread(L) orelse return;
+    const warnf = state.warnf orelse return;
+    warnf(state.warn_ud, msg, tocont);
+}
 
 pub export fn lua_gc(L: ?*lua_State, what: c_int, ...) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return 0;
+    var args = @cVaStart();
+    defer @cVaEnd(&args);
     switch (what) {
+        LUA_GCSTOP => {
+            thread.owner.runtime_state.stopGc();
+            return 0;
+        },
+        LUA_GCRESTART => {
+            thread.owner.runtime_state.restartGc();
+            return 0;
+        },
         LUA_GCCOLLECT => {
             collectCUserdata(thread);
             thread.owner.runtime_state.collectGarbage() catch {};
             return 0;
         },
-        LUA_GCSTOP, LUA_GCRESTART, LUA_GCSTEP => return 0,
-        LUA_GCCOUNT, LUA_GCCOUNTB => return 0,
-        LUA_GCISRUNNING => return 1,
-        else => return 0,
+        LUA_GCCOUNT => return @intCast(thread.owner.runtime_state.allocationByteCount() >> 10),
+        LUA_GCCOUNTB => return @intCast(thread.owner.runtime_state.allocationByteCount() & 0x3ff),
+        LUA_GCSTEP => {
+            const budget: i64 = @intCast(@cVaArg(&args, usize));
+            const complete = thread.owner.runtime_state.collectGarbageStepPublic(budget) catch false;
+            collectCUserdata(thread);
+            return if (complete) 1 else 0;
+        },
+        LUA_GCISRUNNING => return if (thread.owner.runtime_state.gcIsRunning()) 1 else 0,
+        LUA_GCGEN => return switch (thread.owner.runtime_state.switchGcMode(.generational)) {
+            .incremental => LUA_GCINC,
+            .generational => LUA_GCGEN,
+        },
+        LUA_GCINC => return switch (thread.owner.runtime_state.switchGcMode(.incremental)) {
+            .incremental => LUA_GCINC,
+            .generational => LUA_GCGEN,
+        },
+        LUA_GCPARAM => {
+            const param_raw = @cVaArg(&args, c_int);
+            const value = @cVaArg(&args, c_int);
+            const param = gcParamFromInt(param_raw) orelse return -1;
+            const old = thread.owner.runtime_state.gcParam(param);
+            if (value >= 0) thread.owner.runtime_state.setGcParam(param, value);
+            return @intCast(old);
+        },
+        else => return -1,
     }
+}
+
+fn gcParamFromInt(param: c_int) ?runtime.GcParam {
+    if (param < 0 or param >= LUA_GCPN) return null;
+    return switch (param) {
+        0 => .minormul,
+        1 => .majorminor,
+        2 => .minormajor,
+        3 => .pause,
+        4 => .stepmul,
+        5 => .stepsize,
+        else => null,
+    };
 }
 
 pub export fn lua_error(L: ?*lua_State) callconv(.c) c_int {
@@ -2478,27 +2616,41 @@ pub export fn lua_numbertocstring(L: ?*lua_State, idx: c_int, buff: ?[*]u8) call
     }
     var out = std.ArrayList(u8).empty;
     defer out.deinit(thread.owner.allocator());
-    appendValueString(thread.owner.allocator(), &out, value) catch return 0;
+    if (!(appendCNumberString(thread.owner.allocator(), &out, value) catch return 0)) return 0;
     if (buff) |ptr| {
         @memcpy(ptr[0..out.items.len], out.items);
         ptr[out.items.len] = 0;
     }
-    return @intCast(out.items.len);
+    return @intCast(out.items.len + 1);
 }
 
 pub export fn lua_stringtonumber(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) usize {
     const thread = threadFromState(L) orelse return 0;
     const text = cStringSlice(s);
-    const trimmed = std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
-    if (trimmed.len != text.len) return 0;
-    if (std.fmt.parseInt(lua_Integer, text, 10)) |integer| {
+    const trimmed_left = trimLeftAscii(text, " \t\n\r\x0b\x0c");
+    if (trimmed_left.len == 0) return 0;
+    const number_text = trimRightAscii(trimmed_left, " \t\n\r\x0b\x0c");
+    if (number_text.len == 0) return 0;
+    if (std.fmt.parseInt(lua_Integer, number_text, 10)) |integer| {
         _ = pushValue(thread, .{ .integer = integer });
         return text.len + 1;
     } else |_| {}
-    if (std.fmt.parseFloat(lua_Number, text)) |number| {
+    if (std.fmt.parseFloat(lua_Number, number_text)) |number| {
         _ = pushValue(thread, .{ .number = number });
         return text.len + 1;
     } else |_| return 0;
+}
+
+fn trimLeftAscii(value: []const u8, values_to_strip: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < value.len and std.mem.indexOfScalar(u8, values_to_strip, value[start]) != null) start += 1;
+    return value[start..];
+}
+
+fn trimRightAscii(value: []const u8, values_to_strip: []const u8) []const u8 {
+    var end = value.len;
+    while (end > 0 and std.mem.indexOfScalar(u8, values_to_strip, value[end - 1]) != null) end -= 1;
+    return value[0..end];
 }
 
 pub export fn lua_getallocf(L: ?*lua_State, ud: ?*?*anyopaque) callconv(.c) lua_Alloc {
@@ -2512,6 +2664,7 @@ pub export fn lua_getallocf(L: ?*lua_State, ud: ?*?*anyopaque) callconv(.c) lua_
 
 pub export fn lua_setallocf(L: ?*lua_State, alloc_f: lua_Alloc, ud: ?*anyopaque) callconv(.c) void {
     const state = stateFromThread(L) orelse return;
+    _ = alloc_f orelse return;
     state.alloc_f = alloc_f;
     state.alloc_ud = ud;
 }
@@ -2782,6 +2935,7 @@ extern fn ftell(?*anyopaque) c_long;
 extern fn rewind(?*anyopaque) void;
 extern fn fread(?*anyopaque, usize, usize, ?*anyopaque) usize;
 extern fn fclose(?*anyopaque) c_int;
+extern fn write(c_int, ?*const anyopaque, usize) isize;
 
 pub export fn luaL_alloc(_: ?*anyopaque, ptr: ?*anyopaque, _: usize, nsize: usize) callconv(.c) ?*anyopaque {
     if (nsize == 0) {
@@ -2853,7 +3007,42 @@ pub export fn luaL_loadstring(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) c_
 }
 
 pub export fn luaL_newstate() callconv(.c) ?*lua_State {
-    return lua_newstate(luaL_alloc, null, 0);
+    const L = lua_newstate(luaL_alloc, null, 0) orelse return null;
+    lua_setwarnf(L, warnOn, L);
+    return L;
+}
+
+fn warnOff(ud: ?*anyopaque, msg: ?[*:0]const u8, tocont: c_int) callconv(.c) void {
+    const L: ?*lua_State = if (ud) |ptr| @ptrCast(@alignCast(ptr)) else null;
+    if (isWarningControl(msg, tocont, "on")) lua_setwarnf(L, warnOn, L);
+}
+
+fn warnOn(ud: ?*anyopaque, msg: ?[*:0]const u8, tocont: c_int) callconv(.c) void {
+    const L: ?*lua_State = if (ud) |ptr| @ptrCast(@alignCast(ptr)) else null;
+    if (isWarningControl(msg, tocont, "off")) {
+        lua_setwarnf(L, warnOff, L);
+        return;
+    }
+    _ = write(2, zstr("Lua warning: "), 13);
+    warnContinue(ud, msg, tocont);
+}
+
+fn warnContinue(ud: ?*anyopaque, msg: ?[*:0]const u8, tocont: c_int) callconv(.c) void {
+    const L: ?*lua_State = if (ud) |ptr| @ptrCast(@alignCast(ptr)) else null;
+    const text = cStringSlice(msg);
+    if (text.len != 0) _ = write(2, text.ptr, text.len);
+    if (tocont != 0) {
+        lua_setwarnf(L, warnContinue, L);
+    } else {
+        _ = write(2, zstr("\n"), 1);
+        lua_setwarnf(L, warnOn, L);
+    }
+}
+
+fn isWarningControl(msg: ?[*:0]const u8, tocont: c_int, comptime command: []const u8) bool {
+    if (tocont != 0) return false;
+    const text = cStringSlice(msg);
+    return text.len == command.len + 1 and text[0] == '@' and std.mem.eql(u8, text[1..], command);
 }
 
 pub export fn luaL_makeseed(_: ?*lua_State) callconv(.c) c_uint {

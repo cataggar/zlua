@@ -290,6 +290,32 @@ pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList
     try out.appendSlice(allocator, bytes[0..8]);
 }
 
+pub fn dumpClosureBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), closure: *const Closure, strip_debug: bool) !void {
+    const strip = strip_debug or closure.stripped_debug;
+    var debug_payload = std.ArrayList(u8).empty;
+    defer debug_payload.deinit(allocator);
+    if (!strip) {
+        try debug_payload.appendSlice(allocator, closure.proto.source_name);
+        try appendProtoDebugStrings(allocator, &debug_payload, closure.proto);
+    }
+
+    try appendBinaryChunkHeader(allocator, out);
+    try out.appendSlice(allocator, binary_chunk_payload_magic);
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], @intFromPtr(closure.proto), .little);
+    try out.appendSlice(allocator, bytes[0..8]);
+    std.mem.writeInt(u32, bytes[0..4], @intCast(debug_payload.items.len), .little);
+    try out.appendSlice(allocator, bytes[0..4]);
+    try out.appendSlice(allocator, debug_payload.items);
+}
+
+fn appendProtoDebugStrings(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const proto_mod.Proto) !void {
+    for (proto.constants.items) |constant| {
+        if (constant == .string) try out.appendSlice(allocator, constant.string);
+    }
+    for (proto.children.items) |child| try appendProtoDebugStrings(allocator, out, child);
+}
+
 fn appendHeaderInt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64, size: usize) !void {
     var bytes: [8]u8 = undefined;
     const unsigned: u64 = @bitCast(value);
@@ -615,7 +641,7 @@ const StringAllocation = struct {
     marked: bool = false,
 };
 
-const GcMode = enum {
+pub const GcMode = enum {
     incremental,
     generational,
 
@@ -627,7 +653,7 @@ const GcMode = enum {
     }
 };
 
-const GcParam = enum {
+pub const GcParam = enum {
     minormul,
     majorminor,
     minormajor,
@@ -4157,6 +4183,40 @@ pub const State = struct {
 
     pub fn collectGarbage(self: *State) !void {
         try self.collectGarbageWithFinalizers(self.current_thread);
+    }
+
+    pub fn collectGarbageStepPublic(self: *State, budget: i64) !bool {
+        return self.collectGarbageStep(self.current_thread, budget);
+    }
+
+    pub fn allocationByteCount(self: State) usize {
+        return self.allocationStats().total();
+    }
+
+    pub fn gcIsRunning(self: State) bool {
+        return self.gc_running;
+    }
+
+    pub fn stopGc(self: *State) void {
+        self.gc_running = false;
+    }
+
+    pub fn restartGc(self: *State) void {
+        self.gc_running = true;
+    }
+
+    pub fn switchGcMode(self: *State, mode: GcMode) GcMode {
+        const old = self.gc_mode;
+        self.gc_mode = mode;
+        return old;
+    }
+
+    pub fn gcParam(self: State, param: GcParam) i64 {
+        return self.gc_params.get(param);
+    }
+
+    pub fn setGcParam(self: *State, param: GcParam, value: i64) void {
+        self.gc_params.set(param, value);
     }
 
     fn collectGarbageConservatively(self: *State, thread: ?*Thread) !void {
