@@ -1,7 +1,12 @@
 pub const host = @import("host.zig");
+pub const state = @import("state.zig");
 pub const types = @import("types.zig");
 pub const value = @import("value.zig");
 pub const chunk = @import("chunk.zig");
+
+pub const State = state.State;
+pub const StateOptions = state.StateOptions;
+pub const StdlibMode = state.StdlibMode;
 
 pub const MemoryFile = host.MemoryFile;
 pub const MemoryFilesystem = host.MemoryFilesystem;
