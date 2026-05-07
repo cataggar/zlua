@@ -30,61 +30,61 @@ Category summary:
 
 | Category | Count | Median Ratio | Worst Ratio |
 | --- | ---: | ---: | ---: |
-| gc | 5 | 17.63x | 55.01x |
-| stdlib | 4 | 3.73x | 11.80x |
-| string | 5 | 7.39x | 22.08x |
-| table | 6 | 24.98x | 61.43x |
-| vm | 6 | 19.91x | 33.81x |
+| gc | 5 | 3.28x | 6.46x |
+| stdlib | 4 | 1.34x | 3.51x |
+| string | 5 | 1.89x | 3.35x |
+| table | 6 | 3.84x | 4.84x |
+| vm | 6 | 3.45x | 6.50x |
 
 Full baseline:
 
 | Benchmark | Category | CLua Mean | zlua Mean | Ratio |
 | --- | --- | ---: | ---: | ---: |
-| `gc/collectgarbage_cycles.lua` | gc | 8.3ms | 311.8ms | 37.13x |
-| `gc/retained_graph.lua` | gc | 0.7ms | 40.8ms | 55.01x |
-| `gc/short_lived_closures.lua` | gc | 2.8ms | 28.5ms | 9.96x |
-| `gc/short_lived_strings.lua` | gc | 5.2ms | 44.6ms | 8.46x |
-| `gc/short_lived_tables.lua` | gc | 4.8ms | 85.9ms | 17.63x |
-| `stdlib/math_loop.lua` | stdlib | 3.2ms | 38.1ms | 11.80x |
-| `stdlib/table_concat.lua` | stdlib | 47.4ms | 58.4ms | 1.23x |
-| `stdlib/table_sort.lua` | stdlib | 2.7ms | 11.5ms | 4.21x |
-| `stdlib/utf8_codes.lua` | stdlib | 0.7ms | 2.5ms | 3.26x |
-| `string/concat_growth.lua` | string | 1.2ms | 6.5ms | 5.13x |
-| `string/find_pattern.lua` | string | 2.2ms | 16.8ms | 7.39x |
-| `string/find_plain.lua` | string | 1.8ms | 40.6ms | 22.08x |
-| `string/gsub_replace.lua` | string | 19.1ms | 87.5ms | 4.56x |
-| `string/sub_loop.lua` | string | 2.4ms | 30.9ms | 12.41x |
-| `table/array_append.lua` | table | 2.0ms | 38.4ms | 18.98x |
-| `table/array_reads.lua` | table | 2.1ms | 69.5ms | 33.00x |
-| `table/array_writes.lua` | table | 2.5ms | 79.7ms | 30.98x |
-| `table/metatable_index.lua` | table | 2.4ms | 39.1ms | 15.78x |
-| `table/pairs_iteration.lua` | table | 6.1ms | 379.7ms | 61.43x |
-| `table/string_keys.lua` | table | 1.4ms | 12.9ms | 8.72x |
-| `vm/arithmetic.lua` | vm | 0.6ms | 4.5ms | 6.71x |
-| `vm/comparison_branch.lua` | vm | 1.7ms | 56.6ms | 31.83x |
-| `vm/float_arithmetic.lua` | vm | 1.0ms | 19.1ms | 19.09x |
-| `vm/function_calls.lua` | vm | 1.9ms | 40.9ms | 20.72x |
-| `vm/locals.lua` | vm | 1.9ms | 66.2ms | 33.81x |
-| `vm/upvalues.lua` | vm | 2.0ms | 37.4ms | 18.40x |
+| `gc/collectgarbage_cycles.lua` | gc | 8.3ms | 54.2ms | 6.46x |
+| `gc/retained_graph.lua` | gc | 0.7ms | 1.0ms | 1.47x |
+| `gc/short_lived_closures.lua` | gc | 2.8ms | 7.9ms | 2.79x |
+| `gc/short_lived_strings.lua` | gc | 5.4ms | 17.8ms | 3.28x |
+| `gc/short_lived_tables.lua` | gc | 4.8ms | 21.0ms | 4.29x |
+| `stdlib/math_loop.lua` | stdlib | 3.2ms | 11.2ms | 3.51x |
+| `stdlib/table_concat.lua` | stdlib | 47.4ms | 45.4ms | 0.95x |
+| `stdlib/table_sort.lua` | stdlib | 2.5ms | 3.5ms | 1.39x |
+| `stdlib/utf8_codes.lua` | stdlib | 0.7ms | 0.9ms | 1.28x |
+| `string/concat_growth.lua` | string | 1.7ms | 3.0ms | 1.75x |
+| `string/find_pattern.lua` | string | 2.2ms | 7.6ms | 3.35x |
+| `string/find_plain.lua` | string | 2.8ms | 4.4ms | 1.57x |
+| `string/gsub_replace.lua` | string | 20.2ms | 38.5ms | 1.89x |
+| `string/sub_loop.lua` | string | 2.4ms | 7.6ms | 3.16x |
+| `table/array_append.lua` | table | 1.8ms | 7.3ms | 3.89x |
+| `table/array_reads.lua` | table | 2.9ms | 14.2ms | 4.84x |
+| `table/array_writes.lua` | table | 3.2ms | 15.2ms | 4.63x |
+| `table/metatable_index.lua` | table | 2.3ms | 8.8ms | 3.79x |
+| `table/pairs_iteration.lua` | table | 6.5ms | 11.6ms | 1.79x |
+| `table/string_keys.lua` | table | 1.3ms | 3.9ms | 2.87x |
+| `vm/arithmetic.lua` | vm | 0.9ms | 1.1ms | 1.15x |
+| `vm/comparison_branch.lua` | vm | 1.7ms | 11.5ms | 6.50x |
+| `vm/float_arithmetic.lua` | vm | 1.6ms | 5.1ms | 3.22x |
+| `vm/function_calls.lua` | vm | 2.6ms | 9.6ms | 3.68x |
+| `vm/locals.lua` | vm | 1.8ms | 11.2ms | 6.16x |
+| `vm/upvalues.lua` | vm | 4.1ms | 10.3ms | 2.49x |
 
 ## Interpretation
 
-The strongest signal is not a single isolated benchmark. It is that table and VM basics are much slower across several independent fixtures:
+The strongest signal is no longer a single catastrophic category gap. The benchmark suite now shows smaller but still broad overhead in ordinary VM and table paths, with GC allocation-heavy cases still visible.
 
 | Area | Signal | Initial Read |
 | --- | --- | --- |
-| Table iteration | `table/pairs_iteration.lua` at 61.43x | Highest priority because iteration is a common Lua workload and likely exercises table layout, `next`, string keys, and VM loop overhead together. |
-| Table indexed access | array reads and writes at 33.00x and 30.98x | Suggests ordinary get/set paths need fast-path analysis before table representation changes. |
-| VM dispatch/register traffic | locals and branch loops at 33.81x and 31.83x | Suggests the main interpreter loop and register access overhead are material even without complex objects. |
-| GC retained graph | 55.01x | Suggests collector marking/tracking overhead matters beyond allocation rate alone. |
-| Explicit GC cycles | 37.13x | Suggests `collectgarbage` behavior and accounting are expensive enough to investigate separately from normal allocation pacing. |
-| String plain find | 22.08x | Suggests string library hot loops or matcher setup need profiling independent of VM/table work. |
+| VM conditionals | `vm/comparison_branch.lua` at 6.50x | Highest priority because it mixes common integer arithmetic, comparisons, boolean materialization, and branch dispatch. |
+| VM register traffic | `vm/locals.lua` at 6.16x | Suggests the main interpreter loop still pays material overhead for frame/base/stack access and helper calls. |
+| Table indexed access | array reads and writes at 4.84x and 4.63x | Suggests ordinary table get/set paths need direct fast paths before deeper representation changes. |
+| Short-lived tables | `gc/short_lived_tables.lua` at 4.29x | Likely combines table construction, raw array/hash fill, allocator pressure, and collector accounting. |
+| Explicit GC cycles | `gc/collectgarbage_cycles.lua` at 6.46x | Suggests full collection remains expensive and should be treated separately from normal allocation pacing. |
+| String pattern search | `string/find_pattern.lua` at 3.35x | Still worth isolating, but it is no longer the dominant project versus VM/table work. |
 
-`stdlib/table_concat.lua` at 1.23x is an important counterexample: not every library path is currently dominated by interpreter overhead. Keep this benchmark as a guard against broad assumptions.
+`stdlib/table_concat.lua` at 0.95x and `vm/arithmetic.lua` at 1.15x are important counterexamples: not every path is dominated by interpreter dispatch. Keep these benchmarks as guards against broad assumptions.
 
 ## Scope
 
-Milestone 24 should cover four workstreams.
+Milestone 24 should cover five workstreams.
 
 ### 1. Measurement And Attribution
 
@@ -120,12 +120,14 @@ Priority order:
 
 | Priority | Area | Why |
 | --- | --- | --- |
-| P0 | VM fast path | `vm/locals`, `vm/comparison_branch`, and function-call loops show large overhead without table-heavy behavior. |
-| P0 | Table get/set/iteration | Table benchmarks are the worst category and table access is central to Lua programs. |
-| P1 | GC accounting and marking | GC benchmarks show both retained-object and explicit-cycle gaps. |
-| P1 | Call/return allocation | `vm/function_calls` and `vm/upvalues` are slow enough to justify examining frame and return handling. |
-| P2 | String search and pattern paths | `string/find_plain` is much slower than related string workloads and should be isolated. |
-| P2 | Compiler/register allocation | Only after runtime hot-path attribution shows compiler output is the limiting factor. |
+| P0 | VM fast paths | `vm/locals` and `vm/comparison_branch` are the largest non-GC signals and exercise core interpreter overhead. |
+| P0 | Table array get/set | `table/array_reads`, `table/array_writes`, and `table/array_append` remain broad hot paths for normal Lua code. |
+| P0 | Conditional branch lowering | Current compiler output materializes many branch conditions into registers before `test_op`; compare-and-branch bytecode may reduce instruction count. |
+| P1 | Fresh table construction and raw fill | Short-lived table benchmarks likely pay both general metamethod paths and collector pressure. |
+| P1 | GC accounting and collection model | `collectgarbage_cycles` remains the worst GC fixture, but a full generational rewrite should follow smaller attribution work. |
+| P1 | Call/return allocation | `vm/function_calls` is still slower enough to justify examining frame and return handling after register/table work. |
+| P2 | String search and pattern paths | Pattern and substring loops still lag, but they are lower-value than core VM/table costs in this snapshot. |
+| P2 | Value representation | NaN boxing may help stack/table density later, but it is a wide API/runtime change and should be driven by post-fast-path profiles. |
 
 Likely runtime hot spots to inspect:
 
@@ -145,8 +147,11 @@ Candidate performance projects:
 ```text
 split a hook/limit/debug-capable VM loop from a plain fast loop
 cache frame base, stack slice, and current proto data in the dispatch loop
+inline fast integer arithmetic and comparison paths in the dispatch loop
+add compare-and-branch bytecode or a compileCondition path for if/while/repeat
 add raw fast paths for plain table array and string-key access
 avoid double lookup in common table set paths
+use raw array/hash fill for fresh table constructors before exposing the table
 cache interned string hashes or add pointer fast paths for interned strings
 replace linear object tracking checks with object headers or side maps
 maintain running allocation counters instead of scanning all allocations
@@ -154,9 +159,21 @@ avoid heap allocation for common fixed return and vararg paths
 specialize simple string.find and string.gsub cases before pattern backtracking
 ```
 
-Packed bytecode, threaded dispatch, and larger table rewrites should come after the smaller fast-path and accounting work has been measured. They are likely useful but carry more regression risk.
+### 3. Larger Runtime Projects
 
-### 3. Hardening And Resource Limits
+Several larger projects are plausible, but they should follow the P0 fast-path work unless profiling proves otherwise.
+
+| Project | Current Recommendation | Reason |
+| --- | --- | --- |
+| Lua 5.5-style generational GC | Defer until after allocation accounting and table/closure allocation hot paths are measured. | The current `generational` mode is API-compatible surface over full reset/mark/sweep behavior, and true young/old collection touches weak tables, finalizers, write barriers, threads, strings, and API roots. |
+| NaN-boxed values | Defer until VM/table fast paths are exhausted. | It can improve stack/table density, but it changes the central `Value` representation and all API/C API conversion paths. |
+| Jump-table or threaded dispatch | Defer for now. | `vm/arithmetic.lua` is already close to CLua, so raw opcode dispatch is probably not the dominant bottleneck yet. |
+| Packed bytecode | Defer until instruction-count and cache profiles justify it. | It is likely useful, but current evidence points first to helper calls, branch lowering, table paths, and allocation/GC behavior. |
+| Table representation rewrite | Defer unless targeted array/string-key fast paths plateau. | The existing split array/hash structure can still support cheaper common-case access before a full layout rewrite. |
+
+Packed bytecode, threaded dispatch, NaN boxing, generational GC, and larger table rewrites are likely useful long-term, but they carry more regression risk than the next VM/table fast-path projects.
+
+### 4. Hardening And Resource Limits
 
 Hardening should happen alongside performance work because many optimizations touch the same dangerous edges: stacks, GC roots, limits, host capabilities, and error unwinding.
 
@@ -198,7 +215,7 @@ verify protected calls restore stack, frames, pending returns, current error, an
 add small-memory and small-stack modes to the differential or official harness once semantics are stable
 ```
 
-### 4. Regression Tracking
+### 5. Regression Tracking
 
 Benchmarks should not be compatibility gates in this milestone. Correctness gates stay differential, official, unit, and embedding tests.
 
