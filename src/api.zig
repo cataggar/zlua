@@ -31,6 +31,7 @@ pub const Stdlib = enum {
 };
 
 pub const MemoryFile = runtime.MemoryFile;
+pub const MemoryFilesystem = runtime.MemoryFilesystem;
 
 pub const IoCapability = struct {
     runtime: ?std.Io = null,
@@ -259,6 +260,10 @@ pub const State = struct {
     pub fn addMemoryFile(self: *State, path: []const u8, contents: []const u8) !void {
         switch (self.raw_state.options.filesystem) {
             .disabled, .memory => {},
+            .memory_rw => |filesystem| {
+                try filesystem.writeFile(path, contents);
+                return;
+            },
             .host_cwd => return error.UnsupportedOption,
         }
 
@@ -1706,6 +1711,62 @@ test "api full stdlib still denies ambient host access by default" {
         \\local ok_file, file_err = pcall(dofile, 'missing.lua')
         \\assert(ok_file == false and tostring(file_err):find('filesystem access disabled'))
     , .{ .name = "=api-21.6-safe-host-access" });
+}
+
+test "api os filesystem mutations respect filesystem capability" {
+    const files = [_]MemoryFile{
+        .{ .path = "keep.lua", .contents = "return 42" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local removed, remove_err = os.remove('keep.lua')
+        \\assert(removed == nil and tostring(remove_err):find('filesystem write access disabled'))
+        \\local renamed, rename_err = os.rename('keep.lua', 'gone.lua')
+        \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
+        \\assert(dofile('keep.lua') == 42)
+    , .{ .name = "=api-21.6-os-fs-capability" });
+}
+
+test "api writable memory filesystem supports Lua writes and mutations" {
+    var filesystem = MemoryFilesystem.init(std.testing.allocator);
+    defer filesystem.deinit();
+    try filesystem.writeFile("seed.lua", "return 'seed'");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory_rw = &filesystem } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\assert(dofile('seed.lua') == 'seed')
+        \\local file = assert(io.open('generated.lua', 'w'))
+        \\assert(file:write("return 'generated'"))
+        \\assert(file:close())
+        \\assert(dofile('generated.lua') == 'generated')
+        \\local log = assert(io.open('log.txt', 'w'))
+        \\assert(log:write('alpha'))
+        \\assert(log:close())
+        \\log = assert(io.open('log.txt', 'a'))
+        \\assert(log:write(' beta'))
+        \\assert(log:close())
+        \\local read = assert(io.open('log.txt', 'r'))
+        \\assert(read:read('*a') == 'alpha beta')
+        \\assert(read:close())
+        \\assert(os.rename('generated.lua', 'renamed.lua'))
+        \\assert(dofile('renamed.lua') == 'generated')
+        \\assert(os.remove('renamed.lua'))
+        \\assert(loadfile('renamed.lua') == nil)
+    , .{ .name = "=api-21.6-memory-rw" });
+
+    const log = try filesystem.readFileAlloc(std.testing.allocator, "log.txt");
+    defer std.testing.allocator.free(log);
+    try std.testing.expectEqualStrings("alpha beta", log);
 }
 
 test "api custom stdout captures print and io writes" {

@@ -78,6 +78,28 @@ try lua.setPackagePath("plugins/?.lua");
 try lua.doString("assert(require('mathx').double(21) == 42)", .{ .name = "=require" });
 ```
 
+Use `MemoryFilesystem` with `.memory_rw` when Lua code should be able to create, update, remove, or rename files without touching the host filesystem:
+
+```zig
+var filesystem = zlua.MemoryFilesystem.init(allocator);
+defer filesystem.deinit();
+
+var lua = try zlua.State.init(allocator, .{
+    .stdlib = .full,
+    .capabilities = .{ .filesystem = .{ .memory_rw = &filesystem } },
+});
+defer lua.deinit();
+
+try lua.doString(
+    \\local file = assert(io.open('report.txt', 'w'))
+    \\assert(file:write('ok'))
+    \\assert(file:close())
+, .{ .name = "=write-report" });
+
+const report = try filesystem.readFileAlloc(allocator, "report.txt");
+defer allocator.free(report);
+```
+
 ## Limits
 
 Public options include memory, instruction, stack value, and call frame limits:
@@ -437,6 +459,7 @@ Embedding examples live under `examples/embed`:
 examples/embed/run_script.zig
 examples/embed/register_function.zig
 examples/embed/plugin_sandbox.zig
+examples/embed/memory_rw_files.zig
 examples/embed/userdata_counter.zig
 examples/embed/preload_module.zig
 ```

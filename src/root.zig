@@ -21,6 +21,8 @@ pub const Tuple = api.Tuple;
 pub const HostFn = api.HostFn;
 pub const Userdata = api.Userdata;
 pub const AnyUserdata = api.AnyUserdata;
+pub const MemoryFile = api.MemoryFile;
+pub const MemoryFilesystem = api.MemoryFilesystem;
 
 test {
     _ = frontend;

@@ -43,10 +43,14 @@ pub fn date(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn remove(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const path = try state.expectArgumentString(thread, op, "os.remove", 0);
-    const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
-    std.Io.Dir.cwd().deleteFile(io, path) catch {
-        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot remove file") }, .{ .integer = 2 } });
-        return;
+    state.removeFile(path) catch |err| switch (err) {
+        error.RuntimeError => {
+            const error_value = state.currentErrorValue();
+            const message = if (error_value == .string) error_value.string else "cannot remove file";
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) }, .{ .integer = 2 } });
+            return;
+        },
+        else => return err,
     };
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
 }
@@ -54,10 +58,14 @@ pub fn remove(state: *State, thread: *Thread, op: bytecode.Call) !void {
 pub fn rename(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const old_path = try state.expectArgumentString(thread, op, "os.rename", 0);
     const new_path = try state.expectArgumentString(thread, op, "os.rename", 1);
-    const io = state.options.io orelse return state.fail("filesystem I/O unavailable");
-    std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, io) catch {
-        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("cannot rename file") }, .{ .integer = 2 } });
-        return;
+    state.renameFile(old_path, new_path) catch |err| switch (err) {
+        error.RuntimeError => {
+            const error_value = state.currentErrorValue();
+            const message = if (error_value == .string) error_value.string else "cannot rename file";
+            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern(message) }, .{ .integer = 2 } });
+            return;
+        },
+        else => return err,
     };
     try state.returnValues(thread, op.base, op.return_count, &.{.{ .boolean = true }});
 }
