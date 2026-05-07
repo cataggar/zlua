@@ -4,6 +4,41 @@ zlua is a Zig implementation of Lua 5.5. It is built around the same surfaces Lu
 
 The project targets Zig `0.16.0`.
 
+## Example
+
+zlua can run as a CLI, but its main shape is an embeddable Lua runtime where the host decides what Lua can see:
+
+```zig
+const std = @import("std");
+const zlua = @import("zlua");
+
+pub fn main() !void {
+    const allocator = std.heap.smp_allocator;
+
+    var lua = try zlua.State.init(allocator, .{});
+    defer lua.deinit();
+
+    var host_add = try lua.registerTyped("host_add", hostAdd);
+    defer host_add.deinit();
+    try lua.setGlobal("host_add", host_add);
+
+    var chunk = try lua.loadString(
+        \\local name = ...
+        \\return name .. " sees " .. host_add(20, 22)
+    , .{ .name = "=readme" });
+    defer chunk.deinit();
+
+    const message = try chunk.call(.{"Lua"}, []const u8);
+    std.debug.print("{s}\n", .{message});
+}
+
+fn hostAdd(lhs: i64, rhs: i64) i64 {
+    return lhs + rhs;
+}
+```
+
+The default state opens safe standard libraries with sandboxed host capabilities. Hosts can opt into filesystem, output, clock, process, bytecode, callbacks, userdata, and resource-limit behavior through the API documented in [docs/embedding.md](docs/embedding.md).
+
 ## Project Goals
 
 zlua is compatibility-driven. The official Lua 5.5 C implementation is the behavioral oracle for parser acceptance, runtime semantics, standard-library behavior, diagnostics, and C API behavior.
@@ -50,24 +85,6 @@ Compatibility work is tested at several levels instead of relying on isolated ex
 | C API fixtures | Lua C API behavior compared through a separate C-facing harness. |
 
 See [docs/testing.md](docs/testing.md) for the full test policy and command reference.
-
-## Embedding
-
-Zig hosts use `zlua.State` as the public embedding entry point:
-
-```zig
-const std = @import("std");
-const zlua = @import("zlua");
-
-pub fn main() !void {
-    var lua = try zlua.State.init(std.heap.smp_allocator, .{});
-    defer lua.deinit();
-
-    try lua.doString("assert(_VERSION == 'Lua 5.5')", .{ .name = "=main" });
-}
-```
-
-The embedding API defaults to safe standard libraries and sandboxed host capabilities. Hosts can opt into additional libraries, expose native callbacks, attach userdata, load bytecode, and configure resource limits through the API documented in [docs/embedding.md](docs/embedding.md).
 
 ## Documentation
 
