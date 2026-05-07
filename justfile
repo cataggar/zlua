@@ -28,13 +28,13 @@ test:
 ci:
     {{zig}} build ci
 
-# Run all embedding examples, or one by file name.
-example name='':
-    @if [ -z "{{name}}" ]; then {{zig}} build run-example; else {{zig}} build run-example -Dexample="{{name}}"; fi
+# Run all embedding examples, or selected examples by file name.
+example *args:
+    {{zig}} build run-example -- {{args}}
 
 # Format Zig sources.
 fmt:
-    {{zig}} fmt build.zig src/*.zig src/testing/*.zig examples/embed/*.zig
+    {{zig}} fmt build.zig src/*.zig src/testing/*.zig examples/*.zig
 
 # Run zlua through the Zig build runner.
 run *args:

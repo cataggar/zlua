@@ -2,8 +2,6 @@
 
 zlua is a source-compatible Lua 5.5 implementation written in Zig. It has a conventional frontend/compiler/runtime split, but the most important architectural choice is that compatibility is oracle-driven: the official Lua 5.5 C implementation is the behavioral source of truth for parser acceptance, runtime semantics, standard-library behavior, error paths, and C API behavior.
 
-This document describes how the implementation fits together. It intentionally focuses on ownership, data flow, subsystem boundaries, and invariants instead of just listing files.
-
 ## System Shape
 
 The project has five major runtime-facing surfaces:
@@ -31,7 +29,7 @@ The testing and benchmark harnesses are first-class build artifacts, not externa
 | `zlua-test-bench` | `src/test_bench_main.zig` | Process-level benchmark runner. |
 | `zlua-c` | `src/c_api.zig` | Static Lua C API compatibility library. |
 | `zlua-test-c-api` | `src/test_c_api_main.zig` | C API differential fixture runner. |
-| `zlua-embed-*` | `examples/embed/*.zig` | Zig embedding examples. |
+| `zlua-embed-*` | `examples/*.zig` | Zig embedding examples. |
 
 Testing policy and CI composition are documented in [testing.md](testing.md).
 

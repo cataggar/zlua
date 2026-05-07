@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const official_memory_limit_mb = b.option(u64, "official-memory-limit-mb", "Memory cap per official-suite child process in MiB (0 disables)") orelse 256;
-    const example_filter = b.option([]const u8, "example", "Embedding example to run by file name or basename") orelse null;
+    const example_filters = b.args orelse &[_][]const u8{};
 
     const lua_deps_step = addFetchLuaStep(b);
 
@@ -120,19 +120,18 @@ pub fn build(b: *std.Build) void {
     c_api_step.dependOn(&install_c_api_exe.step);
 
     const embedding_examples = [_]EmbeddingExample{
-        .{ .key = "run_script", .name = "zlua-embed-run-script", .path = "examples/embed/run_script.zig" },
-        .{ .key = "register_function", .name = "zlua-embed-register-function", .path = "examples/embed/register_function.zig" },
-        .{ .key = "typed_host_function", .name = "zlua-embed-typed-host-function", .path = "examples/embed/typed_host_function.zig" },
-        .{ .key = "plugin_sandbox", .name = "zlua-embed-plugin-sandbox", .path = "examples/embed/plugin_sandbox.zig" },
-        .{ .key = "bytecode_roundtrip", .name = "zlua-embed-bytecode-roundtrip", .path = "examples/embed/bytecode_roundtrip.zig" },
-        .{ .key = "memory_rw_files", .name = "zlua-embed-memory-rw-files", .path = "examples/embed/memory_rw_files.zig" },
-        .{ .key = "userdata_counter", .name = "zlua-embed-userdata-counter", .path = "examples/embed/userdata_counter.zig" },
-        .{ .key = "preload_module", .name = "zlua-embed-preload-module", .path = "examples/embed/preload_module.zig" },
+        .{ .key = "run_script", .name = "zlua-embed-run-script", .path = "examples/run_script.zig" },
+        .{ .key = "register_function", .name = "zlua-embed-register-function", .path = "examples/register_function.zig" },
+        .{ .key = "typed_host_function", .name = "zlua-embed-typed-host-function", .path = "examples/typed_host_function.zig" },
+        .{ .key = "plugin_sandbox", .name = "zlua-embed-plugin-sandbox", .path = "examples/plugin_sandbox.zig" },
+        .{ .key = "bytecode_roundtrip", .name = "zlua-embed-bytecode-roundtrip", .path = "examples/bytecode_roundtrip.zig" },
+        .{ .key = "memory_rw_files", .name = "zlua-embed-memory-rw-files", .path = "examples/memory_rw_files.zig" },
+        .{ .key = "userdata_counter", .name = "zlua-embed-userdata-counter", .path = "examples/userdata_counter.zig" },
+        .{ .key = "preload_module", .name = "zlua-embed-preload-module", .path = "examples/preload_module.zig" },
     };
 
     const examples_step = b.step("examples", "Compile embedding examples");
-    const run_example_step = b.step("run-example", "Run embedding examples, or one selected by -Dexample=name");
-    var matched_example = false;
+    const run_example_step = b.step("run-example", "Run embedding examples, or selected examples passed after --");
     for (embedding_examples) |example| {
         const example_exe = b.addExecutable(.{
             .name = example.name,
@@ -145,13 +144,19 @@ pub fn build(b: *std.Build) void {
         });
         examples_step.dependOn(&example_exe.step);
 
-        if (example_filter == null or exampleMatches(example, example_filter.?)) {
-            matched_example = true;
+        if (example_filters.len == 0 or exampleMatchesAny(example, example_filters)) {
             const run_example = b.addRunArtifact(example_exe);
             run_example_step.dependOn(&run_example.step);
         }
     }
-    if (example_filter) |filter| {
+    for (example_filters) |filter| {
+        var matched_example = false;
+        for (embedding_examples) |example| {
+            if (exampleMatches(example, filter)) {
+                matched_example = true;
+                break;
+            }
+        }
         if (!matched_example) std.debug.panic("unknown embedding example '{s}'", .{filter});
     }
 
@@ -404,6 +409,13 @@ fn exampleMatches(example: EmbeddingExample, filter: []const u8) bool {
     if (std.mem.eql(u8, filter, basename)) return true;
     if (std.mem.endsWith(u8, basename, ".zig")) {
         return std.mem.eql(u8, filter, basename[0 .. basename.len - ".zig".len]);
+    }
+    return false;
+}
+
+fn exampleMatchesAny(example: EmbeddingExample, filters: []const []const u8) bool {
+    for (filters) |filter| {
+        if (exampleMatches(example, filter)) return true;
     }
     return false;
 }

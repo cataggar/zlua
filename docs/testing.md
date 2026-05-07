@@ -7,7 +7,7 @@ zlua treats the official Lua 5.5 C implementation as the behavioral oracle. The 
 | Layer | Command | Scope |
 | --- | --- | --- |
 | Unit tests | `zig build test` or `just test` | Zig tests for the library facade, CLI root module, runtime internals, API conversion, and test utilities. |
-| Embedding examples | `zig build examples` or `just example` | Compiles every Zig-native embedding example under `examples/embed`. |
+| Embedding examples | `zig build examples` or `just example` | Compiles every Zig-native embedding example under `examples`. |
 | CLua differential fixtures | `zig build test-diff` or `just diff` | Runs `tests/diff/**/*.lua` against CLua and zlua. |
 | Official Lua 5.5 dashboard | `zig build test-official` or `just official` | Runs each official Lua 5.5 test file, excluding `all.lua`, under CLua and zlua. |
 | C API fixtures | `zig build test-c-api` or `just c-api` | Compiles C fixtures against CLua and zlua and compares behavior. |
@@ -148,7 +148,7 @@ just c-api tests/c-api/coroutines
 
 ## Embedding Examples
 
-Embedding examples live under `examples/embed` and are compiled by `zig build examples`, which is part of `zig build ci`. They function as API smoke tests; [embedding.md](embedding.md) owns the example list and run commands.
+Embedding examples live under `examples` and are compiled by `zig build examples`, which is part of `zig build ci`. They function as API smoke tests; [embedding.md](embedding.md) owns the example list and run commands.
 
 ## Debugging Failures
 

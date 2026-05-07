@@ -478,17 +478,17 @@ Broad table-to-struct decoding is not implemented.
 
 ## Examples
 
-Embedding examples live under `examples/embed`:
+Embedding examples live under `examples`:
 
 ```text
-examples/embed/run_script.zig
-examples/embed/register_function.zig
-examples/embed/typed_host_function.zig
-examples/embed/plugin_sandbox.zig
-examples/embed/bytecode_roundtrip.zig
-examples/embed/memory_rw_files.zig
-examples/embed/userdata_counter.zig
-examples/embed/preload_module.zig
+examples/run_script.zig
+examples/register_function.zig
+examples/typed_host_function.zig
+examples/plugin_sandbox.zig
+examples/bytecode_roundtrip.zig
+examples/memory_rw_files.zig
+examples/userdata_counter.zig
+examples/preload_module.zig
 ```
 
 Compile them with:
@@ -506,8 +506,8 @@ zig build run-example
 Run one example by basename or file name with:
 
 ```sh
-zig build run-example -Dexample=run_script
-zig build run-example -Dexample=run_script.zig
+zig build run-example -- run_script
+zig build run-example -- run_script.zig
 ```
 
 The justfile exposes the same workflow as a single endpoint:

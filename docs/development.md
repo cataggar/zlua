@@ -74,7 +74,7 @@ Format Zig sources:
 just fmt
 ```
 
-`just fmt` formats `build.zig`, `src/*.zig`, `src/testing/*.zig`, and `examples/embed/*.zig`. Run `zig fmt` explicitly for touched nested files under `src/frontend/`, `src/compile/`, `src/runtime/`, `src/stdlib/`, or other paths not covered by the recipe.
+`just fmt` formats `build.zig`, `src/*.zig`, `src/testing/*.zig`, and `examples/*.zig`. Run `zig fmt` explicitly for touched nested files under `src/frontend/`, `src/compile/`, `src/runtime/`, `src/stdlib/`, or other paths not covered by the recipe.
 
 ## Source Conventions
 
