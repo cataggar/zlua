@@ -3,7 +3,28 @@ const runtime = @import("runtime.zig");
 const stdlib = @import("stdlib.zig");
 
 pub const lua_State = opaque {};
-const lua_Debug = opaque {};
+const LUA_IDSIZE: usize = 60;
+
+const lua_Debug = extern struct {
+    event: c_int,
+    name: ?[*:0]const u8,
+    namewhat: ?[*:0]const u8,
+    what: ?[*:0]const u8,
+    source: ?[*]const u8,
+    srclen: usize,
+    currentline: c_int,
+    linedefined: c_int,
+    lastlinedefined: c_int,
+    nups: u8,
+    nparams: u8,
+    isvararg: u8,
+    extraargs: u8,
+    istailcall: u8,
+    ftransfer: c_int,
+    ntransfer: c_int,
+    short_src: [LUA_IDSIZE]u8,
+    i_ci: ?*anyopaque,
+};
 const LuaLBufferInit = extern union {
     n: lua_Number,
     u: f64,
@@ -114,6 +135,17 @@ const LUA_GCGEN: c_int = 7;
 const LUA_GCINC: c_int = 8;
 const LUA_GCPARAM: c_int = 9;
 const LUA_GCPN: c_int = 6;
+
+const LUA_HOOKCALL: c_int = 0;
+const LUA_HOOKRET: c_int = 1;
+const LUA_HOOKLINE: c_int = 2;
+const LUA_HOOKCOUNT: c_int = 3;
+const LUA_HOOKTAILCALL: c_int = 4;
+
+const LUA_MASKCALL: c_int = 1 << LUA_HOOKCALL;
+const LUA_MASKRET: c_int = 1 << LUA_HOOKRET;
+const LUA_MASKLINE: c_int = 1 << LUA_HOOKLINE;
+const LUA_MASKCOUNT: c_int = 1 << LUA_HOOKCOUNT;
 
 const Value = union(enum) {
     nil,
@@ -287,11 +319,30 @@ const CThread = struct {
     current_c_closure: ?*runtime.CClosure = null,
     c_call_depth: usize = 0,
     yieldable_call_depth: usize = 0,
+    c_frames: std.ArrayList(CCallFrame) = .empty,
+    debug_hook: lua_Hook = null,
+    debug_hook_mask: c_int = 0,
+    debug_hook_count: c_int = 0,
+    debug_event: DebugEvent = .{},
 
     fn deinit(self: *CThread) void {
+        self.c_frames.deinit(self.owner.allocator());
         self.to_close_slots.deinit(self.owner.allocator());
         self.stack.deinit(self.owner.allocator());
     }
+};
+
+const CCallFrame = struct {
+    closure: *runtime.CClosure,
+    base: usize,
+    arg_count: usize,
+};
+
+const DebugEvent = struct {
+    event: c_int = LUA_HOOKCALL,
+    currentline: c_int = -1,
+    ftransfer: c_int = 0,
+    ntransfer: c_int = 0,
 };
 
 const PendingYield = struct {
@@ -444,6 +495,36 @@ fn valueAt(thread: *CThread, idx: c_int) ?Value {
     return if (stackSlot(thread, idx)) |slot| slot.* else null;
 }
 
+const DebugFrameKind = enum(u8) {
+    runtime = 1,
+    c = 2,
+};
+
+const DebugFrameRef = struct {
+    kind: DebugFrameKind,
+    index: usize,
+};
+
+fn debugFrameHandle(frame: DebugFrameRef) ?*anyopaque {
+    const kind_part = @as(usize, @intFromEnum(frame.kind)) << (@bitSizeOf(usize) - 8);
+    return @ptrFromInt(kind_part | (frame.index + 1));
+}
+
+fn debugFrameFromHandle(handle: ?*anyopaque) ?DebugFrameRef {
+    const raw = @intFromPtr(handle orelse return null);
+    if (raw == 0) return null;
+    const kind_raw = raw >> (@bitSizeOf(usize) - 8);
+    const kind: DebugFrameKind = switch (kind_raw) {
+        1 => .runtime,
+        2 => .c,
+        else => return null,
+    };
+    const mask = (@as(usize, 1) << (@bitSizeOf(usize) - 8)) - 1;
+    const encoded_index = raw & mask;
+    if (encoded_index == 0) return null;
+    return .{ .kind = kind, .index = encoded_index - 1 };
+}
+
 fn typeAt(thread: *CThread, idx: c_int) c_int {
     return if (valueAt(thread, idx)) |value| value.typeTag() else LUA_TNONE;
 }
@@ -508,6 +589,64 @@ fn pushStringBytes(thread: *CThread, bytes: []const u8) ?*CString {
     const string = createString(thread.owner, bytes) orelse return null;
     if (!pushValue(thread, .{ .string = string })) return null;
     return string;
+}
+
+fn debugString(state: *CState, bytes: []const u8) ?[*:0]const u8 {
+    return (createString(state, bytes) orelse return null).bytes.ptr;
+}
+
+fn emptyDebug() lua_Debug {
+    return .{
+        .event = LUA_HOOKCALL,
+        .name = null,
+        .namewhat = zstr(""),
+        .what = zstr(""),
+        .source = null,
+        .srclen = 0,
+        .currentline = -1,
+        .linedefined = -1,
+        .lastlinedefined = -1,
+        .nups = 0,
+        .nparams = 0,
+        .isvararg = 0,
+        .extraargs = 0,
+        .istailcall = 0,
+        .ftransfer = 0,
+        .ntransfer = 0,
+        .short_src = .{0} ** LUA_IDSIZE,
+        .i_ci = null,
+    };
+}
+
+fn setShortSource(ar: *lua_Debug, source: []const u8) void {
+    @memset(&ar.short_src, 0);
+    if (source.len == 0) return;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.heap.page_allocator);
+    if (source[0] == '=') {
+        out.appendSlice(std.heap.page_allocator, source[1..@min(source.len, LUA_IDSIZE)]) catch return;
+    } else if (source[0] == '@') {
+        const path = source[1..];
+        if (source.len <= LUA_IDSIZE) {
+            out.appendSlice(std.heap.page_allocator, path) catch return;
+        } else {
+            out.appendSlice(std.heap.page_allocator, "...") catch return;
+            out.appendSlice(std.heap.page_allocator, path[path.len - (LUA_IDSIZE - 3) ..]) catch return;
+        }
+    } else {
+        const prefix = "[string \"";
+        const suffix = "\"]";
+        const room = LUA_IDSIZE - prefix.len - suffix.len - 1;
+        const newline = std.mem.indexOfScalar(u8, source, '\n');
+        var end = @min(newline orelse source.len, room);
+        if (source.len >= room or newline != null) end = @min(end, room - 3);
+        out.appendSlice(std.heap.page_allocator, prefix) catch return;
+        out.appendSlice(std.heap.page_allocator, source[0..end]) catch return;
+        if (source.len >= room or newline != null) out.appendSlice(std.heap.page_allocator, "...") catch return;
+        out.appendSlice(std.heap.page_allocator, suffix) catch return;
+    }
+    const len = @min(out.items.len, LUA_IDSIZE - 1);
+    @memcpy(ar.short_src[0..len], out.items[0..len]);
 }
 
 fn createTable(state: *CState, array_hint: c_int, record_hint: c_int) ?*CTable {
@@ -606,6 +745,25 @@ fn findUserdataByPtr(state: *CState, ptr: *anyopaque) ?*CUserdata {
         if (userdata.bytes.ptr == @as([*]u8, @ptrCast(ptr))) return userdata;
     }
     return null;
+}
+
+fn applyDebugHook(thread: *CThread, target: *runtime.Thread) void {
+    if (thread.debug_hook == null or thread.debug_hook_mask == 0) {
+        thread.owner.runtime_state.setThreadHook(target, .nil, "", 0);
+        return;
+    }
+    thread.owner.runtime_state.setThreadHook(target, .{ .boolean = true }, maskString(thread.debug_hook_mask), @intCast(@max(thread.debug_hook_count, 0)));
+}
+
+fn maskString(mask: c_int) []const u8 {
+    if ((mask & LUA_MASKCALL) != 0 and (mask & LUA_MASKRET) != 0 and (mask & LUA_MASKLINE) != 0) return "crl";
+    if ((mask & LUA_MASKCALL) != 0 and (mask & LUA_MASKRET) != 0) return "cr";
+    if ((mask & LUA_MASKCALL) != 0 and (mask & LUA_MASKLINE) != 0) return "cl";
+    if ((mask & LUA_MASKRET) != 0 and (mask & LUA_MASKLINE) != 0) return "rl";
+    if ((mask & LUA_MASKCALL) != 0) return "c";
+    if ((mask & LUA_MASKRET) != 0) return "r";
+    if ((mask & LUA_MASKLINE) != 0) return "l";
+    return "";
 }
 
 fn normalizeKey(value: Value) ?Value {
@@ -996,11 +1154,15 @@ fn runCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Value
     thread.pending_error = null;
     const previous_closure = thread.current_c_closure;
     thread.current_c_closure = closure;
+    const frame_index = thread.c_frames.items.len;
+    thread.c_frames.append(allocator, .{ .closure = closure, .base = 0, .arg_count = call_args.len }) catch return .memory_error;
     thread.c_call_depth += 1;
     defer {
         thread.c_call_depth -= 1;
+        _ = thread.c_frames.pop();
         thread.current_c_closure = previous_closure;
     }
+    callCDebugHook(thread, .{ .event = LUA_HOOKCALL, .ftransfer = 1, .ntransfer = @intCast(call_args.len) }, frame_index);
     const function = functionFromId(closure.function_id);
     const returned = if (function) |func| func(@ptrCast(thread.public_state)) else 0;
     if (thread.pending_yield) |pending| {
@@ -1040,6 +1202,7 @@ fn runCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Value
     const count: usize = @min(@as(usize, @intCast(raw_count)), thread.stack.items.len);
     const start = thread.stack.items.len - count;
     const results = allocator.dupe(Value, thread.stack.items[start..]) catch return .memory_error;
+    callCDebugHook(thread, .{ .event = LUA_HOOKRET, .ftransfer = @intCast(start + 1), .ntransfer = @intCast(results.len) }, frame_index);
     thread.stack.clearRetainingCapacity();
     thread.stack.appendSlice(allocator, saved) catch {
         allocator.free(results);
@@ -1074,6 +1237,10 @@ fn cClosureDispatch(context: *runtime.CClosureContext) anyerror!void {
     const args = try allocator.alloc(Value, context.argCount());
     defer allocator.free(args);
     for (args, 0..) |*arg, index| arg.* = try runtimeToCValue(state, context.argValue(index), 0);
+
+    const previous_runtime_thread = thread.runtime_thread;
+    thread.runtime_thread = context.thread;
+    defer thread.runtime_thread = previous_runtime_thread;
 
     switch (runCClosure(thread, context.closure, args, true)) {
         .success => |results| {
@@ -1119,6 +1286,47 @@ fn cClosureResumeDispatch(context: *runtime.CClosureResumeContext) anyerror!void
     }
 }
 
+fn cDebugHookDispatch(context: *runtime.CDebugHookContext) anyerror!void {
+    const state: *CState = @ptrCast(@alignCast(context.user_data orelse return));
+    const thread = findThreadForRuntime(state, context.thread) orelse return;
+    const hook = thread.debug_hook orelse return;
+    thread.debug_event = .{
+        .event = switch (context.event) {
+            .call => LUA_HOOKCALL,
+            .ret => LUA_HOOKRET,
+            .line => LUA_HOOKLINE,
+            .count => LUA_HOOKCOUNT,
+            .tail_call => LUA_HOOKTAILCALL,
+        },
+        .currentline = if (context.currentline) |line| @intCast(line) else -1,
+        .ftransfer = @intCast(context.ftransfer),
+        .ntransfer = @intCast(context.ntransfer),
+    };
+    var ar = emptyDebug();
+    ar.event = thread.debug_event.event;
+    ar.currentline = thread.debug_event.currentline;
+    ar.ftransfer = thread.debug_event.ftransfer;
+    ar.ntransfer = thread.debug_event.ntransfer;
+    ar.i_ci = debugFrameHandle(.{ .kind = .runtime, .index = if (context.thread.frames.items.len == 0) 0 else context.thread.frames.items.len - 1 });
+    hook(@ptrCast(thread.public_state), &ar);
+}
+
+fn callCDebugHook(thread: *CThread, event: DebugEvent, frame_index: usize) void {
+    const hook = thread.debug_hook orelse return;
+    if (event.event == LUA_HOOKCALL and (thread.debug_hook_mask & LUA_MASKCALL) == 0) return;
+    if (event.event == LUA_HOOKRET and (thread.debug_hook_mask & LUA_MASKRET) == 0) return;
+    const previous = thread.debug_event;
+    thread.debug_event = event;
+    defer thread.debug_event = previous;
+    var ar = emptyDebug();
+    ar.event = event.event;
+    ar.currentline = event.currentline;
+    ar.ftransfer = event.ftransfer;
+    ar.ntransfer = event.ntransfer;
+    ar.i_ci = debugFrameHandle(.{ .kind = .c, .index = frame_index });
+    hook(@ptrCast(thread.public_state), &ar);
+}
+
 fn callLuaClosure(thread: *CThread, closure: *runtime.Closure, args: []const Value, nresults: c_int, protected: bool) c_int {
     const base = thread.stack.items.len - args.len - 1;
     const allocator = thread.owner.allocator();
@@ -1126,8 +1334,14 @@ fn callLuaClosure(thread: *CThread, closure: *runtime.Closure, args: []const Val
     defer allocator.free(runtime_args);
     for (args, 0..) |arg, index| runtime_args[index] = cToRuntimeValue(thread.owner, arg, 0) catch return LUA_ERRMEM;
 
+    const runtime_thread = thread.owner.runtime_state.newCoroutine(.{ .closure = closure }) catch return LUA_ERRMEM;
+    const previous_runtime_thread = thread.runtime_thread;
+    thread.runtime_thread = runtime_thread;
+    defer thread.runtime_thread = previous_runtime_thread;
+    applyDebugHook(thread, runtime_thread);
+
     if (protected) {
-        const result = thread.owner.runtime_state.protectedCallLoadedClosure(closure, runtime_args) catch |err| switch (err) {
+        const result = thread.owner.runtime_state.resumeThread(runtime_thread, runtime_args) catch |err| switch (err) {
             error.OutOfMemory => return LUA_ERRMEM,
             else => {
                 _ = pushStringBytes(thread, @errorName(err));
@@ -1152,7 +1366,7 @@ fn callLuaClosure(thread: *CThread, closure: *runtime.Closure, args: []const Val
         }
     }
 
-    const runtime_results = thread.owner.runtime_state.callLoadedClosure(closure, runtime_args) catch |err| switch (err) {
+    const result = thread.owner.runtime_state.resumeThread(runtime_thread, runtime_args) catch |err| switch (err) {
         error.OutOfMemory => {
             thread.stack.items.len = base;
             _ = pushStringBytes(thread, "not enough memory");
@@ -1168,6 +1382,15 @@ fn callLuaClosure(thread: *CThread, closure: *runtime.Closure, args: []const Val
         else => {
             thread.stack.items.len = base;
             _ = pushStringBytes(thread, @errorName(err));
+            raiseUnprotected(thread);
+            return LUA_ERRRUN;
+        },
+    };
+    const runtime_results = switch (result) {
+        .success => |values| values,
+        .failure => |failure| {
+            thread.stack.items.len = base;
+            _ = pushValue(thread, runtimeToCValue(thread.owner, failure, 0) catch .nil);
             raiseUnprotected(thread);
             return LUA_ERRRUN;
         },
@@ -1300,6 +1523,7 @@ fn resumeRuntimeThread(thread: *CThread, narg: c_int) c_int {
         thread.runtime_thread = created;
         break :blk created;
     };
+    applyDebugHook(thread, target);
     thread.started = true;
     thread.running = true;
     thread.dead = false;
@@ -1590,6 +1814,7 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
     _ = state.runtime_state.switchGcMode(.incremental);
     state.runtime_state.setCClosureDispatch(cClosureDispatch, state);
     state.runtime_state.setCClosureResumeDispatch(cClosureResumeDispatch);
+    state.runtime_state.setCDebugHookDispatch(cDebugHookDispatch);
     const runtime_globals = state.runtime_state.newTableWithHints(0, 1) catch {
         state.runtime_state.deinit();
         freeHost(StateBlock, f, ud, block);
@@ -2869,20 +3094,285 @@ pub export fn lua_closeslot(L: ?*lua_State, idx: c_int) callconv(.c) void {
     removeToCloseSlot(thread, slot);
 }
 
-pub export fn lua_getstack(_: ?*lua_State, _: c_int, _: ?*lua_Debug) callconv(.c) c_int {
-    return 0;
+fn runtimeCurrentLine(frame: anytype) c_int {
+    if (frame.proto.line_info.items.len == 0) return -1;
+    const pc = if (frame.pc == 0) 0 else frame.pc - 1;
+    if (pc >= frame.proto.line_info.items.len) return -1;
+    const line = frame.proto.line_info.items[pc].line;
+    return if (line == 0) -1 else @intCast(line);
 }
 
-pub export fn lua_getinfo(_: ?*lua_State, _: ?[*:0]const u8, _: ?*lua_Debug) callconv(.c) c_int {
-    return 0;
+fn runtimeLineRange(closure: *runtime.Closure) struct { first: c_int, last: c_int } {
+    const proto = closure.proto;
+    if (proto.defined_line == 0) return .{ .first = 0, .last = 0 };
+    if (closure.stripped_debug) return .{ .first = @intCast(proto.defined_line), .last = @intCast(proto.defined_line) };
+    const last = if (proto.last_defined_line != 0) proto.last_defined_line else proto.defined_line;
+    return .{ .first = @intCast(proto.defined_line), .last = @intCast(last) };
 }
 
-pub export fn lua_getlocal(_: ?*lua_State, _: ?*const lua_Debug, _: c_int) callconv(.c) ?[*:0]const u8 {
+fn fillDebugSource(state: *CState, ar: *lua_Debug, value: Value, active_frame: ?DebugFrameRef) void {
+    switch (value) {
+        .lua_closure => |closure| {
+            const source = if (closure.stripped_debug) "=?" else closure.proto.source_name;
+            ar.source = debugString(state, source);
+            ar.srclen = source.len;
+            const range = runtimeLineRange(closure);
+            ar.linedefined = range.first;
+            ar.lastlinedefined = range.last;
+            ar.what = if (closure.proto.defined_line == 0) zstr("main") else zstr("Lua");
+            setShortSource(ar, source);
+        },
+        else => {
+            const source = "=[C]";
+            ar.source = debugString(state, source);
+            ar.srclen = source.len;
+            ar.linedefined = -1;
+            ar.lastlinedefined = -1;
+            ar.what = zstr("C");
+            setShortSource(ar, source);
+        },
+    }
+    if (active_frame) |frame| if (frame.kind == .runtime) {
+        const runtime_thread = state.main_thread.runtime_thread orelse return;
+        if (frame.index < runtime_thread.frames.items.len and runtime_thread.frames.items[frame.index].is_tail_call) ar.what = zstr("tail");
+    };
+}
+
+fn fillDebugCurrentLine(thread: *CThread, ar: *lua_Debug, frame_ref: ?DebugFrameRef) void {
+    ar.currentline = -1;
+    const frame = frame_ref orelse return;
+    switch (frame.kind) {
+        .runtime => {
+            const runtime_thread = thread.runtime_thread orelse return;
+            if (frame.index >= runtime_thread.frames.items.len) return;
+            ar.currentline = runtimeCurrentLine(runtime_thread.frames.items[frame.index]);
+        },
+        .c => {},
+    }
+}
+
+fn fillDebugUpvalues(ar: *lua_Debug, value: Value) void {
+    switch (value) {
+        .lua_closure => |closure| {
+            ar.nups = @intCast(@min(closure.upvalues.len, std.math.maxInt(u8)));
+            ar.nparams = @intCast(@min(closure.proto.param_count, std.math.maxInt(u8)));
+            ar.isvararg = if (closure.proto.is_vararg) 1 else 0;
+        },
+        .c_closure => |closure| {
+            ar.nups = @intCast(@min(closure.upvalues.len, std.math.maxInt(u8)));
+            ar.nparams = 0;
+            ar.isvararg = 1;
+        },
+        else => {
+            ar.nups = 0;
+            ar.nparams = 0;
+            ar.isvararg = 1;
+        },
+    }
+}
+
+fn fillDebugTailAndTransfers(thread: *CThread, ar: *lua_Debug, frame_ref: ?DebugFrameRef) void {
+    ar.istailcall = 0;
+    ar.extraargs = 0;
+    ar.ftransfer = 0;
+    ar.ntransfer = 0;
+    const frame = frame_ref orelse return;
+    switch (frame.kind) {
+        .runtime => {
+            const runtime_thread = thread.runtime_thread orelse return;
+            if (frame.index >= runtime_thread.frames.items.len) return;
+            const runtime_frame = runtime_thread.frames.items[frame.index];
+            ar.istailcall = if (runtime_frame.is_tail_call) 1 else 0;
+            ar.extraargs = @intCast(@min(runtime_frame.varargs.len, std.math.maxInt(u8)));
+            if (runtime_thread.hook_running) {
+                ar.ftransfer = thread.debug_event.ftransfer;
+                ar.ntransfer = thread.debug_event.ntransfer;
+            }
+        },
+        .c => {},
+    }
+}
+
+fn fillDebugName(thread: *CThread, ar: *lua_Debug, frame_ref: ?DebugFrameRef) void {
+    ar.name = null;
+    ar.namewhat = zstr("");
+    const frame = frame_ref orelse return;
+    if (frame.kind != .runtime) return;
+    const runtime_thread = thread.runtime_thread orelse return;
+    if (frame.index >= runtime_thread.frames.items.len) return;
+    const level: i64 = @intCast(runtime_thread.frames.items.len - frame.index);
+    if (thread.owner.runtime_state.currentFunctionName(runtime_thread, level)) |name| {
+        ar.name = debugString(thread.owner, name);
+        ar.namewhat = debugString(thread.owner, thread.owner.runtime_state.currentFunctionNameWhat(runtime_thread, level) orelse "local");
+    }
+}
+
+fn debugFrameValue(thread: *CThread, frame_ref: ?DebugFrameRef) Value {
+    const frame = frame_ref orelse return .nil;
+    return switch (frame.kind) {
+        .runtime => blk: {
+            const runtime_thread = thread.runtime_thread orelse break :blk .nil;
+            if (frame.index >= runtime_thread.frames.items.len) break :blk .nil;
+            break :blk .{ .lua_closure = runtime_thread.frames.items[frame.index].closure };
+        },
+        .c => blk: {
+            if (frame.index >= thread.c_frames.items.len) break :blk .nil;
+            break :blk .{ .c_closure = thread.c_frames.items[frame.index].closure };
+        },
+    };
+}
+
+fn activeRuntimeThread(thread: *CThread) ?*runtime.Thread {
+    return thread.runtime_thread orelse thread.owner.runtime_state.current_thread;
+}
+
+pub export fn lua_getstack(L: ?*lua_State, level: c_int, ar: ?*lua_Debug) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (level < 0) return 0;
+    const out = ar orelse return 0;
+    out.* = emptyDebug();
+    var depth: usize = @intCast(level);
+    if (thread.c_frames.items.len != 0) {
+        if (depth == 0) {
+            out.i_ci = debugFrameHandle(.{ .kind = .c, .index = thread.c_frames.items.len - 1 });
+            return 1;
+        }
+        depth -= 1;
+    }
+    const runtime_thread = activeRuntimeThread(thread) orelse return 0;
+    if (depth >= runtime_thread.frames.items.len) return 0;
+    out.i_ci = debugFrameHandle(.{ .kind = .runtime, .index = runtime_thread.frames.items.len - depth - 1 });
+    thread.runtime_thread = runtime_thread;
+    return 1;
+}
+
+pub export fn lua_getinfo(L: ?*lua_State, what: ?[*:0]const u8, ar: ?*lua_Debug) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const out = ar orelse return 0;
+    const options = cStringSlice(what);
+    var option_start: usize = 0;
+    var frame_ref = debugFrameFromHandle(out.i_ci);
+    var function_value = debugFrameValue(thread, frame_ref);
+    if (options.len != 0 and options[0] == '>') {
+        option_start = 1;
+        function_value = if (thread.stack.items.len == 0) .nil else thread.stack.pop().?;
+        frame_ref = null;
+    }
+    out.* = emptyDebug();
+    out.i_ci = if (frame_ref) |frame| debugFrameHandle(frame) else null;
+    out.event = thread.debug_event.event;
+    for (options[option_start..]) |option| switch (option) {
+        'S' => fillDebugSource(thread.owner, out, function_value, frame_ref),
+        'l' => fillDebugCurrentLine(thread, out, frame_ref),
+        'u' => fillDebugUpvalues(out, function_value),
+        't' => fillDebugTailAndTransfers(thread, out, frame_ref),
+        'n' => fillDebugName(thread, out, frame_ref),
+        'r' => {
+            out.ftransfer = thread.debug_event.ftransfer;
+            out.ntransfer = thread.debug_event.ntransfer;
+        },
+        'f' => _ = pushValue(thread, function_value),
+        'L' => {
+            const table = createTable(thread.owner, 0, 0) orelse return 0;
+            if (function_value == .lua_closure and !function_value.lua_closure.stripped_debug) {
+                for (function_value.lua_closure.proto.line_info.items) |info| {
+                    if (info.line != 0) table.set(thread.owner.allocator(), .{ .integer = @intCast(info.line) }, .{ .boolean = true }) catch return 0;
+                }
+            }
+            _ = pushValue(thread, .{ .table = table });
+        },
+        '>' => {},
+        else => return 0,
+    };
+    return 1;
+}
+
+fn runtimeLocalAtIndex(target: *runtime.Thread, frame_index: usize, n: c_int) ?struct { name: []const u8, stack_index: usize } {
+    if (n <= 0 or frame_index >= target.frames.items.len) return null;
+    const frame = target.frames.items[frame_index];
+    const pc = if (frame.pc == 0) 0 else frame.pc - 1;
+    var seen: c_int = 0;
+    for (frame.proto.locals.items) |local| {
+        if (std.mem.eql(u8, local.name, "_ENV")) continue;
+        if (!runtime.localActiveAt(local, pc)) continue;
+        seen += 1;
+        if (seen == n) return .{ .name = local.name, .stack_index = frame.base + local.register };
+    }
     return null;
 }
 
-pub export fn lua_setlocal(_: ?*lua_State, _: ?*const lua_Debug, _: c_int) callconv(.c) ?[*:0]const u8 {
+fn functionLocalName(value: Value, n: c_int) ?[]const u8 {
+    if (n <= 0 or value != .lua_closure) return null;
+    var seen: c_int = 0;
+    for (value.lua_closure.proto.locals.items) |local| {
+        if (local.register >= value.lua_closure.proto.param_count) continue;
+        seen += 1;
+        if (seen == n) return local.name;
+    }
     return null;
+}
+
+pub export fn lua_getlocal(L: ?*lua_State, ar: ?*const lua_Debug, n: c_int) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    if (ar == null) {
+        const value = if (thread.stack.items.len == 0) .nil else thread.stack.items[thread.stack.items.len - 1];
+        const name = functionLocalName(value, n) orelse return null;
+        return debugString(thread.owner, name);
+    }
+    const frame = debugFrameFromHandle(ar.?.i_ci) orelse return null;
+    switch (frame.kind) {
+        .runtime => {
+            const target = activeRuntimeThread(thread) orelse return null;
+            if (n < 0 and frame.index < target.frames.items.len) {
+                const runtime_frame = target.frames.items[frame.index];
+                const vararg_index: usize = @intCast(-n - 1);
+                if (vararg_index >= runtime_frame.varargs.len) return null;
+                _ = pushValue(thread, runtimeToCValue(thread.owner, runtime_frame.varargs[vararg_index], 0) catch .nil);
+                return zstr("(vararg)");
+            }
+            const local = runtimeLocalAtIndex(target, frame.index, n) orelse return null;
+            _ = pushValue(thread, runtimeToCValue(thread.owner, target.stack.items[local.stack_index], 0) catch .nil);
+            return debugString(thread.owner, local.name);
+        },
+        .c => {
+            if (frame.index >= thread.c_frames.items.len or n <= 0) return null;
+            const c_frame = thread.c_frames.items[frame.index];
+            const offset: usize = @intCast(n - 1);
+            if (offset >= c_frame.arg_count or c_frame.base + offset >= thread.stack.items.len) return null;
+            _ = pushValue(thread, thread.stack.items[c_frame.base + offset]);
+            return zstr("(C temporary)");
+        },
+    }
+}
+
+pub export fn lua_setlocal(L: ?*lua_State, ar: ?*const lua_Debug, n: c_int) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    if (thread.stack.items.len == 0) return null;
+    const frame = debugFrameFromHandle((ar orelse return null).i_ci) orelse return null;
+    const value = thread.stack.pop().?;
+    switch (frame.kind) {
+        .runtime => {
+            const target = activeRuntimeThread(thread) orelse return null;
+            if (n < 0 and frame.index < target.frames.items.len) {
+                const runtime_frame = &target.frames.items[frame.index];
+                const vararg_index: usize = @intCast(-n - 1);
+                if (vararg_index >= runtime_frame.varargs.len or !runtime_frame.owns_varargs) return null;
+                @constCast(runtime_frame.varargs.ptr)[vararg_index] = cToRuntimeValue(thread.owner, value, 0) catch .nil;
+                return zstr("(vararg)");
+            }
+            const local = runtimeLocalAtIndex(target, frame.index, n) orelse return null;
+            target.stack.items[local.stack_index] = cToRuntimeValue(thread.owner, value, 0) catch .nil;
+            return debugString(thread.owner, local.name);
+        },
+        .c => {
+            if (frame.index >= thread.c_frames.items.len or n <= 0) return null;
+            const c_frame = thread.c_frames.items[frame.index];
+            const offset: usize = @intCast(n - 1);
+            if (offset >= c_frame.arg_count or c_frame.base + offset >= thread.stack.items.len) return null;
+            thread.stack.items[c_frame.base + offset] = value;
+            return zstr("(C temporary)");
+        },
+    }
 }
 
 pub export fn lua_getupvalue(L: ?*lua_State, funcindex: c_int, n: c_int) callconv(.c) ?[*:0]const u8 {
@@ -2959,18 +3449,33 @@ pub export fn lua_upvaluejoin(L: ?*lua_State, fidx1: c_int, n1: c_int, fidx2: c_
         else => {},
     }
 }
-pub export fn lua_sethook(_: ?*lua_State, _: lua_Hook, _: c_int, _: c_int) callconv(.c) void {}
-
-pub export fn lua_gethook(_: ?*lua_State) callconv(.c) lua_Hook {
-    return null;
+pub export fn lua_sethook(L: ?*lua_State, hook: lua_Hook, mask: c_int, count: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (hook == null or mask == 0) {
+        thread.debug_hook = null;
+        thread.debug_hook_mask = 0;
+        thread.debug_hook_count = 0;
+    } else {
+        thread.debug_hook = hook;
+        thread.debug_hook_mask = mask;
+        thread.debug_hook_count = count;
+    }
+    if (thread.runtime_thread) |target| applyDebugHook(thread, target);
 }
 
-pub export fn lua_gethookmask(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_gethook(L: ?*lua_State) callconv(.c) lua_Hook {
+    const thread = threadFromState(L) orelse return null;
+    return thread.debug_hook;
 }
 
-pub export fn lua_gethookcount(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_gethookmask(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    return thread.debug_hook_mask;
+}
+
+pub export fn lua_gethookcount(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    return thread.debug_hook_count;
 }
 
 pub export fn luaL_checkversion_(L: ?*lua_State, version: lua_Number, sizes: usize) callconv(.c) void {

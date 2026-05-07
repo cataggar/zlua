@@ -78,6 +78,25 @@ pub const ProtectedCallResult = union(enum) {
 pub const ApiCallbackDispatchFn = *const fn (*ApiCallbackContext) anyerror!void;
 pub const CClosureDispatchFn = *const fn (*CClosureContext) anyerror!void;
 pub const CClosureResumeDispatchFn = *const fn (*CClosureResumeContext) anyerror!void;
+pub const CDebugHookDispatchFn = *const fn (*CDebugHookContext) anyerror!void;
+
+pub const DebugHookEvent = enum {
+    call,
+    ret,
+    line,
+    count,
+    tail_call,
+};
+
+pub const CDebugHookContext = struct {
+    state: *State,
+    thread: *Thread,
+    event: DebugHookEvent,
+    currentline: ?usize = null,
+    ftransfer: i64 = 0,
+    ntransfer: usize = 0,
+    user_data: ?*anyopaque,
+};
 
 pub const CClosureContext = struct {
     state: *State,
@@ -857,6 +876,7 @@ pub const State = struct {
     api_callback_user_data: ?*anyopaque = null,
     c_closure_dispatch: ?CClosureDispatchFn = null,
     c_closure_resume_dispatch: ?CClosureResumeDispatchFn = null,
+    c_debug_hook_dispatch: ?CDebugHookDispatchFn = null,
     c_closure_user_data: ?*anyopaque = null,
     coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
@@ -1286,6 +1306,18 @@ pub const State = struct {
     }
 
     fn callHook(self: *State, thread: *Thread, event: []const u8) !void {
+        if (self.c_debug_hook_dispatch) |dispatch| {
+            var context = CDebugHookContext{
+                .state = self,
+                .thread = thread,
+                .event = debugHookEvent(event),
+                .currentline = if (std.mem.eql(u8, event, "line")) lineForFrame(thread.frames.items[thread.frames.items.len - 1]) else null,
+                .ftransfer = thread.hook_transfer_index_base,
+                .ntransfer = thread.hook_transfer_count,
+                .user_data = self.c_closure_user_data,
+            };
+            return dispatch(&context);
+        }
         const args = [_]Value{.{ .string = try self.intern(event) }};
         try self.callHookWithArgs(thread, &args);
     }
@@ -1384,6 +1416,10 @@ pub const State = struct {
 
     pub fn setCClosureResumeDispatch(self: *State, dispatch: CClosureResumeDispatchFn) void {
         self.c_closure_resume_dispatch = dispatch;
+    }
+
+    pub fn setCDebugHookDispatch(self: *State, dispatch: CDebugHookDispatchFn) void {
+        self.c_debug_hook_dispatch = dispatch;
     }
 
     pub fn newCClosure(self: *State, function_id: usize, upvalue_values: []const Value) !*CClosure {
@@ -5966,6 +6002,14 @@ fn debugValueTypeName(value: Value) []const u8 {
         .native,
         => "function",
     };
+}
+
+fn debugHookEvent(event: []const u8) DebugHookEvent {
+    if (std.mem.eql(u8, event, "return")) return .ret;
+    if (std.mem.eql(u8, event, "line")) return .line;
+    if (std.mem.eql(u8, event, "count")) return .count;
+    if (std.mem.eql(u8, event, "tail call")) return .tail_call;
+    return .call;
 }
 
 pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
