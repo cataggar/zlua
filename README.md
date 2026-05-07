@@ -1,6 +1,6 @@
 # zlua
 
-zlua is a Zig implementation of Lua 5.5. It is built around the same surfaces Lua users expect: a command-line interpreter, standard libraries, a Zig-native embedding API, and a Lua C API compatibility layer.
+zlua is a source-compatible Lua 5.5 implementation written in Zig. It is built for hosts that want an embeddable Lua runtime with explicit capabilities, while still providing the familiar command-line interpreter, standard libraries, and Lua C API compatibility layer.
 
 The project targets Zig `0.16.0`.
 
@@ -45,36 +45,37 @@ Lua sees 42
 
 The default state opens safe standard libraries with sandboxed host capabilities. Hosts can opt into filesystem, output, clock, process, bytecode, callbacks, userdata, and resource-limit behavior through the API documented in [docs/embedding.md](docs/embedding.md).
 
-## Project Goals
+## Design Priorities
 
-zlua is compatibility-driven. Its main goal is to match the official Lua 5.5 C implementation for parser acceptance, runtime semantics, standard-library behavior, diagnostics, and C API behavior.
+zlua is compatibility-driven. Its target is the official Lua 5.5 C implementation for parser acceptance, runtime semantics, standard-library behavior, diagnostics, and C API behavior.
 
 The project is designed to be useful in four related ways:
 
-- Provide a standalone Lua 5.5 command-line interpreter.
-- Provide a Zig-native embedding API where hosts control capabilities, resource limits, callbacks, and userdata.
-- Provide standard-library behavior that follows Lua 5.5 while still allowing sandboxed embedding defaults.
-- Provide a Lua C API compatibility layer where it can be backed by zlua semantics in a practical, testable way.
+- Run Lua 5.5 programs through a standalone command-line interpreter.
+- Embed Lua in Zig with explicit host capabilities, resource limits, callbacks, and userdata.
+- Keep standard-library behavior close to Lua 5.5 while allowing sandboxed embedding defaults.
+- Provide practical, testable Lua C API compatibility where it can be backed by zlua semantics.
 
-Those goals are kept honest by building and testing against downloaded Lua 5.5 sources and tests. A system Lua install is not required; the build downloads the oracle into `.zlua-deps/` when needed.
-
-The implementation is organized as a conventional frontend/compiler/runtime pipeline, with these public and testing surfaces layered on top:
-
-| Surface | Purpose |
-| --- | --- |
-| CLI | Run Lua files, stdin, expressions, REPL sessions, and implementation test modes. |
-| Zig embedding API | Create Lua states, load code, expose callbacks, manage userdata, and control host capabilities. |
-| Standard libraries | Provide Lua-visible library behavior implemented against the zlua runtime. |
-| C API layer | Offer a Lua C API compatibility library backed by zlua where practical. |
-| Test harnesses | Compare zlua against CLua through differential fixtures and the official Lua 5.5 test suite. |
+These priorities are kept honest by building and testing against downloaded Lua 5.5 sources and tests.
 
 ## Quick Start
 
-Build the CLI and downloaded CLua oracle, then run a script through the build runner:
+Build the CLI and downloaded CLua oracle:
 
 ```sh
 zig build
+```
+
+Run a Lua script through the build runner:
+
+```sh
 zig build run -- path/to/script.lua
+```
+
+Compile the Zig embedding examples:
+
+```sh
+zig build examples
 ```
 
 Run the default CI-equivalent local check:
@@ -87,7 +88,9 @@ For focused development, testing, benchmarking, and `just` recipes, see [docs/de
 
 ## Compatibility
 
-Compatibility work is tested at several levels instead of relying on isolated examples:
+Compatibility work is oracle-driven rather than example-driven. The build downloads Lua 5.5 sources and official tests, builds a local `lua5.5`, and uses that binary as the behavioral reference; a system Lua install is not required.
+
+`zig build ci` is the aggregate gate for the main project surfaces:
 
 | Layer | What it checks |
 | --- | --- |
