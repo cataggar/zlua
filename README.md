@@ -37,6 +37,12 @@ fn hostAdd(lhs: i64, rhs: i64) i64 {
 }
 ```
 
+Output:
+
+```text
+Lua sees 42
+```
+
 The default state opens safe standard libraries with sandboxed host capabilities. Hosts can opt into filesystem, output, clock, process, bytecode, callbacks, userdata, and resource-limit behavior through the API documented in [docs/embedding.md](docs/embedding.md).
 
 ## Project Goals
