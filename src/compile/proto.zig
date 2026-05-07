@@ -72,6 +72,7 @@ pub const Proto = struct {
     debug_name: ?[]const u8 = null,
     defined_line: usize = 0,
     last_defined_line: usize = 0,
+    has_to_close_locals: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Proto {
         return .{
@@ -131,6 +132,7 @@ pub const Proto = struct {
     }
 
     pub fn addLocal(self: *Proto, local: LocalDebug) !usize {
+        if (local.to_close) self.has_to_close_locals = true;
         try self.locals.append(self.allocator, .{
             .name = try self.dupe(local.name),
             .register = local.register,

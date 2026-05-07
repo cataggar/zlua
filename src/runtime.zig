@@ -591,13 +591,19 @@ const BinaryChunkReader = struct {
         const local_count = try self.readCount();
         try proto.locals.ensureTotalCapacity(proto.allocator, local_count);
         for (0..local_count) |_| {
+            const name = try self.readProtoString(proto);
+            const register = try self.readU16();
+            const start_pc = try self.readUsize();
+            const end_pc = try self.readUsize();
+            const to_close = try self.readBool();
             try proto.locals.append(proto.allocator, .{
-                .name = try self.readProtoString(proto),
-                .register = try self.readU16(),
-                .start_pc = try self.readUsize(),
-                .end_pc = try self.readUsize(),
-                .to_close = try self.readBool(),
+                .name = name,
+                .register = register,
+                .start_pc = start_pc,
+                .end_pc = end_pc,
+                .to_close = to_close,
             });
+            if (to_close) proto.has_to_close_locals = true;
         }
 
         const upvalue_count = try self.readCount();
@@ -906,7 +912,12 @@ pub const Table = struct {
                 self.array.items[index - 1] = value;
                 return;
             }
-            if (value != .nil and (index == self.array.items.len + 1 or index <= self.array.capacity)) {
+            if (value != .nil and index == self.array.items.len + 1) {
+                try self.array.append(allocator, value);
+                self.removeHashKey(key);
+                return;
+            }
+            if (value != .nil and index <= self.array.capacity) {
                 const old_len = self.array.items.len;
                 try self.array.resize(allocator, index);
                 @memset(self.array.items[old_len..], .nil);
@@ -949,6 +960,7 @@ pub const Table = struct {
     pub fn len(self: Table) i64 {
         var result = self.array.items.len;
         while (result > 0 and self.array.items[result - 1] == .nil) result -= 1;
+        if (self.entries.items.len == 0) return @intCast(result);
         while (result < std.math.maxInt(i64)) {
             const next_index = result + 1;
             if (self.get(.{ .integer = @intCast(next_index) }) == .nil) break;
@@ -1570,20 +1582,48 @@ pub const State = struct {
             try self.callLineHook(thread);
             try self.callCountHook(thread);
 
+            frame = &thread.frames.items[thread.frames.items.len - 1];
+            const base = frame.base;
+            const stack = thread.stack.items;
+
             switch (instruction) {
-                .load_nil => |dest| self.set(thread, dest, .nil),
-                .load_bool => |op| self.set(thread, op.dest, .{ .boolean = op.value }),
-                .load_const => |op| self.set(thread, op.dest, try self.closureConstant(frame.closure, op.constant)),
-                .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
-                .get_global => |op| self.set(thread, op.register, self.getGlobalValue(constantString(proto, op.name))),
-                .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
+                .load_nil => |dest| stack[base + dest] = .nil,
+                .load_bool => |op| stack[base + op.dest] = .{ .boolean = op.value },
+                .load_const => |op| stack[base + op.dest] = try self.closureConstant(frame.closure, op.constant),
+                .move => |op| stack[base + op.dest] = stack[base + op.source],
+                .get_global => |op| stack[base + op.register] = self.getGlobalValue(constantString(proto, op.name)),
+                .set_global => |op| try self.setGlobal(constantString(proto, op.name), stack[base + op.register]),
                 .declare_global => |op| try self.declareGlobal(thread, constantString(proto, op.name), op.table, op.value),
-                .add => |op| try self.binaryOpToRegister(thread, op, .add),
-                .sub => |op| try self.binaryOpToRegister(thread, op, .sub),
+                .add => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (lhs == .integer and rhs == .integer) {
+                        stack[base + op.dest] = .{ .integer = lhs.integer +% rhs.integer };
+                    } else {
+                        try self.binaryOpToRegister(thread, op, .add);
+                    }
+                },
+                .sub => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (lhs == .integer and rhs == .integer) {
+                        stack[base + op.dest] = .{ .integer = lhs.integer -% rhs.integer };
+                    } else {
+                        try self.binaryOpToRegister(thread, op, .sub);
+                    }
+                },
                 .mul => |op| try self.binaryOpToRegister(thread, op, .mul),
                 .div => |op| try self.binaryOpToRegister(thread, op, .div),
                 .idiv => |op| try self.binaryOpToRegister(thread, op, .idiv),
-                .mod => |op| try self.binaryOpToRegister(thread, op, .mod),
+                .mod => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (lhs == .integer and rhs == .integer and rhs.integer != 0) {
+                        stack[base + op.dest] = .{ .integer = floorMod(lhs.integer, rhs.integer) };
+                    } else {
+                        try self.binaryOpToRegister(thread, op, .mod);
+                    }
+                },
                 .pow => |op| try self.binaryOpToRegister(thread, op, .pow),
                 .band => |op| try self.binaryOpToRegister(thread, op, .band),
                 .bor => |op| try self.binaryOpToRegister(thread, op, .bor),
@@ -1593,23 +1633,98 @@ pub const State = struct {
                 .unm => |op| try self.unaryOpToRegister(thread, op, .unm),
                 .bnot => |op| try self.unaryOpToRegister(thread, op, .bnot),
                 .concat => |op| try self.binaryOpToRegister(thread, op, .concat),
-                .eq => |op| try self.equalValuesToRegister(thread, op),
-                .lt => |op| try self.compareValuesToRegister(thread, op, .lt),
-                .le => |op| try self.compareValuesToRegister(thread, op, .le),
-                .not => |op| self.set(thread, op.dest, .{ .boolean = !truthy(self.get(thread, op.source)) }),
+                .eq => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (lhs != .table or rhs != .table) {
+                        stack[base + op.dest] = .{ .boolean = valuesEqual(lhs, rhs) };
+                    } else {
+                        try self.equalValuesToRegister(thread, op);
+                    }
+                },
+                .lt => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (rawCompare(lhs, rhs, .lt)) |result| {
+                        stack[base + op.dest] = .{ .boolean = result };
+                    } else {
+                        try self.compareValuesToRegister(thread, op, .lt);
+                    }
+                },
+                .le => |op| {
+                    const lhs = stack[base + op.left];
+                    const rhs = stack[base + op.right];
+                    if (rawCompare(lhs, rhs, .le)) |result| {
+                        stack[base + op.dest] = .{ .boolean = result };
+                    } else {
+                        try self.compareValuesToRegister(thread, op, .le);
+                    }
+                },
+                .not => |op| stack[base + op.dest] = .{ .boolean = !truthy(stack[base + op.source]) },
                 .len => |op| try self.lengthToRegister(thread, op),
-                .new_table => |op| self.set(thread, op.dest, try self.newTableWithHints(op.array_hint, op.hash_hint)),
+                .new_table => |op| stack[base + op.dest] = try self.newTableWithHints(op.array_hint, op.hash_hint),
                 .set_list => |op| try self.setList(thread, op),
-                .get_table => |op| try self.getTableToRegister(thread, op.dest, self.get(thread, op.table), self.get(thread, op.key)),
-                .set_table => |op| try self.setTableFromThreadContinuable(thread, self.get(thread, op.table), self.get(thread, op.key), self.get(thread, op.value)),
-                .get_field => |op| try self.getTableToRegister(thread, op.dest, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }),
-                .set_field => |op| try self.setTableFromThreadContinuable(thread, self.get(thread, op.table), .{ .string = constantString(proto, op.name) }, self.get(thread, op.value)),
-                .jmp => |offset| try self.jumpThread(thread, offset, true),
-                .test_op => |op| if (truthy(self.get(thread, op.register)) == op.jump_if_truthy) try self.jumpThread(thread, op.offset, true),
+                .get_table => |op| {
+                    const table_value = stack[base + op.table];
+                    const key_value = stack[base + op.key];
+                    if (fastTableArrayGet(table_value, key_value)) |value| {
+                        stack[base + op.dest] = value;
+                    } else {
+                        try self.getTableToRegister(thread, op.dest, table_value, key_value);
+                    }
+                },
+                .set_table => |op| {
+                    const table_value = stack[base + op.table];
+                    const key_value = stack[base + op.key];
+                    const value = stack[base + op.value];
+                    if (!try self.fastTableArraySet(table_value, key_value, value)) {
+                        try self.setTableFromThreadContinuable(thread, table_value, key_value, value);
+                    }
+                },
+                .get_field => |op| try self.getTableToRegister(thread, op.dest, stack[base + op.table], .{ .string = constantString(proto, op.name) }),
+                .set_field => |op| try self.setTableFromThreadContinuable(thread, stack[base + op.table], .{ .string = constantString(proto, op.name) }, stack[base + op.value]),
+                .jmp => |offset| {
+                    if (proto.has_to_close_locals) {
+                        try self.jumpThread(thread, offset, true);
+                    } else {
+                        const source_pc = frame.pc;
+                        const target_pc = jumpTarget(source_pc, offset);
+                        frame.pc = target_pc;
+                        if (target_pc < source_pc) {
+                            frame.last_hook_line = null;
+                            if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
+                        }
+                    }
+                },
+                .test_op => |op| if (truthy(stack[base + op.register]) == op.jump_if_truthy) {
+                    if (proto.has_to_close_locals) {
+                        try self.jumpThread(thread, op.offset, true);
+                    } else {
+                        const source_pc = frame.pc;
+                        const target_pc = jumpTarget(source_pc, op.offset);
+                        frame.pc = target_pc;
+                        if (target_pc < source_pc) {
+                            frame.last_hook_line = null;
+                            if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
+                        }
+                    }
+                },
                 .test_set => |op| {
-                    const value = self.get(thread, op.source);
-                    self.set(thread, op.dest, value);
-                    if (truthy(value) == op.jump_if_truthy) try self.jumpThread(thread, op.offset, true);
+                    const value = stack[base + op.source];
+                    stack[base + op.dest] = value;
+                    if (truthy(value) == op.jump_if_truthy) {
+                        if (proto.has_to_close_locals) {
+                            try self.jumpThread(thread, op.offset, true);
+                        } else {
+                            const source_pc = frame.pc;
+                            const target_pc = jumpTarget(source_pc, op.offset);
+                            frame.pc = target_pc;
+                            if (target_pc < source_pc) {
+                                frame.last_hook_line = null;
+                                if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
+                            }
+                        }
+                    }
                 },
                 .call => |op| try self.callValue(thread, op),
                 .tail_call => |op| try self.tailCallValue(thread, op),
@@ -1620,12 +1735,17 @@ pub const State = struct {
                 .tfor_prep => |op| if (!(try self.advanceGenericFor(thread, op, true))) try self.jumpThread(thread, op.offset, false),
                 .tfor_call => |op| _ = try self.advanceGenericFor(thread, op, false),
                 .tfor_loop => |op| try self.jumpThread(thread, op.offset, false),
-                .closure => |op| self.set(thread, op.dest, try self.newClosure(thread, proto.children.items[op.proto])),
-                .get_upvalue => |op| self.set(thread, op.register, self.readUpvalue(thread, op.upvalue)),
-                .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, self.get(thread, op.register)),
-                .close => |register| self.closeUpvalues(thread, thread.frames.items[thread.frames.items.len - 1].base + register),
+                .closure => |op| stack[base + op.dest] = try self.newClosure(thread, proto.children.items[op.proto]),
+                .get_upvalue => |op| stack[base + op.register] = self.readUpvalue(thread, op.upvalue),
+                .set_upvalue => |op| self.writeUpvalue(thread, op.upvalue, stack[base + op.register]),
+                .close => |register| if (thread.open_upvalues != null) self.closeUpvalues(thread, base + register),
                 .check_close => |register| try self.checkToBeClosedRegister(thread, register),
                 .close_tbc => |register| try self.closeToBeClosedRegister(thread, register, null),
+            }
+
+            if (!instructionPreservesLastResult(instruction)) {
+                thread.last_result_count = 0;
+                thread.last_transfer_count = 0;
             }
 
             if (self.gc_running and (self.collect_after_instruction or self.shouldRunAutoGc())) try self.collectGarbageConservatively(thread);
@@ -1668,6 +1788,41 @@ pub const State = struct {
         const old_capacity_bytes = tableCapacityBytes(table);
         try table.set(self.allocator, key, value);
         if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+    }
+
+    fn fastTableArraySet(self: *State, table_value: Value, key_value: Value, value: Value) !bool {
+        if (table_value != .table) return false;
+        const index = arrayIndex(key_value) orelse return false;
+        const table = table_value.table;
+        if (index <= table.array.items.len) {
+            const slot = &table.array.items[index - 1];
+            if (slot.* != .nil or table.metatable == null) {
+                slot.* = value;
+                self.writeTableBarrier(table, key_value, value);
+                return true;
+            }
+            return false;
+        }
+        if (table.metatable != null or value == .nil) return false;
+        if (index == table.array.items.len + 1) {
+            const old_capacity_bytes = tableCapacityBytes(table);
+            try table.array.append(self.allocator, value);
+            table.removeHashKey(key_value);
+            if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+            self.writeTableBarrier(table, key_value, value);
+            return true;
+        }
+        if (index > table.array.capacity) return false;
+
+        const old_capacity_bytes = tableCapacityBytes(table);
+        const old_len = table.array.items.len;
+        try table.array.resize(self.allocator, index);
+        @memset(table.array.items[old_len..], .nil);
+        table.array.items[index - 1] = value;
+        table.removeHashKey(key_value);
+        if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+        self.writeTableBarrier(table, key_value, value);
+        return true;
     }
 
     fn traceInstruction(self: *State, frame: CallFrame, pc: usize, instruction: bytecode.Instruction) !void {
@@ -2646,9 +2801,10 @@ pub const State = struct {
 
     fn jumpThread(self: *State, thread: *Thread, offset: bytecode.JumpOffset, auto_gc: bool) !void {
         const frame_index = thread.frames.items.len - 1;
-        const source_pc = thread.frames.items[frame_index].pc;
+        const frame = &thread.frames.items[frame_index];
+        const source_pc = frame.pc;
         const target_pc = jumpTarget(source_pc, offset);
-        try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, null);
+        if (frame.proto.has_to_close_locals) try self.closeToBeClosedExitingPc(thread, frame_index, source_pc, target_pc, null);
         thread.frames.items[frame_index].pc = target_pc;
         if (target_pc < source_pc) {
             thread.frames.items[frame_index].last_hook_line = null;
@@ -2692,20 +2848,41 @@ pub const State = struct {
     }
 
     fn forLoop(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
-        const current = self.get(thread, op.base);
-        const limit = self.get(thread, op.base + 1);
-        const step = self.get(thread, op.base + 2);
+        const frame = &thread.frames.items[thread.frames.items.len - 1];
+        const absolute_base = frame.base + op.base;
+        const stack = thread.stack.items;
+        const current = stack[absolute_base];
+        const limit = stack[absolute_base + 1];
+        const step = stack[absolute_base + 2];
         if (current == .integer and limit == .integer and step == .integer) {
             const next = current.integer +% step.integer;
-            self.set(thread, op.base, .{ .integer = next });
+            stack[absolute_base] = .{ .integer = next };
             const wrapped = (step.integer > 0 and next < current.integer) or (step.integer < 0 and next > current.integer);
-            if (!wrapped and forLoopContinuesInteger(next, limit.integer, step.integer)) try self.jumpThread(thread, op.offset, false);
+            if (!wrapped and forLoopContinuesInteger(next, limit.integer, step.integer)) {
+                if (frame.proto.has_to_close_locals) {
+                    try self.jumpThread(thread, op.offset, false);
+                } else {
+                    const source_pc = frame.pc;
+                    const target_pc = jumpTarget(source_pc, op.offset);
+                    frame.pc = target_pc;
+                    if (target_pc < source_pc) frame.last_hook_line = null;
+                }
+            }
             return;
         }
 
         const next = (try toNumber(current)) + (try toNumber(step));
-        self.set(thread, op.base, .{ .number = next });
-        if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) try self.jumpThread(thread, op.offset, false);
+        stack[absolute_base] = .{ .number = next };
+        if (forLoopContinuesNumber(next, try toNumber(limit), try toNumber(step))) {
+            if (frame.proto.has_to_close_locals) {
+                try self.jumpThread(thread, op.offset, false);
+            } else {
+                const source_pc = frame.pc;
+                const target_pc = jumpTarget(source_pc, op.offset);
+                frame.pc = target_pc;
+                if (target_pc < source_pc) frame.last_hook_line = null;
+            }
+        }
     }
 
     fn closeToBeClosedExitingPc(self: *State, thread: *Thread, frame_index: usize, source_pc: usize, target_pc: usize, error_value: ?Value) !void {
@@ -6664,6 +6841,13 @@ fn jumpTarget(pc: usize, offset: bytecode.JumpOffset) usize {
     return if (offset >= 0) pc + @as(usize, @intCast(offset)) else pc - @as(usize, @intCast(-offset));
 }
 
+fn instructionPreservesLastResult(instruction: bytecode.Instruction) bool {
+    return switch (instruction) {
+        .call, .tail_call, .ret, .vararg => true,
+        else => false,
+    };
+}
+
 fn forLoopContinuesInteger(current: i64, limit: i64, step: i64) bool {
     return if (step > 0) current <= limit else current >= limit;
 }
@@ -6845,6 +7029,16 @@ fn arrayIndex(value: Value) ?usize {
     };
     if (integer <= 0) return null;
     return std.math.cast(usize, integer);
+}
+
+fn fastTableArrayGet(table_value: Value, key_value: Value) ?Value {
+    if (table_value != .table) return null;
+    const index = arrayIndex(key_value) orelse return null;
+    const table = table_value.table;
+    if (index > table.array.items.len) return null;
+    const value = table.array.items[index - 1];
+    if (value != .nil or table.metatable == null) return value;
+    return null;
 }
 
 pub fn runtimeArgValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {

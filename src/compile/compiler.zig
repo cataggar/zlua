@@ -600,6 +600,13 @@ const FunctionCompiler = struct {
             .function_literal => |body| try self.compileFunctionLiteral(body, dest, null),
             .grouped => |inner| try self.compileExpr(inner, dest),
             .index => |index| {
+                if (self.sourceRegister(index.receiver)) |table| {
+                    if (self.sourceRegister(index.key)) |key| {
+                        const table_origin = try self.exprOrigin(index.receiver);
+                        _ = try self.emitWithErrorSite(.{ .get_table = .{ .dest = dest, .table = table, .key = key } }, .index, &.{table_origin}, null);
+                        return;
+                    }
+                }
                 const mark = self.registerMark();
                 const table = try self.allocReg();
                 const key = try self.allocReg();
@@ -690,8 +697,11 @@ const FunctionCompiler = struct {
 
     fn compileUnary(self: *FunctionCompiler, unary: ast.UnaryExpr, dest: bytecode.Register) anyerror!void {
         const mark = self.registerMark();
-        const source = try self.allocReg();
-        try self.compileExpr(unary.operand, source);
+        const source = if (self.sourceRegister(unary.operand)) |register| register else source: {
+            const register = try self.allocReg();
+            try self.compileExpr(unary.operand, register);
+            break :source register;
+        };
         const instruction: bytecode.Instruction = switch (unary.op) {
             .negate => .{ .unm = .{ .dest = dest, .source = source } },
             .not => .{ .not = .{ .dest = dest, .source = source } },
@@ -1162,6 +1172,7 @@ const FunctionCompiler = struct {
         if (!synthetic and self.activeUserLocalCount() >= lua_max_local_variables) return self.failTooManyLocalVariables();
         const debug_index = try self.proto.addLocal(.{ .name = name, .register = register, .start_pc = self.proto.pc() });
         self.proto.locals.items[debug_index].to_close = to_close;
+        if (to_close) self.proto.has_to_close_locals = true;
         try self.locals.append(self.allocator, .{ .name = name, .register = register, .debug_index = debug_index, .to_close = to_close, .synthetic = synthetic });
         try self.decls.append(self.allocator, .{ .name = name, .kind = .local, .local_index = self.locals.items.len - 1 });
         return register;

@@ -93,6 +93,14 @@ rawset(raw, "y", 3)
 print(rawget(raw, "x"), rawget(raw, "missing"), raw.y, rawlen(raw))
 print(rawequal(raw, raw), rawequal(raw, setmetatable({}, getmetatable(raw))))
 
+local array_meta = setmetatable({10, nil, 30}, {
+  __index = function(self, key) return "missing:" .. key end,
+  __newindex = function(self, key, value) rawset(self, key + 10, value * 2) end,
+})
+array_meta[1] = 11
+array_meta[2] = 12
+print(array_meta[1], array_meta[2], array_meta[12], array_meta[4])
+
 local locked = setmetatable({}, {__metatable = "locked"})
 print(getmetatable(locked))
 
