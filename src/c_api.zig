@@ -1,10 +1,28 @@
 const std = @import("std");
 const runtime = @import("runtime.zig");
+const stdlib = @import("stdlib.zig");
 
 pub const lua_State = opaque {};
 const lua_Debug = opaque {};
-const luaL_Buffer = opaque {};
-const luaL_Reg = opaque {};
+const LuaLBufferInit = extern union {
+    n: lua_Number,
+    u: f64,
+    s: ?*anyopaque,
+    i: lua_Integer,
+    l: c_long,
+    b: [LUAL_BUFFERSIZE]u8,
+};
+const luaL_Buffer = extern struct {
+    b: ?[*]u8,
+    size: usize,
+    n: usize,
+    L: ?*lua_State,
+    init: LuaLBufferInit,
+};
+const luaL_Reg = extern struct {
+    name: ?[*:0]const u8,
+    func: lua_CFunction,
+};
 
 const lua_Number = f64;
 const lua_Integer = c_longlong;
@@ -46,6 +64,25 @@ const LUA_RIDX_GLOBALS: lua_Integer = 2;
 const LUA_RIDX_MAINTHREAD: lua_Integer = 3;
 const LUA_REGISTRYINDEX: c_int = -(std.math.maxInt(c_int) / 2 + 1000);
 const LUA_EXTRASPACE: usize = @sizeOf(?*anyopaque);
+const LUA_VERSION_NUM: lua_Number = 505;
+const LUAL_NUMSIZES: usize = @sizeOf(lua_Integer) * 16 + @sizeOf(lua_Number);
+const LUA_NOREF: c_int = -2;
+const LUA_REFNIL: c_int = -1;
+const LUAL_BUFFERSIZE: usize = 16 * @sizeOf(?*anyopaque) * @sizeOf(lua_Number);
+const LUA_GNAME = "_G";
+const LUA_LOADED_TABLE = "_LOADED";
+const LUA_PRELOAD_TABLE = "_PRELOAD";
+
+const LUA_GLIBK: c_int = 1;
+const LUA_LOADLIBK: c_int = LUA_GLIBK << 1;
+const LUA_COLIBK: c_int = LUA_LOADLIBK << 1;
+const LUA_DBLIBK: c_int = LUA_COLIBK << 1;
+const LUA_IOLIBK: c_int = LUA_DBLIBK << 1;
+const LUA_MATHLIBK: c_int = LUA_IOLIBK << 1;
+const LUA_OSLIBK: c_int = LUA_MATHLIBK << 1;
+const LUA_STRLIBK: c_int = LUA_OSLIBK << 1;
+const LUA_TABLIBK: c_int = LUA_STRLIBK << 1;
+const LUA_UTF8LIBK: c_int = LUA_TABLIBK << 1;
 
 const LUA_OPADD: c_int = 0;
 const LUA_OPSUB: c_int = 1;
@@ -90,6 +127,7 @@ const Value = union(enum) {
     light_userdata: ?*anyopaque,
     lua_closure: *runtime.Closure,
     c_closure: *runtime.CClosure,
+    runtime_native: runtime.Value,
 
     fn typeTag(self: Value) c_int {
         return switch (self) {
@@ -101,7 +139,7 @@ const Value = union(enum) {
             .userdata => LUA_TUSERDATA,
             .thread => LUA_TTHREAD,
             .light_userdata => LUA_TLIGHTUSERDATA,
-            .lua_closure, .c_closure => LUA_TFUNCTION,
+            .lua_closure, .c_closure, .runtime_native => LUA_TFUNCTION,
         };
     }
 };
@@ -599,12 +637,17 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .light_userdata => |value| rhs == .light_userdata and value == rhs.light_userdata,
         .lua_closure => |value| rhs == .lua_closure and value == rhs.lua_closure,
         .c_closure => |value| rhs == .c_closure and value == rhs.c_closure,
+        .runtime_native => |value| rhs == .runtime_native and runtime.valuesEqual(value, rhs.runtime_native),
     };
 }
 
 fn cStringSlice(s: ?[*:0]const u8) []const u8 {
     const ptr = s orelse return &.{};
     return std.mem.span(ptr);
+}
+
+fn initBufferPtr(B: *luaL_Buffer) [*]u8 {
+    return @ptrCast(&B.init.b);
 }
 
 fn functionId(function: lua_CFunction) usize {
@@ -662,7 +705,7 @@ fn appendValueString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), valu
         .userdata => |userdata| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(userdata.bytes.ptr)}),
         .thread => |target| try appendFmt(out, allocator, "thread: 0x{x}", .{@intFromPtr(target)}),
         .light_userdata => |ptr| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(ptr)}),
-        .lua_closure, .c_closure => try out.appendSlice(allocator, "function"),
+        .lua_closure, .c_closure, .runtime_native => try out.appendSlice(allocator, "function"),
     }
 }
 
@@ -737,6 +780,53 @@ fn metatableField(value: Value, name: []const u8) Value {
     return .nil;
 }
 
+fn cValueMetatable(value: Value) ?*CTable {
+    return switch (value) {
+        .table => |table| table.metatable,
+        .userdata => |userdata| userdata.metatable,
+        else => null,
+    };
+}
+
+fn rawTableGetString(state: *CState, table: *CTable, key: []const u8) Value {
+    const key_string = createString(state, key) orelse return .nil;
+    return table.get(.{ .string = key_string });
+}
+
+fn rawTableSetString(state: *CState, table: *CTable, key: []const u8, value: Value) bool {
+    const key_string = createString(state, key) orelse return false;
+    table.set(state.allocator(), .{ .string = key_string }, value) catch return false;
+    return true;
+}
+
+fn valueToStringBytes(thread: *CThread, value: Value) ?[]const u8 {
+    switch (value) {
+        .string => |string| return string.bytes,
+        .integer, .number => {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(thread.owner.allocator());
+            appendValueString(thread.owner.allocator(), &out, value) catch return null;
+            const string = createString(thread.owner, out.items) orelse return null;
+            return string.bytes;
+        },
+        .boolean => |boolean| return if (boolean) "true" else "false",
+        .nil => return "nil",
+        .light_userdata => return "light userdata",
+        .table => return "table",
+        .userdata => return "userdata",
+        .thread => return "thread",
+        .lua_closure, .c_closure, .runtime_native => return "function",
+    }
+}
+
+fn auxTypeName(thread: *CThread, idx: c_int) []const u8 {
+    const value = valueAt(thread, idx) orelse return "no value";
+    if (value == .light_userdata) return "light userdata";
+    const name_value = metatableField(value, "__name");
+    if (name_value == .string) return name_value.string.bytes;
+    return std.mem.span(lua_typename(@ptrCast(thread.public_state), value.typeTag()));
+}
+
 fn getTable(thread: *CThread, table: *CTable, key: Value, depth: usize) Value {
     const value = table.get(key);
     if (value != .nil) return value;
@@ -782,6 +872,7 @@ fn cToRuntimeValue(state: *CState, value: Value, depth: usize) !runtime.Value {
             break :blk runtime_value;
         },
         .c_closure => |closure| .{ .c_closure = closure },
+        .runtime_native => |native| native,
         .thread, .light_userdata => .nil,
     };
 }
@@ -816,7 +907,7 @@ fn runtimeToCValue(state: *CState, value: runtime.Value, depth: usize) !Value {
         .userdata => |userdata| if (findUserdataByPtr(state, userdata.ptr)) |c_userdata| .{ .userdata = c_userdata } else .nil,
         .coroutine_wrapper => .nil,
         .gmatch_iterator => .nil,
-        else => .nil,
+        else => .{ .runtime_native = value },
     };
 }
 
@@ -1100,6 +1191,7 @@ fn callStackFunction(thread: *CThread, nargs: c_int, nresults: c_int, protected:
     return switch (callable) {
         .lua_closure => |closure| callLuaClosure(thread, closure, args, nresults, protected),
         .c_closure => |closure| callCClosure(thread, closure, args, nresults, protected),
+        .runtime_native => |native| callRuntimeCallable(thread, native, args, nresults, protected),
         else => blk: {
             thread.stack.items.len = base;
             _ = pushStringBytes(thread, "attempt to call a non-function value");
@@ -1107,6 +1199,42 @@ fn callStackFunction(thread: *CThread, nargs: c_int, nresults: c_int, protected:
             break :blk LUA_ERRRUN;
         },
     };
+}
+
+fn callRuntimeCallable(thread: *CThread, callable: runtime.Value, args: []const Value, nresults: c_int, protected: bool) c_int {
+    const base = thread.stack.items.len - args.len - 1;
+    const allocator = thread.owner.allocator();
+    const runtime_args = allocator.alloc(runtime.Value, args.len) catch return LUA_ERRMEM;
+    defer allocator.free(runtime_args);
+    for (args, 0..) |arg, index| runtime_args[index] = cToRuntimeValue(thread.owner, arg, 0) catch return LUA_ERRMEM;
+
+    const runtime_thread = thread.owner.runtime_state.newCoroutine(callable) catch return LUA_ERRMEM;
+    const result = thread.owner.runtime_state.resumeThread(runtime_thread, runtime_args) catch |err| switch (err) {
+        error.OutOfMemory => return LUA_ERRMEM,
+        else => return LUA_ERRRUN,
+    };
+    if (!protected and result == .failure) {
+        thread.stack.items.len = base;
+        _ = pushValue(thread, runtimeToCValue(thread.owner, result.failure, 0) catch .nil);
+        raiseUnprotected(thread);
+    }
+
+    switch (result) {
+        .success => |runtime_results| {
+            defer thread.owner.runtime_state.allocator.free(runtime_results);
+            const c_results = allocator.alloc(Value, runtime_results.len) catch return LUA_ERRMEM;
+            defer allocator.free(c_results);
+            for (runtime_results, 0..) |value, index| c_results[index] = runtimeToCValue(thread.owner, value, 0) catch return LUA_ERRMEM;
+            finishCallResults(thread, base, c_results, nresults);
+            syncRuntimeGlobalsToC(thread.owner);
+            return LUA_OK;
+        },
+        .failure => |failure| {
+            thread.stack.items.len = base;
+            _ = pushValue(thread, runtimeToCValue(thread.owner, failure, 0) catch .nil);
+            return LUA_ERRRUN;
+        },
+    }
 }
 
 fn runtimeArgsFromTop(thread: *CThread, narg: c_int) ?[]runtime.Value {
@@ -1497,6 +1625,28 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
         return null;
     };
 
+    state.registry_table.set(allocator, .{ .integer = 1 }, .{ .boolean = false }) catch {
+        state.deinitOwnedObjects();
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    };
+    state.registry_table.set(allocator, .{ .integer = LUA_RIDX_GLOBALS }, .{ .table = state.global_table }) catch {
+        state.deinitOwnedObjects();
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    };
+    state.registry_table.set(allocator, .{ .integer = LUA_RIDX_MAINTHREAD }, .{ .thread = &state.main_thread }) catch {
+        state.deinitOwnedObjects();
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    };
+
     if (!ensureStack(&state.main_thread, LUA_MINSTACK)) {
         state.deinitOwnedObjects();
         state.runtime_state.deinit();
@@ -1858,6 +2008,15 @@ pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const any
         .light_userdata => |ptr| ptr,
         .lua_closure => |closure| closure,
         .c_closure => |closure| closure,
+        .runtime_native => |native| switch (native) {
+            .table => |table| table,
+            .closure => |closure| closure,
+            .c_closure => |closure| closure,
+            .userdata => |userdata| userdata.ptr,
+            .string => |string| string.ptr,
+            .thread => |target| target,
+            else => null,
+        },
         else => null,
     };
 }
@@ -2125,6 +2284,19 @@ pub export fn lua_getglobal(L: ?*lua_State, name: ?[*:0]const u8) callconv(.c) c
     return value.typeTag();
 }
 
+fn pushGlobalValue(thread: *CThread, name: []const u8) bool {
+    const key = createString(thread.owner, name) orelse return false;
+    _ = pushValue(thread, thread.owner.global_table.get(.{ .string = key }));
+    return true;
+}
+
+fn setGlobalValue(thread: *CThread, name: []const u8, value: Value) bool {
+    const key = createString(thread.owner, name) orelse return false;
+    thread.owner.global_table.set(thread.owner.allocator(), .{ .string = key }, value) catch return false;
+    syncCGlobalToRuntime(thread.owner, name, value);
+    return true;
+}
+
 pub export fn lua_gettable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return LUA_TNONE;
     if (thread.stack.items.len == 0) return LUA_TNONE;
@@ -2177,7 +2349,8 @@ pub export fn lua_rawget(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
 pub export fn lua_rawgeti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return LUA_TNONE;
     if (idx == LUA_REGISTRYINDEX) {
-        const value: Value = switch (n) {
+        var value = thread.owner.registry_table.get(.{ .integer = n });
+        if (value == .nil) value = switch (n) {
             1 => .{ .boolean = false },
             LUA_RIDX_GLOBALS => .{ .table = thread.owner.global_table },
             LUA_RIDX_MAINTHREAD => .{ .thread = &thread.owner.main_thread },
@@ -2259,6 +2432,15 @@ pub export fn lua_setglobal(L: ?*lua_State, name: ?[*:0]const u8) callconv(.c) v
     syncCGlobalToRuntime(thread.owner, name_bytes, value);
 }
 
+fn rawSetRegistryInteger(thread: *CThread, index: lua_Integer, value: Value) bool {
+    thread.owner.registry_table.set(thread.owner.allocator(), .{ .integer = index }, value) catch return false;
+    return true;
+}
+
+fn rawSetRegistryString(thread: *CThread, key: []const u8, value: Value) bool {
+    return rawTableSetString(thread.owner, thread.owner.registry_table, key, value);
+}
+
 pub export fn lua_settable(L: ?*lua_State, idx: c_int) callconv(.c) void {
     const thread = threadFromState(L) orelse return;
     if (thread.stack.items.len < 2) return;
@@ -2297,6 +2479,11 @@ pub export fn lua_rawset(L: ?*lua_State, idx: c_int) callconv(.c) void {
 pub export fn lua_rawseti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) void {
     const thread = threadFromState(L) orelse return;
     if (thread.stack.items.len == 0) return;
+    if (idx == LUA_REGISTRYINDEX) {
+        const value = thread.stack.pop().?;
+        _ = rawSetRegistryInteger(thread, n, value);
+        return;
+    }
     const table_value = valueAt(thread, idx) orelse .nil;
     const value = thread.stack.pop().?;
     if (table_value == .table) table_value.table.set(thread.owner.allocator(), .{ .integer = n }, value) catch return;
@@ -2786,58 +2973,138 @@ pub export fn lua_gethookcount(_: ?*lua_State) callconv(.c) c_int {
     return 0;
 }
 
-pub export fn luaL_checkversion_(_: ?*lua_State, _: lua_Number, _: usize) callconv(.c) void {}
-
-pub export fn luaL_getmetafield(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_checkversion_(L: ?*lua_State, version: lua_Number, sizes: usize) callconv(.c) void {
+    if (version != LUA_VERSION_NUM or sizes != LUAL_NUMSIZES) {
+        _ = luaL_error(L, zstr("core and library have incompatible numeric types"));
+    }
 }
 
-pub export fn luaL_callmeta(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_getmetafield(L: ?*lua_State, idx: c_int, field: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNIL;
+    const value = valueAt(thread, idx) orelse return LUA_TNIL;
+    const metatable = cValueMetatable(value) orelse return LUA_TNIL;
+    const result = rawTableGetString(thread.owner, metatable, cStringSlice(field));
+    if (result == .nil) return LUA_TNIL;
+    _ = pushValue(thread, result);
+    return result.typeTag();
 }
 
-pub export fn luaL_tolstring(_: ?*lua_State, _: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
-    if (len) |ptr| ptr.* = 0;
-    return null;
+pub export fn luaL_callmeta(L: ?*lua_State, idx: c_int, field: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const abs = lua_absindex(L, idx);
+    if (luaL_getmetafield(L, abs, field) == LUA_TNIL) return 0;
+    _ = pushValue(thread, valueAt(thread, abs) orelse .nil);
+    lua_callk(L, 1, 1, 0, null);
+    return 1;
 }
 
-pub export fn luaL_argerror(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_tolstring(L: ?*lua_State, idx: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse {
+        if (len) |ptr| ptr.* = 0;
+        return null;
+    };
+    const abs = lua_absindex(L, idx);
+    if (luaL_callmeta(L, abs, zstr("__tostring")) != 0) {
+        if (lua_type(L, -1) != LUA_TSTRING and lua_type(L, -1) != LUA_TNUMBER) {
+            _ = luaL_error(L, zstr("'__tostring' must return a string"));
+            return null;
+        }
+        return lua_tolstring(L, -1, len);
+    }
+    const value = valueAt(thread, abs) orelse .nil;
+    switch (value) {
+        .integer, .number, .string => _ = pushValue(thread, value),
+        .boolean => |boolean| _ = pushStringBytes(thread, if (boolean) "true" else "false"),
+        .nil => _ = pushStringBytes(thread, "nil"),
+        else => {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(thread.owner.allocator());
+            const name_value = metatableField(value, "__name");
+            const kind = if (name_value == .string) name_value.string.bytes else auxTypeName(thread, abs);
+            appendFmt(&out, thread.owner.allocator(), "{s}: 0x{x}", .{ kind, if (lua_topointer(L, abs)) |ptr| @intFromPtr(ptr) else 0 }) catch return null;
+            _ = pushStringBytes(thread, out.items);
+        },
+    }
+    return lua_tolstring(L, -1, len);
 }
 
-pub export fn luaL_typeerror(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_argerror(L: ?*lua_State, arg: c_int, extramsg: ?[*:0]const u8) callconv(.c) c_int {
+    return luaL_error(L, zstr("bad argument #%d (%s)"), arg, extramsg);
 }
 
-pub export fn luaL_checklstring(_: ?*lua_State, _: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
-    if (len) |ptr| ptr.* = 0;
-    return null;
+pub export fn luaL_typeerror(L: ?*lua_State, arg: c_int, tname: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    var message = std.ArrayList(u8).empty;
+    defer message.deinit(thread.owner.allocator());
+    appendFmt(&message, thread.owner.allocator(), "{s} expected, got {s}", .{ cStringSlice(tname), auxTypeName(thread, arg) }) catch return 0;
+    const string = createString(thread.owner, message.items) orelse return 0;
+    return luaL_argerror(L, arg, string.bytes.ptr);
 }
 
-pub export fn luaL_optlstring(_: ?*lua_State, _: c_int, def: ?[*:0]const u8, len: ?*usize) callconv(.c) ?[*:0]const u8 {
-    if (len) |ptr| ptr.* = 0;
-    return def;
+pub export fn luaL_checklstring(L: ?*lua_State, arg: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
+    const value = lua_tolstring(L, arg, len) orelse {
+        _ = luaL_typeerror(L, arg, zstr("string"));
+        return null;
+    };
+    return value;
 }
 
-pub export fn luaL_checknumber(_: ?*lua_State, _: c_int) callconv(.c) lua_Number {
-    return 0;
+pub export fn luaL_optlstring(L: ?*lua_State, arg: c_int, def: ?[*:0]const u8, len: ?*usize) callconv(.c) ?[*:0]const u8 {
+    const tp = lua_type(L, arg);
+    if (tp == LUA_TNONE or tp == LUA_TNIL) {
+        if (len) |ptr| ptr.* = cStringSlice(def).len;
+        return def;
+    }
+    return luaL_checklstring(L, arg, len);
 }
 
-pub export fn luaL_optnumber(_: ?*lua_State, _: c_int, def: lua_Number) callconv(.c) lua_Number {
-    return def;
+pub export fn luaL_checknumber(L: ?*lua_State, arg: c_int) callconv(.c) lua_Number {
+    var isnum: c_int = 0;
+    const value = lua_tonumberx(L, arg, &isnum);
+    if (isnum == 0) _ = luaL_typeerror(L, arg, zstr("number"));
+    return value;
 }
 
-pub export fn luaL_checkinteger(_: ?*lua_State, _: c_int) callconv(.c) lua_Integer {
-    return 0;
+pub export fn luaL_optnumber(L: ?*lua_State, arg: c_int, def: lua_Number) callconv(.c) lua_Number {
+    const tp = lua_type(L, arg);
+    return if (tp == LUA_TNONE or tp == LUA_TNIL) def else luaL_checknumber(L, arg);
 }
 
-pub export fn luaL_optinteger(_: ?*lua_State, _: c_int, def: lua_Integer) callconv(.c) lua_Integer {
-    return def;
+pub export fn luaL_checkinteger(L: ?*lua_State, arg: c_int) callconv(.c) lua_Integer {
+    var isnum: c_int = 0;
+    const value = lua_tointegerx(L, arg, &isnum);
+    if (isnum == 0) {
+        if (lua_isnumber(L, arg) != 0) {
+            _ = luaL_argerror(L, arg, zstr("number has no integer representation"));
+        } else {
+            _ = luaL_typeerror(L, arg, zstr("number"));
+        }
+    }
+    return value;
 }
 
-pub export fn luaL_checkstack(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) void {}
-pub export fn luaL_checktype(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
-pub export fn luaL_checkany(_: ?*lua_State, _: c_int) callconv(.c) void {}
+pub export fn luaL_optinteger(L: ?*lua_State, arg: c_int, def: lua_Integer) callconv(.c) lua_Integer {
+    const tp = lua_type(L, arg);
+    return if (tp == LUA_TNONE or tp == LUA_TNIL) def else luaL_checkinteger(L, arg);
+}
+
+pub export fn luaL_checkstack(L: ?*lua_State, size: c_int, msg: ?[*:0]const u8) callconv(.c) void {
+    if (lua_checkstack(L, size) == 0) {
+        if (msg) |_| {
+            _ = luaL_error(L, zstr("stack overflow (%s)"), msg);
+        } else {
+            _ = luaL_error(L, zstr("stack overflow"));
+        }
+    }
+}
+
+pub export fn luaL_checktype(L: ?*lua_State, arg: c_int, tag: c_int) callconv(.c) void {
+    if (lua_type(L, arg) != tag) _ = luaL_typeerror(L, arg, lua_typename(L, tag));
+}
+
+pub export fn luaL_checkany(L: ?*lua_State, arg: c_int) callconv(.c) void {
+    if (lua_type(L, arg) == LUA_TNONE) _ = luaL_argerror(L, arg, zstr("value expected"));
+}
 
 pub export fn luaL_newmetatable(L: ?*lua_State, tname: ?[*:0]const u8) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return 0;
@@ -2875,7 +3142,10 @@ pub export fn luaL_testudata(L: ?*lua_State, ud: c_int, tname: ?[*:0]const u8) c
 }
 
 pub export fn luaL_checkudata(L: ?*lua_State, ud: c_int, tname: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    return luaL_testudata(L, ud, tname);
+    return luaL_testudata(L, ud, tname) orelse {
+        _ = luaL_typeerror(L, ud, tname);
+        return null;
+    };
 }
 
 pub export fn luaL_where(L: ?*lua_State, _: c_int) callconv(.c) void {
@@ -2914,21 +3184,58 @@ pub export fn luaL_error(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv(.c) 
     return lua_error(L);
 }
 
-pub export fn luaL_checkoption(_: ?*lua_State, _: c_int, _: ?[*:0]const u8, _: [*]const ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_checkoption(L: ?*lua_State, arg: c_int, def: ?[*:0]const u8, list: [*]const ?[*:0]const u8) callconv(.c) c_int {
+    const name = luaL_optlstring(L, arg, def, null) orelse zstr("");
+    var index: c_int = 0;
+    while (list[@intCast(index)]) |entry| : (index += 1) {
+        if (std.mem.eql(u8, std.mem.span(entry), std.mem.span(name))) return index;
+    }
+    const message = lua_pushfstring(L, zstr("invalid option '%s'"), name);
+    return luaL_argerror(L, arg, message);
 }
 
-pub export fn luaL_fileresult(_: ?*lua_State, stat: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return stat;
+pub export fn luaL_fileresult(L: ?*lua_State, stat: c_int, fname: ?[*:0]const u8) callconv(.c) c_int {
+    if (stat != 0) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    const err = currentErrno();
+    lua_pushnil(L);
+    const message = cStringSlice(strerror(err));
+    if (fname) |name| {
+        _ = lua_pushfstring(L, zstr("%s: %s"), name, if (message.len == 0) zstr("(no extra info)") else (strerror(err) orelse zstr("(no extra info)")));
+    } else {
+        _ = lua_pushstring(L, if (message.len == 0) zstr("(no extra info)") else (strerror(err) orelse zstr("(no extra info)")));
+    }
+    lua_pushinteger(L, err);
+    return 3;
 }
 
-pub export fn luaL_execresult(_: ?*lua_State, stat: c_int) callconv(.c) c_int {
-    return stat;
+pub export fn luaL_execresult(L: ?*lua_State, stat: c_int) callconv(.c) c_int {
+    if (stat != 0 and currentErrno() != 0) return luaL_fileresult(L, 0, null);
+    var code = stat;
+    var what = zstr("exit");
+    if ((stat & 0x7f) == 0) {
+        code = (stat >> 8) & 0xff;
+    } else if (((stat & 0x7f) + 1) >= 2) {
+        code = stat & 0x7f;
+        what = zstr("signal");
+    }
+    if (std.mem.eql(u8, std.mem.span(what), "exit") and code == 0) {
+        lua_pushboolean(L, 1);
+    } else {
+        lua_pushnil(L);
+    }
+    _ = lua_pushstring(L, what);
+    lua_pushinteger(L, code);
+    return 3;
 }
 
 extern fn malloc(usize) ?*anyopaque;
 extern fn realloc(?*anyopaque, usize) ?*anyopaque;
 extern fn free(?*anyopaque) void;
+extern fn strerror(c_int) ?[*:0]const u8;
+extern fn __errno_location() *c_int;
 extern fn fopen(?[*:0]const u8, ?[*:0]const u8) ?*anyopaque;
 extern fn fseek(?*anyopaque, c_long, c_int) c_int;
 extern fn ftell(?*anyopaque) c_long;
@@ -2936,6 +3243,10 @@ extern fn rewind(?*anyopaque) void;
 extern fn fread(?*anyopaque, usize, usize, ?*anyopaque) usize;
 extern fn fclose(?*anyopaque) c_int;
 extern fn write(c_int, ?*const anyopaque, usize) isize;
+
+fn currentErrno() c_int {
+    return __errno_location().*;
+}
 
 pub export fn luaL_alloc(_: ?*anyopaque, ptr: ?*anyopaque, _: usize, nsize: usize) callconv(.c) ?*anyopaque {
     if (nsize == 0) {
@@ -2946,11 +3257,43 @@ pub export fn luaL_alloc(_: ?*anyopaque, ptr: ?*anyopaque, _: usize, nsize: usiz
     return realloc(ptr, nsize);
 }
 
-pub export fn luaL_ref(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return -2;
+pub export fn luaL_ref(L: ?*lua_State, t: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_NOREF;
+    if (thread.stack.items.len == 0) return LUA_NOREF;
+    if (thread.stack.items[thread.stack.items.len - 1] == .nil) {
+        _ = thread.stack.pop();
+        return LUA_REFNIL;
+    }
+    const table_value = valueAt(thread, t) orelse return LUA_NOREF;
+    if (table_value != .table) return LUA_NOREF;
+    const table = table_value.table;
+
+    var ref: c_int = 0;
+    const freelist = table.get(.{ .integer = 1 });
+    if (freelist == .integer) ref = @intCast(freelist.integer);
+    if (ref != 0) {
+        const next = table.get(.{ .integer = ref });
+        table.set(thread.owner.allocator(), .{ .integer = 1 }, next) catch return LUA_NOREF;
+    } else {
+        const length = table.len();
+        if (length == 0) table.set(thread.owner.allocator(), .{ .integer = 1 }, .{ .integer = 0 }) catch return LUA_NOREF;
+        ref = @intCast(@max(length, 1) + 1);
+    }
+    const value = thread.stack.pop().?;
+    table.set(thread.owner.allocator(), .{ .integer = ref }, value) catch return LUA_NOREF;
+    return ref;
 }
 
-pub export fn luaL_unref(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
+pub export fn luaL_unref(L: ?*lua_State, t: c_int, ref: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (ref < 0) return;
+    const table_value = valueAt(thread, t) orelse return;
+    if (table_value != .table) return;
+    const table = table_value.table;
+    const head = table.get(.{ .integer = 1 });
+    table.set(thread.owner.allocator(), .{ .integer = ref }, if (head == .nil) .{ .integer = 0 } else head) catch return;
+    table.set(thread.owner.allocator(), .{ .integer = 1 }, .{ .integer = ref }) catch return;
+}
 
 pub export fn luaL_loadfilex(L: ?*lua_State, filename: ?[*:0]const u8, mode: ?[*:0]const u8) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return LUA_ERRRUN;
@@ -3045,85 +3388,298 @@ fn isWarningControl(msg: ?[*:0]const u8, tocont: c_int, comptime command: []cons
     return text.len == command.len + 1 and text[0] == '@' and std.mem.eql(u8, text[1..], command);
 }
 
-pub export fn luaL_makeseed(_: ?*lua_State) callconv(.c) c_uint {
-    return 0;
+pub export fn luaL_makeseed(L: ?*lua_State) callconv(.c) c_uint {
+    const thread = threadFromState(L) orelse return 0;
+    return @truncate(@intFromPtr(thread) ^ @intFromPtr(thread.owner));
 }
 
 pub export fn luaL_len(L: ?*lua_State, idx: c_int) callconv(.c) lua_Integer {
     lua_len(L, idx);
-    const value = lua_tointegerx(L, -1, null);
+    var isnum: c_int = 0;
+    const value = lua_tointegerx(L, -1, &isnum);
     lua_settop(L, -2);
+    if (isnum == 0) _ = luaL_error(L, zstr("object length is not an integer"));
     return value;
 }
 
-pub export fn luaL_addgsub(_: ?*luaL_Buffer, _: ?[*:0]const u8, _: ?[*:0]const u8, _: ?[*:0]const u8) callconv(.c) void {}
-
-pub export fn luaL_gsub(_: ?*lua_State, s: ?[*:0]const u8, _: ?[*:0]const u8, _: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    return s;
+pub export fn luaL_addgsub(buffer: ?*luaL_Buffer, s: ?[*:0]const u8, pattern: ?[*:0]const u8, replacement: ?[*:0]const u8) callconv(.c) void {
+    const B = buffer orelse return;
+    const source = cStringSlice(s);
+    const pat = cStringSlice(pattern);
+    const repl = cStringSlice(replacement);
+    if (pat.len == 0) {
+        luaL_addlstring(B, source.ptr, source.len);
+        return;
+    }
+    var rest = source;
+    while (std.mem.indexOf(u8, rest, pat)) |pos| {
+        luaL_addlstring(B, rest.ptr, pos);
+        luaL_addlstring(B, repl.ptr, repl.len);
+        rest = rest[pos + pat.len ..];
+    }
+    luaL_addlstring(B, rest.ptr, rest.len);
 }
 
-pub export fn luaL_setfuncs(_: ?*lua_State, _: ?*const luaL_Reg, _: c_int) callconv(.c) void {}
+pub export fn luaL_gsub(L: ?*lua_State, s: ?[*:0]const u8, pattern: ?[*:0]const u8, replacement: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    var buffer: luaL_Buffer = undefined;
+    luaL_buffinit(L, &buffer);
+    luaL_addgsub(&buffer, s, pattern, replacement);
+    luaL_pushresult(&buffer);
+    return lua_tolstring(L, -1, null);
+}
 
-pub export fn luaL_getsubtable(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
+pub export fn luaL_setfuncs(L: ?*lua_State, regs: ?*const luaL_Reg, nup: c_int) callconv(.c) void {
+    _ = threadFromState(L) orelse return;
+    if (nup < 0) return;
+    luaL_checkstack(L, nup, zstr("too many upvalues"));
+    const upvalue_count: usize = @intCast(nup);
+    const list: [*]const luaL_Reg = @ptrCast(regs orelse return);
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        const reg = list[index];
+        const name = reg.name orelse break;
+        if (reg.func == null) {
+            lua_pushboolean(L, 0);
+        } else {
+            for (0..upvalue_count) |_| lua_pushvalue(L, -nup);
+            lua_pushcclosure(L, reg.func, nup);
+        }
+        lua_setfield(L, -(nup + 2), name);
+    }
+    lua_settop(L, -nup - 1);
+}
+
+pub export fn luaL_getsubtable(L: ?*lua_State, idx: c_int, field: ?[*:0]const u8) callconv(.c) c_int {
+    if (lua_getfield(L, idx, field) == LUA_TTABLE) return 1;
+    lua_settop(L, -2);
+    const abs = lua_absindex(L, idx);
+    lua_createtable(L, 0, 0);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, abs, field);
     return 0;
 }
 
-pub export fn luaL_traceback(_: ?*lua_State, _: ?*lua_State, _: ?[*:0]const u8, _: c_int) callconv(.c) void {}
-pub export fn luaL_requiref(_: ?*lua_State, _: ?[*:0]const u8, _: lua_CFunction, _: c_int) callconv(.c) void {}
-pub export fn luaL_buffinit(_: ?*lua_State, _: ?*luaL_Buffer) callconv(.c) void {}
-
-pub export fn luaL_prepbuffsize(_: ?*luaL_Buffer, _: usize) callconv(.c) ?[*]u8 {
-    return null;
+pub export fn luaL_traceback(L: ?*lua_State, _: ?*lua_State, msg: ?[*:0]const u8, _: c_int) callconv(.c) void {
+    if (msg) |text| {
+        _ = lua_pushfstring(L, zstr("%s\nstack traceback:"), text);
+    } else {
+        _ = lua_pushstring(L, zstr("stack traceback:"));
+    }
 }
 
-pub export fn luaL_addlstring(_: ?*luaL_Buffer, _: ?[*]const u8, _: usize) callconv(.c) void {}
-pub export fn luaL_addstring(_: ?*luaL_Buffer, _: ?[*:0]const u8) callconv(.c) void {}
-pub export fn luaL_addvalue(_: ?*luaL_Buffer) callconv(.c) void {}
-pub export fn luaL_pushresult(_: ?*luaL_Buffer) callconv(.c) void {}
-pub export fn luaL_pushresultsize(_: ?*luaL_Buffer, _: usize) callconv(.c) void {}
-
-pub export fn luaL_buffinitsize(_: ?*lua_State, _: ?*luaL_Buffer, _: usize) callconv(.c) ?[*]u8 {
-    return null;
+pub export fn luaL_requiref(L: ?*lua_State, modname: ?[*:0]const u8, openf: lua_CFunction, glb: c_int) callconv(.c) void {
+    _ = luaL_getsubtable(L, LUA_REGISTRYINDEX, zstr(LUA_LOADED_TABLE));
+    _ = lua_getfield(L, -1, modname);
+    if (lua_toboolean(L, -1) == 0) {
+        lua_settop(L, -2);
+        lua_pushcclosure(L, openf, 0);
+        _ = lua_pushstring(L, modname);
+        lua_callk(L, 1, 1, 0, null);
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -3, modname);
+    }
+    lua_rotate(L, -2, -1);
+    lua_settop(L, -2);
+    if (glb != 0) {
+        lua_pushvalue(L, -1);
+        lua_setglobal(L, modname);
+    }
 }
 
-pub export fn luaopen_base(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_buffinit(L: ?*lua_State, buffer: ?*luaL_Buffer) callconv(.c) void {
+    const B = buffer orelse return;
+    B.L = L;
+    B.b = initBufferPtr(B);
+    B.n = 0;
+    B.size = LUAL_BUFFERSIZE;
+    lua_pushlightuserdata(L, B);
 }
 
-pub export fn luaopen_package(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_prepbuffsize(buffer: ?*luaL_Buffer, size: usize) callconv(.c) ?[*]u8 {
+    const B = buffer orelse return null;
+    if (B.b == null) return null;
+    if (B.size - B.n >= size) return B.b.? + B.n;
+    const thread = threadFromState(B.L) orelse return null;
+    const new_size = @max(B.n + size + 1, B.size + B.size / 2);
+    const storage = thread.owner.allocator().alloc(u8, new_size) catch return null;
+    if (B.n != 0) @memcpy(storage[0..B.n], B.b.?[0..B.n]);
+    if (B.b.? != initBufferPtr(B)) thread.owner.allocator().free(B.b.?[0..B.size]);
+    B.b = storage.ptr;
+    B.size = storage.len;
+    return B.b.? + B.n;
 }
 
-pub export fn luaopen_coroutine(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_addlstring(buffer: ?*luaL_Buffer, s: ?[*]const u8, len: usize) callconv(.c) void {
+    if (len == 0) return;
+    const B = buffer orelse return;
+    const ptr = s orelse return;
+    const dest = luaL_prepbuffsize(B, len) orelse return;
+    @memcpy(dest[0..len], ptr[0..len]);
+    B.n += len;
 }
 
-pub export fn luaopen_debug(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_addstring(buffer: ?*luaL_Buffer, s: ?[*:0]const u8) callconv(.c) void {
+    const text = cStringSlice(s);
+    luaL_addlstring(buffer, text.ptr, text.len);
 }
 
-pub export fn luaopen_io(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_addvalue(buffer: ?*luaL_Buffer) callconv(.c) void {
+    const B = buffer orelse return;
+    var len: usize = 0;
+    const text = lua_tolstring(B.L, -1, &len) orelse return;
+    luaL_addlstring(B, text, len);
+    lua_settop(B.L, -2);
 }
 
-pub export fn luaopen_math(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_pushresult(buffer: ?*luaL_Buffer) callconv(.c) void {
+    const B = buffer orelse return;
+    _ = lua_pushlstring(B.L, B.b, B.n);
+    if (B.b != null and B.b.? != initBufferPtr(B)) {
+        if (threadFromState(B.L)) |thread| thread.owner.allocator().free(B.b.?[0..B.size]);
+    }
+    B.b = initBufferPtr(B);
+    B.size = LUAL_BUFFERSIZE;
+    B.n = 0;
+    lua_rotate(B.L, -2, -1);
+    lua_settop(B.L, -2);
 }
 
-pub export fn luaopen_os(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_pushresultsize(buffer: ?*luaL_Buffer, size: usize) callconv(.c) void {
+    const B = buffer orelse return;
+    B.n += size;
+    luaL_pushresult(B);
 }
 
-pub export fn luaopen_string(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_buffinitsize(L: ?*lua_State, buffer: ?*luaL_Buffer, size: usize) callconv(.c) ?[*]u8 {
+    luaL_buffinit(L, buffer);
+    return luaL_prepbuffsize(buffer, size);
 }
 
-pub export fn luaopen_table(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+fn clearGlobalValue(state: *CState, name: []const u8) void {
+    const key = createString(state, name) orelse return;
+    state.global_table.set(state.allocator(), .{ .string = key }, .nil) catch {};
+    if (state.runtime_state.global_table) |table| table.set(state.runtime_state.allocator, .{ .string = name }, .nil) catch {};
+    if (state.runtime_state.globals.getKey(name)) |existing| state.runtime_state.globals.put(existing, .nil) catch {};
 }
 
-pub export fn luaopen_utf8(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+fn openRuntimeLibraries(L: ?*lua_State, libraries: stdlib.LibrarySet, result_name: []const u8, install_global: bool) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    stdlib.openLibraries(&thread.owner.runtime_state, .{ .libraries = libraries }) catch return 0;
+    stdlib.installGlobalTable(&thread.owner.runtime_state) catch return 0;
+    syncRuntimeGlobalsToC(thread.owner);
+    const result = if (std.mem.eql(u8, result_name, LUA_GNAME))
+        Value{ .table = thread.owner.global_table }
+    else blk: {
+        const key = createString(thread.owner, result_name) orelse return 0;
+        break :blk thread.owner.global_table.get(.{ .string = key });
+    };
+    if (!install_global and !std.mem.eql(u8, result_name, LUA_GNAME)) clearGlobalValue(thread.owner, result_name);
+    if (std.mem.eql(u8, result_name, LUA_GNAME)) {
+        _ = pushValue(thread, .{ .table = thread.owner.global_table });
+    } else {
+        _ = pushValue(thread, result);
+    }
+    return 1;
 }
 
-pub export fn luaL_openselectedlibs(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
+fn librarySetForMask(mask: c_int) stdlib.LibrarySet {
+    return .{
+        .base = (mask & LUA_GLIBK) != 0,
+        .package = (mask & LUA_LOADLIBK) != 0,
+        .coroutine = (mask & LUA_COLIBK) != 0,
+        .debug = (mask & LUA_DBLIBK) != 0,
+        .io = (mask & LUA_IOLIBK) != 0,
+        .math = (mask & LUA_MATHLIBK) != 0,
+        .os = (mask & LUA_OSLIBK) != 0,
+        .string = (mask & LUA_STRLIBK) != 0,
+        .table = (mask & LUA_TABLIBK) != 0,
+        .utf8 = (mask & LUA_UTF8LIBK) != 0,
+    };
+}
+
+pub export fn luaopen_base(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .base = true }, LUA_GNAME, true);
+}
+
+pub export fn luaopen_package(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .package = true }, "package", false);
+}
+
+pub export fn luaopen_coroutine(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .coroutine = true }, "coroutine", false);
+}
+
+pub export fn luaopen_debug(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .debug = true }, "debug", false);
+}
+
+pub export fn luaopen_io(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .io = true }, "io", false);
+}
+
+pub export fn luaopen_math(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .math = true }, "math", false);
+}
+
+pub export fn luaopen_os(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .os = true }, "os", false);
+}
+
+pub export fn luaopen_string(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .string = true }, "string", false);
+}
+
+pub export fn luaopen_table(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .table = true }, "table", false);
+}
+
+pub export fn luaopen_utf8(L: ?*lua_State) callconv(.c) c_int {
+    return openRuntimeLibraries(L, .{ .utf8 = true }, "utf8", false);
+}
+
+const StdLibEntry = struct {
+    name: [:0]const u8,
+    mask: c_int,
+    open: lua_CFunction,
+};
+
+const stdlibs = [_]StdLibEntry{
+    .{ .name = LUA_GNAME, .mask = LUA_GLIBK, .open = luaopen_base },
+    .{ .name = "package", .mask = LUA_LOADLIBK, .open = luaopen_package },
+    .{ .name = "coroutine", .mask = LUA_COLIBK, .open = luaopen_coroutine },
+    .{ .name = "debug", .mask = LUA_DBLIBK, .open = luaopen_debug },
+    .{ .name = "io", .mask = LUA_IOLIBK, .open = luaopen_io },
+    .{ .name = "math", .mask = LUA_MATHLIBK, .open = luaopen_math },
+    .{ .name = "os", .mask = LUA_OSLIBK, .open = luaopen_os },
+    .{ .name = "string", .mask = LUA_STRLIBK, .open = luaopen_string },
+    .{ .name = "table", .mask = LUA_TABLIBK, .open = luaopen_table },
+    .{ .name = "utf8", .mask = LUA_UTF8LIBK, .open = luaopen_utf8 },
+};
+
+pub export fn luaL_openselectedlibs(L: ?*lua_State, load: c_int, preload: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const libraries = librarySetForMask(load);
+    if (!libraries.isEmpty()) {
+        stdlib.openLibraries(&thread.owner.runtime_state, .{ .libraries = libraries }) catch return;
+        stdlib.installGlobalTable(&thread.owner.runtime_state) catch return;
+        syncRuntimeGlobalsToC(thread.owner);
+    }
+    _ = luaL_getsubtable(L, LUA_REGISTRYINDEX, zstr(LUA_PRELOAD_TABLE));
+    for (stdlibs) |lib| {
+        if ((load & lib.mask) != 0) {
+            const value = if (std.mem.eql(u8, lib.name, LUA_GNAME)) Value{ .table = thread.owner.global_table } else blk: {
+                const key = createString(thread.owner, lib.name) orelse break :blk Value.nil;
+                break :blk thread.owner.global_table.get(.{ .string = key });
+            };
+            _ = setGlobalValue(thread, lib.name, value);
+            _ = luaL_getsubtable(L, LUA_REGISTRYINDEX, zstr(LUA_LOADED_TABLE));
+            _ = pushValue(thread, value);
+            lua_setfield(L, -2, lib.name.ptr);
+            lua_settop(L, -2);
+        } else if ((preload & lib.mask) != 0) {
+            lua_pushcclosure(L, lib.open, 0);
+            lua_setfield(L, -2, lib.name.ptr);
+        }
+    }
+    lua_settop(L, -2);
+}
