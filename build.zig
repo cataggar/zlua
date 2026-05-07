@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
 
     const clua_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
     const clua_exe = addVendoredClua(b, target, clua_optimize);
+    const clua_lib = addVendoredCluaLib(b, target, clua_optimize);
     b.installArtifact(clua_exe);
 
     const mod = b.addModule("zlua", .{
@@ -27,6 +28,20 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = bench_optimize,
     });
+
+    const zlua_c_lib = b.addLibrary(.{
+        .name = "zlua-c",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lua.h"), "lua.h");
+    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lauxlib.h"), "lauxlib.h");
+    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lualib.h"), "lualib.h");
+    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/luaconf.h"), "luaconf.h");
 
     const exe = b.addExecutable(.{
         .name = "zlua",
@@ -81,6 +96,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(bench_exe);
+
+    const c_api_exe = b.addExecutable(.{
+        .name = "zlua-test-c-api",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_c_api_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zlua", .module = mod }},
+        }),
+    });
+
+    const install_zlua_c = b.addInstallArtifact(zlua_c_lib, .{});
+    const install_c_api_exe = b.addInstallArtifact(c_api_exe, .{});
+    const c_api_step = b.step("c-api", "Build zlua C API library, headers, and harness");
+    c_api_step.dependOn(&install_zlua_c.step);
+    c_api_step.dependOn(&install_c_api_exe.step);
 
     const embedding_examples = [_]EmbeddingExample{
         .{ .key = "run_script", .name = "zlua-embed-run-script", .path = "examples/embed/run_script.zig" },
@@ -149,6 +180,25 @@ pub fn build(b: *std.Build) void {
     run_bench_cmd.addArtifactArg(bench_zlua_exe);
     if (b.args) |args| run_bench_cmd.addArgs(args);
     run_bench_step.dependOn(&run_bench_cmd.step);
+
+    const c_api_test_step = b.step("test-c-api", "Run C API differential fixture harness");
+    const c_api_test_cmd = b.addRunArtifact(c_api_exe);
+    c_api_test_cmd.addArg("--zig");
+    c_api_test_cmd.addArg(b.graph.zig_exe);
+    c_api_test_cmd.addArg("--clua-include");
+    c_api_test_cmd.addDirectoryArg(b.path("vendor/lua-5.5.0/src"));
+    c_api_test_cmd.addArg("--clua-lib");
+    c_api_test_cmd.addArtifactArg(clua_lib);
+    c_api_test_cmd.addArg("--zlua-include");
+    c_api_test_cmd.addDirectoryArg(b.path("vendor/lua-5.5.0/src"));
+    c_api_test_cmd.addArg("--zlua-lib");
+    c_api_test_cmd.addArtifactArg(zlua_c_lib);
+    if (b.args) |args| c_api_test_cmd.addArgs(args);
+    c_api_test_step.dependOn(&c_api_test_cmd.step);
+
+    const ci_c_api_step = b.step("ci-c-api", "Build and test the C API compatibility harness");
+    ci_c_api_step.dependOn(c_api_step);
+    ci_c_api_step.dependOn(c_api_test_step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -232,11 +282,7 @@ fn addVendoredClua(
         .optimize = optimize,
         .link_libc = true,
     });
-    const clua_cflags: []const []const u8 = switch (target.result.os.tag) {
-        .linux => &.{ "-std=gnu99", "-DLUA_USE_LINUX" },
-        .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ "-std=gnu99", "-DLUA_USE_POSIX" },
-        else => &.{"-std=gnu99"},
-    };
+    const clua_cflags = vendoredCluaCFlags(target);
 
     clua_mod.addCSourceFiles(.{
         .root = b.path("vendor/lua-5.5.0/src"),
@@ -254,6 +300,78 @@ fn addVendoredClua(
         .name = "lua5.5",
         .root_module = clua_mod,
     });
+}
+
+fn addVendoredCluaLib(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const lua_sources = [_][]const u8{
+        "lapi.c",
+        "lauxlib.c",
+        "lbaselib.c",
+        "lcode.c",
+        "lcorolib.c",
+        "lctype.c",
+        "ldblib.c",
+        "ldebug.c",
+        "ldo.c",
+        "ldump.c",
+        "lfunc.c",
+        "lgc.c",
+        "linit.c",
+        "liolib.c",
+        "llex.c",
+        "lmathlib.c",
+        "lmem.c",
+        "loadlib.c",
+        "lobject.c",
+        "lopcodes.c",
+        "loslib.c",
+        "lparser.c",
+        "lstate.c",
+        "lstring.c",
+        "lstrlib.c",
+        "ltable.c",
+        "ltablib.c",
+        "ltm.c",
+        "lundump.c",
+        "lutf8lib.c",
+        "lvm.c",
+        "lzio.c",
+    };
+
+    const clua_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    clua_mod.addCSourceFiles(.{
+        .root = b.path("vendor/lua-5.5.0/src"),
+        .files = &lua_sources,
+        .flags = vendoredCluaCFlags(target),
+    });
+    if (target.result.os.tag != .windows) {
+        clua_mod.linkSystemLibrary("m", .{});
+    }
+    if (target.result.os.tag == .linux) {
+        clua_mod.linkSystemLibrary("dl", .{});
+    }
+
+    return b.addLibrary(.{
+        .name = "lua5.5-core",
+        .linkage = .static,
+        .root_module = clua_mod,
+    });
+}
+
+fn vendoredCluaCFlags(target: std.Build.ResolvedTarget) []const []const u8 {
+    return switch (target.result.os.tag) {
+        .linux => &.{ "-std=gnu99", "-DLUA_USE_LINUX" },
+        .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ "-std=gnu99", "-DLUA_USE_POSIX" },
+        else => &.{"-std=gnu99"},
+    };
 }
 
 fn exampleMatches(example: EmbeddingExample, filter: []const u8) bool {
