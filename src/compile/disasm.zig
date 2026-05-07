@@ -88,6 +88,7 @@ fn writeInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instr
         .len => |op| try writeUnary(allocator, out, "LEN", op),
         .concat => |op| try writeBinary(allocator, out, "CONCAT", op),
         .jmp => |offset| try appendFmt(allocator, out, "JMP {d}", .{offset}),
+        .compare_branch => |op| try appendFmt(allocator, out, "COMPARE_BRANCH {s} r{d} r{d} truthy={} {d}", .{ @tagName(op.op), op.left, op.right, op.jump_if_truthy, op.offset }),
         .test_op => |op| try appendFmt(allocator, out, "TEST r{d} truthy={} {d}", .{ op.register, op.jump_if_truthy, op.offset }),
         .test_set => |op| try appendFmt(allocator, out, "TEST_SET r{d} r{d} truthy={} {d}", .{ op.dest, op.source, op.jump_if_truthy, op.offset }),
         .call => |op| try appendFmt(allocator, out, "CALL r{d} args={d} returns={d}", .{ op.base, op.arg_count, op.return_count }),

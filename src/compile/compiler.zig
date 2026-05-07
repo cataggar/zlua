@@ -362,11 +362,7 @@ const FunctionCompiler = struct {
         const end_line = ifEndLine(stmt);
 
         for (stmt.branches) |branch| {
-            const mark = self.registerMark();
-            const condition = try self.allocReg();
-            try self.compileExpr(branch.condition, condition);
-            const skip = try self.emit(.{ .test_op = .{ .register = condition, .jump_if_truthy = false, .offset = 0 } });
-            self.release(mark);
+            const skip = try self.compileConditionJump(branch.condition, false);
 
             try self.compileScopedBlock(branch.body);
             self.current_line = end_line;
@@ -383,11 +379,7 @@ const FunctionCompiler = struct {
     fn compileWhile(self: *FunctionCompiler, stmt: ast.WhileStmt) anyerror!void {
         const end_line = stmt.end_line;
         const loop_start = self.proto.pc();
-        const mark = self.registerMark();
-        const condition = try self.allocReg();
-        try self.compileExpr(stmt.condition, condition);
-        const done = try self.emit(.{ .test_op = .{ .register = condition, .jump_if_truthy = false, .offset = 0 } });
-        self.release(mark);
+        const done = try self.compileConditionJump(stmt.condition, false);
 
         try self.enterLoop(self.registerMark());
         try self.compileScopedBlock(stmt.body);
@@ -748,6 +740,79 @@ const FunctionCompiler = struct {
         }
         self.current_line = right_line;
         self.release(mark);
+    }
+
+    fn compileConditionJump(self: *FunctionCompiler, expr: *const ast.Expr, jump_if_truthy: bool) anyerror!usize {
+        self.current_line = exprLine(expr.*);
+        switch (expr.*) {
+            .grouped => |inner| return self.compileConditionJump(inner, jump_if_truthy),
+            .unary => |unary| if (unary.op == .not) return self.compileConditionJump(unary.operand, !jump_if_truthy),
+            .binary => |binary| if (try self.compileCompareBranch(binary, jump_if_truthy)) |pc| return pc,
+            else => {},
+        }
+
+        const mark = self.registerMark();
+        const condition = try self.allocReg();
+        try self.compileExpr(expr, condition);
+        const jump = try self.emit(.{ .test_op = .{ .register = condition, .jump_if_truthy = jump_if_truthy, .offset = 0 } });
+        self.release(mark);
+        return jump;
+    }
+
+    fn compileCompareBranch(self: *FunctionCompiler, binary: ast.BinaryExpr, jump_if_truthy: bool) anyerror!?usize {
+        var branch_op: bytecode.CompareBranchOp = undefined;
+        var branch_jump_if_truthy = jump_if_truthy;
+        var swap_operands = false;
+        switch (binary.op) {
+            .eq => branch_op = .eq,
+            .ne => {
+                branch_op = .eq;
+                branch_jump_if_truthy = !jump_if_truthy;
+            },
+            .lt => branch_op = .lt,
+            .le => branch_op = .le,
+            .gt => {
+                branch_op = .lt;
+                swap_operands = true;
+            },
+            .ge => {
+                branch_op = .le;
+                swap_operands = true;
+            },
+            else => return null,
+        }
+
+        const mark = self.registerMark();
+        var left_origin = try self.exprOrigin(binary.left);
+        var right_origin = try self.exprOrigin(binary.right);
+        const left = if (self.sourceRegister(binary.left)) |register| register else left: {
+            const register = try self.allocReg();
+            try self.compileExprForcedLine(binary.left, register, binary.op_line);
+            break :left register;
+        };
+        const right = if (self.sourceRegister(binary.right)) |register| register else right: {
+            const register = try self.allocReg();
+            try self.compileExpr(binary.right, register);
+            break :right register;
+        };
+
+        var branch_left = left;
+        var branch_right = right;
+        if (swap_operands) {
+            std.mem.swap(bytecode.Register, &branch_left, &branch_right);
+            std.mem.swap(proto_mod.OperandOrigin, &left_origin, &right_origin);
+        }
+
+        self.current_line = binary.op_line;
+        const pc = try self.emitWithErrorSite(.{ .compare_branch = .{
+            .left = branch_left,
+            .right = branch_right,
+            .op = branch_op,
+            .jump_if_truthy = branch_jump_if_truthy,
+            .offset = 0,
+        } }, .compare, &.{ left_origin, right_origin }, null);
+        self.release(mark);
+        return pc;
     }
 
     fn sourceRegister(self: *FunctionCompiler, expr: *const ast.Expr) ?bytecode.Register {
@@ -1503,4 +1568,26 @@ test "compiles nested function with upvalue descriptor" {
 
     try std.testing.expectEqual(@as(usize, 1), proto.children.items.len);
     try std.testing.expectEqual(@as(usize, 1), proto.children.items[0].upvalues.items.len);
+}
+
+test "lowers comparison conditions to direct branch" {
+    var tree = try frontend.parse(std.testing.allocator,
+        \\local x = 0
+        \\if x == 0 then x = 1 end
+    );
+    defer tree.deinit();
+
+    var proto = try compile(std.testing.allocator, &tree);
+    defer proto.deinit();
+
+    var found_compare_branch = false;
+    var found_test_op = false;
+    for (proto.instructions.items) |instruction| switch (instruction) {
+        .compare_branch => found_compare_branch = true,
+        .test_op => found_test_op = true,
+        else => {},
+    };
+
+    try std.testing.expect(found_compare_branch);
+    try std.testing.expect(!found_test_op);
 }

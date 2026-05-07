@@ -274,6 +274,11 @@ const GenericForContinuation = struct {
     jump_on_nil: bool,
 };
 
+const BranchContinuation = struct {
+    jump_if_truthy: bool,
+    offset: bytecode.JumpOffset,
+};
+
 const TailCallContinuation = struct {
     frame_count: usize,
     base: bytecode.Register,
@@ -284,6 +289,8 @@ const CallOneContinuationResult = union(enum) {
     value: usize,
     truthy: usize,
     inverted_truthy: usize,
+    branch_truthy: BranchContinuation,
+    branch_inverted_truthy: BranchContinuation,
     discard,
 };
 
@@ -443,6 +450,13 @@ fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8)
             try appendBinaryU16(allocator, out, op.source);
         },
         .jmp => |offset| try appendBinaryI32(allocator, out, offset),
+        .compare_branch => |op| {
+            try appendBinaryU16(allocator, out, op.left);
+            try appendBinaryU16(allocator, out, op.right);
+            try out.append(allocator, @intCast(@intFromEnum(op.op)));
+            try appendBinaryBool(allocator, out, op.jump_if_truthy);
+            try appendBinaryI32(allocator, out, op.offset);
+        },
         .test_op => |op| {
             try appendBinaryU16(allocator, out, op.register);
             try appendBinaryBool(allocator, out, op.jump_if_truthy);
@@ -688,6 +702,7 @@ const BinaryChunkReader = struct {
             .len => .{ .len = try self.readUnary() },
             .concat => .{ .concat = try self.readBinary() },
             .jmp => .{ .jmp = try self.readI32() },
+            .compare_branch => .{ .compare_branch = .{ .left = try self.readU16(), .right = try self.readU16(), .op = try self.readEnum(bytecode.CompareBranchOp), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
             .test_op => .{ .test_op = .{ .register = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
             .test_set => .{ .test_set = .{ .dest = try self.readU16(), .source = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
             .call => .{ .call = .{ .base = try self.readU16(), .arg_count = try self.readU16(), .return_count = try self.readU16() } },
@@ -1683,47 +1698,16 @@ pub const State = struct {
                 },
                 .get_field => |op| try self.getTableToRegister(thread, op.dest, stack[base + op.table], .{ .string = constantString(proto, op.name) }),
                 .set_field => |op| try self.setTableFromThreadContinuable(thread, stack[base + op.table], .{ .string = constantString(proto, op.name) }, stack[base + op.value]),
-                .jmp => |offset| {
-                    if (proto.has_to_close_locals) {
-                        try self.jumpThread(thread, offset, true);
-                    } else {
-                        const source_pc = frame.pc;
-                        const target_pc = jumpTarget(source_pc, offset);
-                        frame.pc = target_pc;
-                        if (target_pc < source_pc) {
-                            frame.last_hook_line = null;
-                            if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
-                        }
-                    }
-                },
+                .jmp => |offset| try self.jumpThreadMaybeFast(thread, offset, true),
+                .compare_branch => |op| try self.compareBranch(thread, op),
                 .test_op => |op| if (truthy(stack[base + op.register]) == op.jump_if_truthy) {
-                    if (proto.has_to_close_locals) {
-                        try self.jumpThread(thread, op.offset, true);
-                    } else {
-                        const source_pc = frame.pc;
-                        const target_pc = jumpTarget(source_pc, op.offset);
-                        frame.pc = target_pc;
-                        if (target_pc < source_pc) {
-                            frame.last_hook_line = null;
-                            if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
-                        }
-                    }
+                    try self.jumpThreadMaybeFast(thread, op.offset, true);
                 },
                 .test_set => |op| {
                     const value = stack[base + op.source];
                     stack[base + op.dest] = value;
                     if (truthy(value) == op.jump_if_truthy) {
-                        if (proto.has_to_close_locals) {
-                            try self.jumpThread(thread, op.offset, true);
-                        } else {
-                            const source_pc = frame.pc;
-                            const target_pc = jumpTarget(source_pc, op.offset);
-                            frame.pc = target_pc;
-                            if (target_pc < source_pc) {
-                                frame.last_hook_line = null;
-                                if (self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
-                            }
-                        }
+                        try self.jumpThreadMaybeFast(thread, op.offset, true);
                     }
                 },
                 .call => |op| try self.callValue(thread, op),
@@ -2812,6 +2796,19 @@ pub const State = struct {
         }
     }
 
+    fn jumpThreadMaybeFast(self: *State, thread: *Thread, offset: bytecode.JumpOffset, auto_gc: bool) !void {
+        const frame = &thread.frames.items[thread.frames.items.len - 1];
+        if (frame.proto.has_to_close_locals) return self.jumpThread(thread, offset, auto_gc);
+
+        const source_pc = frame.pc;
+        const target_pc = jumpTarget(source_pc, offset);
+        frame.pc = target_pc;
+        if (target_pc < source_pc) {
+            frame.last_hook_line = null;
+            if (auto_gc and self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
+        }
+    }
+
     fn forPrep(self: *State, thread: *Thread, op: bytecode.ForLoop) !void {
         const initial = self.get(thread, op.base);
         const limit = self.get(thread, op.base + 1);
@@ -3402,7 +3399,6 @@ pub const State = struct {
     }
 
     fn completeReadyCallOneContinuation(self: *State, thread: *Thread) !bool {
-        _ = self;
         const index = readyCallOneContinuationIndex(thread) orelse return false;
         const continuation = thread.call_one_continuations.orderedRemove(index);
         const value = if (thread.last_result_count == 0) Value.nil else thread.stack.items[thread.last_result_base];
@@ -3410,6 +3406,16 @@ pub const State = struct {
             .value => |dest| thread.stack.items[dest] = value,
             .truthy => |dest| thread.stack.items[dest] = .{ .boolean = truthy(value) },
             .inverted_truthy => |dest| thread.stack.items[dest] = .{ .boolean = !truthy(value) },
+            .branch_truthy => |branch| {
+                thread.last_result_count = 0;
+                thread.last_transfer_count = 0;
+                try self.jumpIfBranchResult(thread, truthy(value), branch.jump_if_truthy, branch.offset);
+            },
+            .branch_inverted_truthy => |branch| {
+                thread.last_result_count = 0;
+                thread.last_transfer_count = 0;
+                try self.jumpIfBranchResult(thread, !truthy(value), branch.jump_if_truthy, branch.offset);
+            },
             .discard => {},
         }
         return true;
@@ -3794,6 +3800,46 @@ pub const State = struct {
                 self.set(thread, op.dest, .{ .boolean = !truthy(result) });
             },
         }
+    }
+
+    fn compareBranch(self: *State, thread: *Thread, op: bytecode.CompareBranch) !void {
+        const lhs = self.get(thread, op.left);
+        const rhs = self.get(thread, op.right);
+        switch (op.op) {
+            .eq => {
+                if (valuesEqual(lhs, rhs)) return self.jumpIfBranchResult(thread, true, op.jump_if_truthy, op.offset);
+                if (lhs != .table or rhs != .table) return self.jumpIfBranchResult(thread, false, op.jump_if_truthy, op.offset);
+                const metamethod = (try self.getEitherMetamethod(lhs, rhs, "__eq")) orelse return self.jumpIfBranchResult(thread, false, op.jump_if_truthy, op.offset);
+                const continuation: BranchContinuation = .{ .jump_if_truthy = op.jump_if_truthy, .offset = op.offset };
+                const result = try self.callOneMetamethodWithContinuation(thread, "__eq", metamethod, &.{ lhs, rhs }, .{ .branch_truthy = continuation });
+                try self.jumpIfBranchResult(thread, truthy(result), op.jump_if_truthy, op.offset);
+            },
+            .lt => try self.compareBranchOrder(thread, lhs, rhs, .lt, "__lt", op.jump_if_truthy, op.offset),
+            .le => {
+                if (rawCompare(lhs, rhs, .le)) |result| return self.jumpIfBranchResult(thread, result, op.jump_if_truthy, op.offset);
+                if (try self.getEitherMetamethod(lhs, rhs, "__le")) |metamethod| {
+                    const continuation: BranchContinuation = .{ .jump_if_truthy = op.jump_if_truthy, .offset = op.offset };
+                    const result = try self.callOneMetamethodWithContinuation(thread, "__le", metamethod, &.{ lhs, rhs }, .{ .branch_truthy = continuation });
+                    return self.jumpIfBranchResult(thread, truthy(result), op.jump_if_truthy, op.offset);
+                }
+                const lt = (try self.getEitherMetamethod(lhs, rhs, "__lt")) orelse return self.failCompareTypeError(thread, lhs, rhs);
+                const continuation: BranchContinuation = .{ .jump_if_truthy = op.jump_if_truthy, .offset = op.offset };
+                const result = try self.callOneMetamethodWithContinuation(thread, "__lt", lt, &.{ rhs, lhs }, .{ .branch_inverted_truthy = continuation });
+                try self.jumpIfBranchResult(thread, !truthy(result), op.jump_if_truthy, op.offset);
+            },
+        }
+    }
+
+    fn compareBranchOrder(self: *State, thread: *Thread, lhs: Value, rhs: Value, kind: CompareOp, metamethod_name: []const u8, jump_if_truthy: bool, offset: bytecode.JumpOffset) !void {
+        if (rawCompare(lhs, rhs, kind)) |result| return self.jumpIfBranchResult(thread, result, jump_if_truthy, offset);
+        const metamethod = (try self.getEitherMetamethod(lhs, rhs, metamethod_name)) orelse return self.failCompareTypeError(thread, lhs, rhs);
+        const continuation: BranchContinuation = .{ .jump_if_truthy = jump_if_truthy, .offset = offset };
+        const result = try self.callOneMetamethodWithContinuation(thread, metamethod_name, metamethod, &.{ lhs, rhs }, .{ .branch_truthy = continuation });
+        try self.jumpIfBranchResult(thread, truthy(result), jump_if_truthy, offset);
+    }
+
+    fn jumpIfBranchResult(self: *State, thread: *Thread, result: bool, jump_if_truthy: bool, offset: bytecode.JumpOffset) !void {
+        if (result == jump_if_truthy) try self.jumpThreadMaybeFast(thread, offset, true);
     }
 
     fn lengthToRegister(self: *State, thread: *Thread, op: bytecode.Unary) !void {

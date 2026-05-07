@@ -70,6 +70,7 @@ pub const Instruction = union(enum) {
     concat: Binary,
 
     jmp: JumpOffset,
+    compare_branch: CompareBranch,
     test_op: Test,
     test_set: TestSet,
 
@@ -167,6 +168,20 @@ pub const Binary = struct {
     dest: Register,
     left: Register,
     right: Register,
+};
+
+pub const CompareBranchOp = enum {
+    eq,
+    lt,
+    le,
+};
+
+pub const CompareBranch = struct {
+    left: Register,
+    right: Register,
+    op: CompareBranchOp,
+    jump_if_truthy: bool,
+    offset: JumpOffset,
 };
 
 pub const Test = struct {

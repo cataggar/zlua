@@ -112,6 +112,7 @@ pub const Proto = struct {
         const offset = try jumpOffset(index, target_pc);
         switch (self.instructions.items[index]) {
             .jmp => self.instructions.items[index].jmp = offset,
+            .compare_branch => self.instructions.items[index].compare_branch.offset = offset,
             .test_op => self.instructions.items[index].test_op.offset = offset,
             .test_set => self.instructions.items[index].test_set.offset = offset,
             .for_prep => self.instructions.items[index].for_prep.offset = offset,
