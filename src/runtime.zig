@@ -2621,7 +2621,7 @@ pub const State = struct {
         thread.frames.items[frame_index].pc = target_pc;
         if (target_pc < source_pc) {
             thread.frames.items[frame_index].last_hook_line = null;
-            if (auto_gc and self.gc_running and !self.is_collecting) try self.collectGarbageWithFinalizers(thread);
+            if (auto_gc and self.gc_running and self.shouldRunAutoGc()) try self.collectGarbageConservatively(thread);
         }
     }
 

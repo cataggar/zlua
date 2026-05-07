@@ -947,12 +947,27 @@ fn patternHasMagic(pattern: []const u8) bool {
 fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?Match {
     if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
     if (start > source.len) return null;
-    const relative = std.mem.indexOf(u8, source[start..], pattern) orelse return null;
-    return .{ .range = .{ .start = start + relative, .end = start + relative + pattern.len }, .captures = .{} };
+    if (pattern.len > source.len - start) return null;
+    if (pattern.len == 1) {
+        const index = std.mem.indexOfScalarPos(u8, source, start, pattern[0]) orelse return null;
+        return .{ .range = .{ .start = index, .end = index + 1 }, .captures = .{} };
+    }
+
+    const last_start = source.len - pattern.len;
+    var candidate = start;
+    while (candidate <= last_start) {
+        const haystack = source[candidate .. last_start + 1];
+        const relative = std.mem.indexOfScalar(u8, haystack, pattern[0]) orelse return null;
+        candidate += relative;
+        if (std.mem.eql(u8, source[candidate .. candidate + pattern.len], pattern)) return .{ .range = .{ .start = candidate, .end = candidate + pattern.len }, .captures = .{} };
+        candidate += 1;
+    }
+    return null;
 }
 
 fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, start: usize) !?Match {
     if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
+    if (simpleOneOrMoreEscape(pattern)) |code| return findOneOrMoreEscape(source, code, start);
     if (pattern[0] == '^') {
         const anchored_start = @min(start, source.len);
         const matched = (try matchSimplePatternAt(state, source, pattern[1..], anchored_start)) orelse return null;
@@ -963,6 +978,24 @@ fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, sta
         if (try matchSimplePatternAt(state, source, pattern, candidate)) |matched| return .{ .range = .{ .start = candidate, .end = matched.end }, .captures = matched.captures };
     }
     return null;
+}
+
+fn simpleOneOrMoreEscape(pattern: []const u8) ?u8 {
+    if (pattern.len != 3 or pattern[0] != '%' or pattern[2] != '+') return null;
+    return switch (pattern[1]) {
+        'b', 'f', '0'...'9' => null,
+        else => pattern[1],
+    };
+}
+
+fn findOneOrMoreEscape(source: []const u8, code: u8, start: usize) ?Match {
+    var candidate = @min(start, source.len);
+    while (candidate < source.len and !patternEscapeMatches(code, source[candidate])) : (candidate += 1) {}
+    if (candidate >= source.len) return null;
+
+    var end = candidate + 1;
+    while (end < source.len and patternEscapeMatches(code, source[end])) : (end += 1) {}
+    return .{ .range = .{ .start = candidate, .end = end }, .captures = .{} };
 }
 
 fn matchSimplePatternAt(state: *State, source: []const u8, pattern: []const u8, start: usize) !?MatchResult {

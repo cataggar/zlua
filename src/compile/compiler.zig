@@ -720,11 +720,13 @@ const FunctionCompiler = struct {
         }
 
         const mark = self.registerMark();
-        const right = try self.allocReg();
+        const direct_right = self.sourceRegister(binary.right);
+        const use_direct_right = direct_right != null and direct_right.? != dest;
+        const right = if (use_direct_right) direct_right.? else try self.allocReg();
         var left_origin = try self.exprOrigin(binary.left);
         var right_origin = try self.exprOrigin(binary.right);
         try self.compileExprForcedLine(binary.left, dest, binary.op_line);
-        try self.compileExpr(binary.right, right);
+        if (!use_direct_right) try self.compileExpr(binary.right, right);
         const right_line = exprLine(binary.right.*);
         self.current_line = binary.op_line;
         if (binary.op == .ne) {
@@ -736,6 +738,16 @@ const FunctionCompiler = struct {
         }
         self.current_line = right_line;
         self.release(mark);
+    }
+
+    fn sourceRegister(self: *FunctionCompiler, expr: *const ast.Expr) ?bytecode.Register {
+        return switch (expr.*) {
+            .identifier => |identifier| switch (self.lookupName(identifier.name)) {
+                .local => |local| local.register,
+                else => null,
+            },
+            else => null,
+        };
     }
 
     fn compileExprForcedLine(self: *FunctionCompiler, expr: *const ast.Expr, dest: bytecode.Register, line: usize) anyerror!void {
