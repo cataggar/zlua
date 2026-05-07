@@ -178,13 +178,16 @@ const Value = union(enum) {
 
 const CString = struct {
     bytes: [:0]const u8,
+    external: bool = false,
     external_alloc_f: lua_Alloc = null,
     external_ud: ?*anyopaque = null,
     marked: bool = false,
 
     fn deinit(self: *CString, allocator: std.mem.Allocator) void {
-        if (self.external_alloc_f) |alloc_f| {
-            _ = alloc_f(self.external_ud, @constCast(self.bytes.ptr), self.bytes.len + 1, 0);
+        if (self.external) {
+            if (self.external_alloc_f) |alloc_f| {
+                _ = alloc_f(self.external_ud, @constCast(self.bytes.ptr), self.bytes.len + 1, 0);
+            }
         } else {
             allocator.free(self.bytes);
         }
@@ -566,7 +569,7 @@ fn createString(state: *CState, bytes: []const u8) ?*CString {
 fn createExternalString(state: *CState, bytes: [:0]const u8, alloc_f: lua_Alloc, ud: ?*anyopaque) ?*CString {
     const allocator = state.allocator();
     const string = allocator.create(CString) catch return null;
-    string.* = .{ .bytes = bytes, .external_alloc_f = alloc_f, .external_ud = ud };
+    string.* = .{ .bytes = bytes, .external = true, .external_alloc_f = alloc_f, .external_ud = ud };
     state.strings.append(allocator, string) catch {
         allocator.destroy(string);
         return null;
@@ -892,7 +895,7 @@ fn toNumberValue(value: Value) ?lua_Number {
     return switch (value) {
         .integer => |integer| @floatFromInt(integer),
         .number => |number| number,
-        .string => |string| std.fmt.parseFloat(lua_Number, std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c")) catch null,
+        .string => |string| parseLuaNumber(string.bytes).number,
         else => null,
     };
 }
@@ -902,12 +905,149 @@ fn toIntegerValue(value: Value) ?lua_Integer {
         .integer => |integer| integer,
         .number => |number| floatToInteger(number),
         .string => |string| blk: {
-            const trimmed = std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c");
-            if (std.fmt.parseInt(lua_Integer, trimmed, 10)) |integer| break :blk integer else |_| {}
-            break :blk if (std.fmt.parseFloat(lua_Number, trimmed)) |number| floatToInteger(number) else |_| null;
+            const parsed = parseLuaNumber(string.bytes);
+            if (parsed.integer) |integer| break :blk integer;
+            break :blk if (parsed.number) |number| floatToInteger(number) else null;
         },
         else => null,
     };
+}
+
+const ParsedLuaNumber = struct {
+    consumed: usize = 0,
+    integer: ?lua_Integer = null,
+    number: ?lua_Number = null,
+};
+
+fn parseLuaNumber(text: []const u8) ParsedLuaNumber {
+    const leading = trimLeftAscii(text, " \t\n\r\x0b\x0c");
+    if (leading.len == 0) return .{};
+    const numeral = trimRightAscii(leading, " \t\n\r\x0b\x0c");
+    if (numeral.len == 0) return .{};
+
+    if (parseLuaInteger(numeral)) |integer| {
+        return .{ .consumed = text.len + 1, .integer = integer, .number = @floatFromInt(integer) };
+    }
+    if (parseLuaFloat(numeral)) |number| {
+        return .{ .consumed = text.len + 1, .number = number };
+    }
+    return .{};
+}
+
+fn parseLuaInteger(numeral: []const u8) ?lua_Integer {
+    if (numeral.len == 0) return null;
+    var index: usize = 0;
+    var negative = false;
+    if (numeral[index] == '+' or numeral[index] == '-') {
+        negative = numeral[index] == '-';
+        index += 1;
+        if (index == numeral.len) return null;
+    }
+
+    const rest = numeral[index..];
+    if (rest.len >= 2 and rest[0] == '0' and (rest[1] == 'x' or rest[1] == 'X')) {
+        if (rest.len == 2) return null;
+        const magnitude = std.fmt.parseInt(lua_Unsigned, rest[2..], 16) catch return null;
+        return unsignedMagnitudeToInteger(magnitude, negative);
+    }
+    return std.fmt.parseInt(lua_Integer, numeral, 10) catch null;
+}
+
+fn unsignedMagnitudeToInteger(magnitude: lua_Unsigned, negative: bool) ?lua_Integer {
+    const positive_max: lua_Unsigned = @intCast(std.math.maxInt(lua_Integer));
+    if (!negative) {
+        if (magnitude > positive_max) return null;
+        return @intCast(magnitude);
+    }
+    const negative_limit = positive_max + 1;
+    if (magnitude > negative_limit) return null;
+    if (magnitude == negative_limit) return std.math.minInt(lua_Integer);
+    return -@as(lua_Integer, @intCast(magnitude));
+}
+
+fn parseLuaFloat(numeral: []const u8) ?lua_Number {
+    if (std.mem.indexOfAny(u8, numeral, "nN") != null) return null;
+    if (isHexFloat(numeral)) return parseHexFloat(numeral);
+    return std.fmt.parseFloat(lua_Number, numeral) catch null;
+}
+
+fn isHexFloat(numeral: []const u8) bool {
+    var index: usize = 0;
+    if (index < numeral.len and (numeral[index] == '+' or numeral[index] == '-')) index += 1;
+    return index + 1 < numeral.len and numeral[index] == '0' and (numeral[index + 1] == 'x' or numeral[index + 1] == 'X');
+}
+
+fn parseHexFloat(numeral: []const u8) ?lua_Number {
+    var index: usize = 0;
+    var negative = false;
+    if (numeral[index] == '+' or numeral[index] == '-') {
+        negative = numeral[index] == '-';
+        index += 1;
+    }
+    if (index + 1 >= numeral.len or numeral[index] != '0' or (numeral[index + 1] != 'x' and numeral[index + 1] != 'X')) return null;
+    index += 2;
+
+    var value: lua_Number = 0;
+    var hex_exponent: i32 = 0;
+    var significant_digits: usize = 0;
+    var leading_zeroes: usize = 0;
+    var seen_dot = false;
+    while (index < numeral.len) : (index += 1) {
+        const byte = numeral[index];
+        if (byte == '.') {
+            if (seen_dot) return null;
+            seen_dot = true;
+            continue;
+        }
+        const digit = hexDigitValue(byte) orelse break;
+        if (significant_digits == 0 and digit == 0) {
+            leading_zeroes += 1;
+        } else {
+            significant_digits += 1;
+            if (significant_digits <= 30) {
+                value = value * 16 + @as(lua_Number, @floatFromInt(digit));
+            } else if (!seen_dot) {
+                hex_exponent += 1;
+            }
+        }
+        if (seen_dot) hex_exponent -= 1;
+    }
+    if (leading_zeroes + significant_digits == 0) return null;
+
+    var exponent = hex_exponent * 4;
+    if (index < numeral.len and (numeral[index] == 'p' or numeral[index] == 'P')) {
+        index += 1;
+        if (index >= numeral.len) return null;
+        var exponent_negative = false;
+        if (numeral[index] == '+' or numeral[index] == '-') {
+            exponent_negative = numeral[index] == '-';
+            index += 1;
+            if (index >= numeral.len) return null;
+        }
+        const exponent_start = index;
+        var parsed_exponent: i32 = 0;
+        while (index < numeral.len) : (index += 1) {
+            const digit = decimalDigitValue(numeral[index]) orelse break;
+            parsed_exponent = std.math.add(i32, std.math.mul(i32, parsed_exponent, 10) catch return null, digit) catch return null;
+        }
+        if (index == exponent_start) return null;
+        exponent = std.math.add(i32, exponent, if (exponent_negative) -parsed_exponent else parsed_exponent) catch return null;
+    }
+    if (index != numeral.len) return null;
+    const result = std.math.ldexp(value, exponent);
+    return if (negative) -result else result;
+}
+
+fn hexDigitValue(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
+}
+
+fn decimalDigitValue(byte: u8) ?i32 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    return null;
 }
 
 fn floatToInteger(number: f64) ?lua_Integer {
@@ -2091,13 +2231,13 @@ pub export fn lua_tonumberx(L: ?*lua_State, idx: c_int, isnum: ?*c_int) callconv
             break :blk number;
         },
         .string => |string| blk: {
-            if (std.fmt.parseFloat(lua_Number, std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c"))) |number| {
+            const parsed = parseLuaNumber(string.bytes);
+            if (parsed.number) |number| {
                 if (isnum) |ptr| ptr.* = 1;
                 break :blk number;
-            } else |_| {
-                if (isnum) |ptr| ptr.* = 0;
-                break :blk 0;
             }
+            if (isnum) |ptr| ptr.* = 0;
+            break :blk 0;
         },
         else => blk: {
             if (isnum) |ptr| ptr.* = 0;
@@ -3092,18 +3232,17 @@ pub export fn lua_numbertocstring(L: ?*lua_State, idx: c_int, buff: ?[*]u8) call
 pub export fn lua_stringtonumber(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) usize {
     const thread = threadFromState(L) orelse return 0;
     const text = cStringSlice(s);
-    const trimmed_left = trimLeftAscii(text, " \t\n\r\x0b\x0c");
-    if (trimmed_left.len == 0) return 0;
-    const number_text = trimRightAscii(trimmed_left, " \t\n\r\x0b\x0c");
-    if (number_text.len == 0) return 0;
-    if (std.fmt.parseInt(lua_Integer, number_text, 10)) |integer| {
+    const parsed = parseLuaNumber(text);
+    if (parsed.consumed == 0) return 0;
+    if (parsed.integer) |integer| {
         _ = pushValue(thread, .{ .integer = integer });
-        return text.len + 1;
-    } else |_| {}
-    if (std.fmt.parseFloat(lua_Number, number_text)) |number| {
+        return parsed.consumed;
+    }
+    if (parsed.number) |number| {
         _ = pushValue(thread, .{ .number = number });
-        return text.len + 1;
-    } else |_| return 0;
+        return parsed.consumed;
+    }
+    return 0;
 }
 
 fn trimLeftAscii(value: []const u8, values_to_strip: []const u8) []const u8 {

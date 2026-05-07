@@ -45,6 +45,12 @@ int main(void) {
       (long long)lua_tointeger(L, 3), lua_tonumber(L, 4),
       lua_tonumberx(L, 6, &isnum), isnum);
   printf("isnumber=%d,%d,%d\n", lua_isnumber(L, 3), lua_isnumber(L, 6), lua_isnumber(L, 7));
+  lua_pushstring(L, "0x10");
+  lua_pushstring(L, "0x1.8p1");
+  lua_pushstring(L, "nan");
+  printf("hexint=%lld hexfloat=%.1f nan_isnum=%d\n",
+      (long long)lua_tointeger(L, -3), lua_tonumber(L, -2), lua_isnumber(L, -1));
+  lua_pop(L, 3);
 
   const char *s = lua_tolstring(L, 5, &len);
   printf("embedded_len=%zu bytes=%d,%d,%d rawlen=%llu\n",

@@ -54,8 +54,14 @@ int main(void) {
   printf("stringtonumber_int consumed=%zu type=%s value=%lld top=%d\n", consumed, lua_typename(L, lua_type(L, -1)), (long long)lua_tointeger(L, -1), lua_gettop(L));
   consumed = lua_stringtonumber(L, "3.5");
   printf("stringtonumber_num consumed=%zu value=%.1f top=%d\n", consumed, lua_tonumber(L, -1), lua_gettop(L));
+  consumed = lua_stringtonumber(L, "  0x10 ");
+  printf("stringtonumber_hexint consumed=%zu type=%s value=%lld top=%d\n", consumed, lua_typename(L, lua_type(L, -1)), (long long)lua_tointeger(L, -1), lua_gettop(L));
+  consumed = lua_stringtonumber(L, "0x1.8p1");
+  printf("stringtonumber_hexnum consumed=%zu value=%.1f top=%d\n", consumed, lua_tonumber(L, -1), lua_gettop(L));
   consumed = lua_stringtonumber(L, "12x");
   printf("stringtonumber_bad consumed=%zu top=%d\n", consumed, lua_gettop(L));
+  consumed = lua_stringtonumber(L, "nan");
+  printf("stringtonumber_nan consumed=%zu top=%d\n", consumed, lua_gettop(L));
 
   lua_close(L);
   return 0;

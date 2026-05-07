@@ -27,6 +27,9 @@ int main(void) {
   printf("same_ptr=%d\n", lua_pushexternalstring(L, text, 6, free_external, &counts) == text);
   printf("value=%s len=%zu rawlen=%llu\n", lua_tolstring(L, -1, &len), len, (unsigned long long)lua_rawlen(L, -1));
   lua_pop(L, 1);
+
+  printf("fixed_ptr=%d\n", lua_pushexternalstring(L, "fixed", 5, NULL, NULL) != NULL);
+  lua_pop(L, 1);
   lua_gc(L, LUA_GCCOLLECT);
   printf("freed_after_gc=%d\n", counts.freed);
   lua_close(L);
