@@ -192,21 +192,19 @@ pub const State = struct {
         return fromRuntimeValue(self, self.raw_state.getGlobal(name), T);
     }
 
-    pub fn register(self: *State, name: []const u8, callback: HostFn) !void {
+    pub fn register(self: *State, name: []const u8, callback: HostFn) !Function {
         if (std.mem.eql(u8, name, callback_dispatch_global)) return error.UnsupportedOption;
-        var function = try self.createCallbackFunction(name, callback);
-        defer function.deinit();
-        try self.setGlobal(name, function);
+        return self.createCallbackFunction(name, callback);
     }
 
-    pub fn registerTyped(self: *State, name: []const u8, comptime function: anytype) !void {
+    pub fn registerTyped(self: *State, name: []const u8, comptime function: anytype) !Function {
         const Wrapper = struct {
             fn call(ctx: *Context) !void {
                 try callTyped(function, ctx);
             }
         };
 
-        try self.register(name, Wrapper.call);
+        return self.register(name, Wrapper.call);
     }
 
     pub fn createTable(self: *State, options: TableOptions) !Table {
@@ -1452,7 +1450,34 @@ test "api host callbacks read arguments and return multiple values" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    try lua.register("host_add", Callbacks.add);
+    var host_add = try lua.register("host_add", Callbacks.add);
+    defer host_add.deinit();
+
+    try std.testing.expectError(error.TypeMismatch, lua.getGlobal("host_add", Function));
+
+    const Result = Tuple(&.{ i64, []const u8 });
+    var result = try host_add.call(.{ 20, 22 }, Result);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(i64, 42), result.get(0));
+    try std.testing.expectEqualStrings("ok", result.get(1));
+}
+
+test "api host callback functions can be installed as globals" {
+    const Callbacks = struct {
+        fn add(ctx: *Context) !void {
+            const lhs = try ctx.arg(0, i64);
+            const rhs = try ctx.arg(1, i64);
+            try ctx.returnValues(.{ lhs + rhs, "ok" });
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var host_add = try lua.register("host_add", Callbacks.add);
+    defer host_add.deinit();
+    try lua.setGlobal("host_add", host_add);
     try lua.doString(
         \\local sum, label = host_add(20, 22)
         \\assert(sum == 42)
@@ -1471,7 +1496,9 @@ test "api host callback argument errors become Lua errors" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    try lua.register("need_integer", Callbacks.needInteger);
+    var need_integer = try lua.register("need_integer", Callbacks.needInteger);
+    defer need_integer.deinit();
+    try lua.setGlobal("need_integer", need_integer);
     var chunk = try lua.loadString("return need_integer('nope')", .{ .name = "=api-21.4-arg-error" });
     defer chunk.deinit();
 
@@ -1499,7 +1526,9 @@ test "api host callback can raise Lua error values" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    try lua.register("host_fail", Callbacks.fail);
+    var host_fail = try lua.register("host_fail", Callbacks.fail);
+    defer host_fail.deinit();
+    try lua.setGlobal("host_fail", host_fail);
     var chunk = try lua.loadString("host_fail()", .{ .name = "=api-21.4-raise" });
     defer chunk.deinit();
 
@@ -1531,7 +1560,9 @@ test "api host callback can hold and call Lua callback function" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    try lua.register("host_each", Callbacks.each);
+    var host_each = try lua.register("host_each", Callbacks.each);
+    defer host_each.deinit();
+    try lua.setGlobal("host_each", host_each);
     try lua.doString(
         \\local a, b = host_each(function(value)
         \\  return value + 1
@@ -1551,7 +1582,9 @@ test "api typed host callback wrapper compiles and runs" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    try lua.registerTyped("clamp", Callbacks.clamp);
+    var clamp = try lua.registerTyped("clamp", Callbacks.clamp);
+    defer clamp.deinit();
+    try lua.setGlobal("clamp", clamp);
     try lua.doString(
         \\assert(clamp(5, 1, 10) == 5)
         \\assert(clamp(-1, 1, 10) == 1)
@@ -1606,7 +1639,9 @@ test "api userdata pointer wrappers and Context.arg typed reads" {
     var counter = try lua.newUserdataPtr(Counter, &backing, .{});
     defer counter.deinit();
     try lua.setGlobal("counter", counter);
-    try lua.register("add_counter", Callbacks.add);
+    var add_counter = try lua.register("add_counter", Callbacks.add);
+    defer add_counter.deinit();
+    try lua.setGlobal("add_counter", add_counter);
 
     try lua.doString("assert(add_counter(counter, 32) == 42)", .{ .name = "=api-21.5-ptr" });
     try std.testing.expectEqual(@as(i64, 42), backing.value);
@@ -1628,7 +1663,9 @@ test "api userdata wrong type errors are clear" {
     var other = try lua.newUserdata(Other, .{ .value = 1 }, .{});
     defer other.deinit();
     try lua.setGlobal("other", other);
-    try lua.register("need_counter", Callbacks.needCounter);
+    var need_counter = try lua.register("need_counter", Callbacks.needCounter);
+    defer need_counter.deinit();
+    try lua.setGlobal("need_counter", need_counter);
 
     var chunk = try lua.loadString("need_counter(other)", .{ .name = "=api-21.5-wrong-userdata" });
     defer chunk.deinit();

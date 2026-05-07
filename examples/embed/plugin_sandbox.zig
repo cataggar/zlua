@@ -29,7 +29,9 @@ pub fn main() !void {
     });
     defer lua.deinit();
 
-    try lua.register("emit", emit);
+    var emit_fn = try lua.register("emit", emit);
+    defer emit_fn.deinit();
+    try lua.setGlobal("emit", emit_fn);
     try lua.doFile("plugin.lua", .{ .name = "@plugin.lua" });
 
     std.debug.print("{s}", .{output.writer.buffered()});

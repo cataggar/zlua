@@ -21,8 +21,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const bench_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
-    const bench_mod = b.addModule("zlua-bench-release-safe", .{
+    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const bench_mod = b.addModule("zlua-bench-release-fast", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = bench_optimize,
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const bench_zlua_exe = b.addExecutable(.{
-        .name = "zlua-bench-release-safe",
+        .name = "zlua-bench-release-fast",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

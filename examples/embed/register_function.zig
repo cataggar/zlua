@@ -7,7 +7,9 @@ pub fn main() !void {
     var lua = try zlua.State.init(allocator, .{});
     defer lua.deinit();
 
-    try lua.register("host_add", hostAdd);
+    var host_add = try lua.register("host_add", hostAdd);
+    defer host_add.deinit();
+    try lua.setGlobal("host_add", host_add);
 
     var chunk = try lua.loadString(
         \\local sum, status = host_add(20, 22)

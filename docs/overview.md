@@ -1730,7 +1730,9 @@ var lua = try zlua.State.init(allocator, .{
 defer lua.deinit();
 
 try lua.openLibs(.safe);
-try lua.register("host_log", hostLog);
+var host_log = try lua.register("host_log", hostLog);
+defer host_log.deinit();
+try lua.setGlobal("host_log", host_log);
 try lua.doString("host_log('hello')");
 ```
 

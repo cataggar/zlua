@@ -336,10 +336,12 @@ pub const Context = struct {
 };
 ```
 
-Registering functions:
+Creating and installing functions:
 
 ```zig
-try lua.register("host_log", hostLog);
+var host_log = try lua.register("host_log", hostLog);
+defer host_log.deinit();
+try lua.setGlobal("host_log", host_log);
 
 fn hostLog(ctx: *zlua.Context) !void {
     const level = try ctx.arg(0, []const u8);
@@ -353,7 +355,9 @@ fn hostLog(ctx: *zlua.Context) !void {
 Then add a typed wrapper layer for common functions:
 
 ```zig
-try lua.registerTyped("clamp", clamp);
+var clamp_fn = try lua.registerTyped("clamp", clamp);
+defer clamp_fn.deinit();
+try lua.setGlobal("clamp", clamp_fn);
 
 fn clamp(value: f64, min: f64, max: f64) f64 {
     return @min(@max(value, min), max);
@@ -572,7 +576,9 @@ var lua = try zlua.State.init(allocator, .{
 });
 defer lua.deinit();
 
-try lua.register("emit", emit);
+var emit_fn = try lua.register("emit", emit);
+defer emit_fn.deinit();
+try lua.setGlobal("emit", emit_fn);
 try lua.doFile("plugin.lua", .{});
 ```
 

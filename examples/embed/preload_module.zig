@@ -7,14 +7,11 @@ pub fn main() !void {
     var lua = try zlua.State.init(allocator, .{});
     defer lua.deinit();
 
-    try lua.register("host_double", hostDouble);
-
     var host = try lua.createModule("host");
     defer host.deinit();
 
-    var double_fn = try lua.getGlobal("host_double", zlua.Function);
+    var double_fn = try lua.register("host_double", hostDouble);
     defer double_fn.deinit();
-
     try host.set("double", double_fn);
     try host.set("name", "host-module");
     try lua.preloadModule("host", host);

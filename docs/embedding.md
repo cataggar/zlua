@@ -150,7 +150,7 @@ defer chunk.deinit();
 const greeting = try chunk.call(.{"host"}, []const u8);
 ```
 
-Function handles own registry roots. Release them with `deinit` when the host no longer needs them.
+Function handles own registry roots. Release them with `deinit` when the host no longer needs them. Installing a handle with `setGlobal` or `Table.set` does not consume it; Lua keeps its own table/global reference, and `deinit` only releases the host-owned root.
 
 ## Values And Conversion
 
@@ -255,11 +255,10 @@ try lua.doString(
 , .{ .name = "=host-module" });
 ```
 
-Host callbacks can be registered globally, retrieved as a `Function`, and installed in module tables:
+Host callbacks are created as `Function` handles and can be installed in module tables or globals:
 
 ```zig
-try lua.register("host_double", hostDouble);
-var double_fn = try lua.getGlobal("host_double", zlua.Function);
+var double_fn = try lua.register("host_double", hostDouble);
 defer double_fn.deinit();
 try host.set("double", double_fn);
 ```
@@ -268,10 +267,12 @@ Pure Lua modules can be loaded from the memory filesystem with `setPackagePath`.
 
 ## Host Callbacks
 
-Register callbacks with `State.register`:
+Create callbacks with `State.register`, then install them where Lua code should find them:
 
 ```zig
-try lua.register("host_add", hostAdd);
+var host_add = try lua.register("host_add", hostAdd);
+defer host_add.deinit();
+try lua.setGlobal("host_add", host_add);
 
 fn hostAdd(ctx: *zlua.Context) !void {
     const lhs = try ctx.arg(0, i64);
@@ -309,10 +310,12 @@ fn eachItem(ctx: *zlua.Context) !void {
 }
 ```
 
-`registerTyped` is available for simple typed Zig functions:
+`registerTyped` is available for simple typed Zig functions and also returns a `Function`:
 
 ```zig
-try lua.registerTyped("clamp", clamp);
+var clamp_fn = try lua.registerTyped("clamp", clamp);
+defer clamp_fn.deinit();
+try lua.setGlobal("clamp", clamp_fn);
 
 fn clamp(value: f64, min: f64, max: f64) f64 {
     return @min(@max(value, min), max);
@@ -429,7 +432,9 @@ var lua = try zlua.State.init(allocator, .{
 });
 defer lua.deinit();
 
-try lua.register("emit", emit);
+var emit_fn = try lua.register("emit", emit);
+defer emit_fn.deinit();
+try lua.setGlobal("emit", emit_fn);
 try lua.doFile("plugin.lua", .{ .name = "@plugin.lua" });
 ```
 
