@@ -1,1342 +1,80 @@
 const std = @import("std");
 const compile = @import("compile.zig");
+const chunk_mod = @import("runtime/chunk.zig");
 const errors = @import("errors.zig");
 const frontend = @import("frontend.zig");
+const host = @import("runtime/host.zig");
 const process = @import("testing/process.zig");
 const stdlib = @import("stdlib.zig");
+const types = @import("runtime/types.zig");
+const value_mod = @import("runtime/value.zig");
 
 const bytecode = compile.bytecode;
 const proto_mod = compile.proto;
 
-pub const RuntimeError = error{
-    RuntimeError,
-    StackOverflow,
-    UnsupportedOpcode,
-};
+pub const RuntimeError = types.RuntimeError;
 
 const default_max_stack_values: usize = 65536;
 const default_max_call_frames: usize = 256;
 const max_error_handler_depth: usize = 200;
 const max_metamethod_depth: usize = 15;
-pub const binary_chunk_signature = "\x1bLua";
-pub const binary_chunk_payload_magic = "zlua\x00bc1";
-
-pub const Value = union(enum) {
-    nil,
-    boolean: bool,
-    integer: i64,
-    number: f64,
-    string: []const u8,
-    table: *Table,
-    userdata: *Userdata,
-    closure: *Closure,
-    c_closure: *CClosure,
-    thread: *Thread,
-    coroutine_wrapper: *Thread,
-    gmatch_iterator: *Table,
-    native_print,
-    native_tostring,
-    native_getmetatable,
-    native_setmetatable,
-    native_rawequal,
-    native_rawget,
-    native_rawset,
-    native_rawlen,
-    native_next,
-    native_pairs,
-    native_ipairs,
-    native_ipairs_iter,
-    native_table_create,
-    native_select,
-    native_assert,
-    native_error,
-    native_pcall,
-    native_xpcall,
-    native_collectgarbage,
-    native_debug_traceback,
-    native_coroutine_create,
-    native_coroutine_resume,
-    native_coroutine_yield,
-    native_coroutine_status,
-    native_coroutine_running,
-    native_coroutine_isyieldable,
-    native_coroutine_close,
-    native_coroutine_wrap,
-    native: NativeFn,
-};
-
-pub const NativeFn = stdlib.NativeFn;
-
-pub const UserdataFinalizer = *const fn (*anyopaque, ?*const anyopaque) void;
-pub const UserdataDeinit = *const fn (std.mem.Allocator, *anyopaque) void;
-
-pub const ProtectedCallResult = union(enum) {
-    success: []Value,
-    failure: Value,
-};
-
-pub const ApiCallbackDispatchFn = *const fn (*ApiCallbackContext) anyerror!void;
-pub const CClosureDispatchFn = *const fn (*CClosureContext) anyerror!void;
-pub const CClosureResumeDispatchFn = *const fn (*CClosureResumeContext) anyerror!void;
-pub const CDebugHookDispatchFn = *const fn (*CDebugHookContext) anyerror!void;
-
-pub const DebugHookEvent = enum {
-    call,
-    ret,
-    line,
-    count,
-    tail_call,
-};
-
-pub const CDebugHookContext = struct {
-    state: *State,
-    thread: *Thread,
-    event: DebugHookEvent,
-    currentline: ?usize = null,
-    ftransfer: i64 = 0,
-    ntransfer: usize = 0,
-    user_data: ?*anyopaque,
-};
-
-pub const CClosureContext = struct {
-    state: *State,
-    thread: *Thread,
-    op: bytecode.Call,
-    closure: *CClosure,
-    user_data: ?*anyopaque,
-    returns: std.ArrayList(Value) = .empty,
-    error_value: ?Value = null,
-
-    pub fn deinit(self: *CClosureContext) void {
-        self.returns.deinit(self.state.allocator);
-    }
-
-    pub fn argCount(self: *CClosureContext) usize {
-        return self.op.arg_count;
-    }
-
-    pub fn argValue(self: *CClosureContext, index: usize) Value {
-        const raw_index = std.math.cast(u16, index) orelse return .nil;
-        return runtimeArgValue(self.state, self.thread, self.op, raw_index);
-    }
-
-    pub fn appendReturn(self: *CClosureContext, value: Value) !void {
-        try self.returns.append(self.state.allocator, value);
-    }
-
-    pub fn raise(self: *CClosureContext, value: Value) error{LuaError} {
-        self.error_value = value;
-        return error.LuaError;
-    }
-
-    pub fn yieldWithReturns(self: *CClosureContext, values: []const Value) !void {
-        self.thread.yield_values.clearRetainingCapacity();
-        try self.thread.yield_values.appendSlice(self.state.allocator, values);
-        const frame = self.thread.frames.items[self.thread.frames.items.len - 1];
-        self.thread.yield_result_base = frame.base + self.op.base;
-        self.thread.yield_result_count = self.op.return_count;
-        self.thread.pending_c_continuation = true;
-        self.thread.status = .suspended;
-        return error.CoroutineYield;
-    }
-};
-
-pub const CClosureResumeContext = struct {
-    state: *State,
-    thread: *Thread,
-    args: []const Value,
-    user_data: ?*anyopaque,
-    returns: std.ArrayList(Value) = .empty,
-    error_value: ?Value = null,
-
-    pub fn deinit(self: *CClosureResumeContext) void {
-        self.returns.deinit(self.state.allocator);
-    }
-
-    pub fn appendReturn(self: *CClosureResumeContext, value: Value) !void {
-        try self.returns.append(self.state.allocator, value);
-    }
-
-    pub fn raise(self: *CClosureResumeContext, value: Value) error{LuaError} {
-        self.error_value = value;
-        return error.LuaError;
-    }
-
-    pub fn yieldWithReturns(self: *CClosureResumeContext, values: []const Value) !void {
-        self.thread.yield_values.clearRetainingCapacity();
-        try self.thread.yield_values.appendSlice(self.state.allocator, values);
-        self.thread.pending_c_continuation = true;
-        self.thread.status = .suspended;
-        return error.CoroutineYield;
-    }
-};
-
-pub const ApiCallbackContext = struct {
-    state: *State,
-    thread: *Thread,
-    op: bytecode.Call,
-    callback_id: usize,
-    user_data: ?*anyopaque,
-    function_name: []const u8 = "host callback",
-    returns: std.ArrayList(Value) = .empty,
-    error_value: ?Value = null,
-
-    pub fn deinit(self: *ApiCallbackContext) void {
-        self.returns.deinit(self.state.allocator);
-    }
-
-    pub fn argCount(self: *ApiCallbackContext) usize {
-        if (self.op.arg_count == 0) return 0;
-        return self.op.arg_count - 1;
-    }
-
-    pub fn callbackArgValue(self: *ApiCallbackContext, index: usize) Value {
-        const raw_index = std.math.cast(u16, index + 1) orelse return .nil;
-        return argValue(self.state, self.thread, self.op, raw_index);
-    }
-
-    pub fn clearReturns(self: *ApiCallbackContext) void {
-        self.returns.clearRetainingCapacity();
-    }
-
-    pub fn appendReturn(self: *ApiCallbackContext, value: Value) !void {
-        try self.returns.append(self.state.allocator, value);
-    }
-
-    pub fn fail(self: *ApiCallbackContext, message: []const u8) RuntimeError {
-        return self.state.fail(message);
-    }
-
-    pub fn failArgumentMessage(self: *ApiCallbackContext, index: usize, message: []const u8) RuntimeError {
-        return self.state.failArgumentMessage(self.function_name, argumentIndex(index), message);
-    }
-
-    pub fn failArgumentType(self: *ApiCallbackContext, index: usize, expected: []const u8, actual: Value) RuntimeError {
-        return self.state.failArgumentType(self.function_name, argumentIndex(index), expected, actual);
-    }
-
-    pub fn raise(self: *ApiCallbackContext, value: Value) error{LuaError} {
-        self.error_value = value;
-        return error.LuaError;
-    }
-
-    fn argumentIndex(index: usize) u16 {
-        return std.math.cast(u16, index + 1) orelse std.math.maxInt(u16);
-    }
-};
-
-pub const RuntimeErrorPayload = union(enum) {
-    diagnostic: []const u8,
-    argument: errors.ArgumentError,
-    lua_value: Value,
-
-    fn luaValue(self: RuntimeErrorPayload, state: *State) Value {
-        return switch (self) {
-            .diagnostic => |message| .{ .string = message },
-            .argument => |argument| blk: {
-                const rendered = errors.renderArgumentError(state.allocator, argument) catch break :blk .{ .string = "bad argument" };
-                defer state.allocator.free(rendered);
-                break :blk .{ .string = state.intern(rendered) catch "bad argument" };
-            },
-            .lua_value => |value| value,
-        };
-    }
-};
-
-const ProtectedCallContext = struct {
-    frame_count: usize,
-    relative_base: bytecode.Register,
-    absolute_base: usize,
-    stack_len: usize,
-    last_result_base: usize,
-    last_result_count: usize,
-    last_error: ?RuntimeErrorPayload,
-};
-
-const ProtectedContinuationKind = enum {
-    pcall,
-    xpcall,
-    xpcall_handler,
-};
-
-const ProtectedContinuation = struct {
-    context: ProtectedCallContext,
-    base: bytecode.Register,
-    return_count: u16,
-    kind: ProtectedContinuationKind,
-    handler: Value = .nil,
-    handler_depth: usize = 0,
-};
-
-const GenericForContinuation = struct {
-    frame_count: usize,
-    op: bytecode.GenericFor,
-    jump_on_nil: bool,
-};
-
-const BranchContinuation = struct {
-    jump_if_truthy: bool,
-    offset: bytecode.JumpOffset,
-};
-
-const TailCallContinuation = struct {
-    frame_count: usize,
-    base: bytecode.Register,
-    return_count: u16,
-};
-
-const CallOneContinuationResult = union(enum) {
-    value: usize,
-    truthy: usize,
-    inverted_truthy: usize,
-    branch_truthy: BranchContinuation,
-    branch_inverted_truthy: BranchContinuation,
-    discard,
-};
-
-const CallOneContinuation = struct {
-    frame_count: usize,
-    result: CallOneContinuationResult,
-};
-
-pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
-    try out.appendSlice(allocator, binary_chunk_signature);
-    try out.append(allocator, 0x55);
-    try out.append(allocator, 0);
-    try out.appendSlice(allocator, "\x19\x93\r\n\x1a\n");
-    try out.append(allocator, @sizeOf(c_int));
-    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(c_int));
-    try out.append(allocator, 4);
-    try appendHeaderInt(allocator, out, 0x12345678, 4);
-    try out.append(allocator, @sizeOf(i64));
-    try appendHeaderInt(allocator, out, -0x5678, @sizeOf(i64));
-    try out.append(allocator, @sizeOf(f64));
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..8], @bitCast(@as(f64, -370.5)), nativeEndian());
-    try out.appendSlice(allocator, bytes[0..8]);
-}
-
-pub fn dumpClosureBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), closure: *const Closure, strip_debug: bool) !void {
-    const strip = strip_debug or closure.stripped_debug;
-    try appendBinaryChunkHeader(allocator, out);
-    try out.appendSlice(allocator, binary_chunk_payload_magic);
-    try appendBinaryBool(allocator, out, strip);
-    try appendBinaryProto(allocator, out, closure.proto, null, strip);
-}
-
-fn appendBinaryProto(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const proto_mod.Proto, parent_source_name: ?[]const u8, strip_debug: bool) !void {
-    const source_name = if (strip_debug) "?" else proto.source_name;
-    const source_matches_parent = if (parent_source_name) |parent| std.mem.eql(u8, source_name, parent) else false;
-    try appendBinaryBool(allocator, out, !source_matches_parent);
-    if (!source_matches_parent) try appendBinaryString(allocator, out, source_name);
-
-    const debug_name = if (strip_debug) null else proto.debug_name;
-    try appendBinaryBool(allocator, out, debug_name != null);
-    if (debug_name) |name| try appendBinaryString(allocator, out, name);
-    try appendBinaryU64(allocator, out, proto.defined_line);
-    try appendBinaryU64(allocator, out, proto.last_defined_line);
-    try appendBinaryU16(allocator, out, proto.max_registers);
-    try appendBinaryU16(allocator, out, proto.param_count);
-    try appendBinaryBool(allocator, out, proto.is_vararg);
-    try appendBinaryBool(allocator, out, proto.named_vararg);
-
-    try appendBinaryU32(allocator, out, proto.constants.items.len);
-    for (proto.constants.items) |constant| try appendBinaryConstant(allocator, out, constant);
-
-    try appendBinaryU32(allocator, out, proto.instructions.items.len);
-    for (proto.instructions.items, 0..) |instruction, index| {
-        try appendBinaryInstruction(allocator, out, instruction);
-        const line = if (index < proto.line_info.items.len) proto.line_info.items[index].line else 0;
-        try appendBinaryU64(allocator, out, line);
-    }
-
-    try appendBinaryU32(allocator, out, proto.locals.items.len);
-    for (proto.locals.items) |local| {
-        try appendBinaryString(allocator, out, local.name);
-        try appendBinaryU16(allocator, out, local.register);
-        try appendBinaryU64(allocator, out, local.start_pc);
-        try appendBinaryU64(allocator, out, local.end_pc);
-        try appendBinaryBool(allocator, out, local.to_close);
-    }
-
-    try appendBinaryU32(allocator, out, proto.upvalues.items.len);
-    for (proto.upvalues.items) |upvalue| {
-        try appendBinaryString(allocator, out, upvalue.name);
-        try appendBinaryBool(allocator, out, upvalue.in_stack);
-        try appendBinaryU16(allocator, out, upvalue.index);
-    }
-
-    try appendBinaryU32(allocator, out, proto.error_sites.items.len);
-    for (proto.error_sites.items) |entry| {
-        try appendBinaryU64(allocator, out, entry.pc);
-        try appendBinaryErrorSite(allocator, out, entry.site);
-    }
-
-    try appendBinaryU32(allocator, out, proto.children.items.len);
-    for (proto.children.items) |child| try appendBinaryProto(allocator, out, child, source_name, strip_debug);
-}
-
-fn appendBinaryConstant(allocator: std.mem.Allocator, out: *std.ArrayList(u8), constant: bytecode.Constant) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(constant))));
-    switch (constant) {
-        .nil => {},
-        .boolean => |value| try appendBinaryBool(allocator, out, value),
-        .integer => |value| try appendBinaryString(allocator, out, value),
-        .number => |value| try appendBinaryString(allocator, out, value),
-        .string => |value| try appendBinaryString(allocator, out, value),
-    }
-}
-
-fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instruction: bytecode.Instruction) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(instruction))));
-    switch (instruction) {
-        .load_nil => |dest| try appendBinaryU16(allocator, out, dest),
-        .load_bool => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryBool(allocator, out, op.value);
-        },
-        .load_const => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU32(allocator, out, op.constant);
-        },
-        .move => |op| try appendBinaryMove(allocator, out, op),
-        .get_global, .set_global => |op| {
-            try appendBinaryU16(allocator, out, op.register);
-            try appendBinaryU32(allocator, out, op.name);
-        },
-        .declare_global => |op| {
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU16(allocator, out, op.value);
-            try appendBinaryU32(allocator, out, op.name);
-        },
-        .get_upvalue, .set_upvalue => |op| {
-            try appendBinaryU16(allocator, out, op.register);
-            try appendBinaryU16(allocator, out, op.upvalue);
-        },
-        .get_table => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU16(allocator, out, op.key);
-        },
-        .set_table => |op| {
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU16(allocator, out, op.key);
-            try appendBinaryU16(allocator, out, op.value);
-        },
-        .set_array => |op| {
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU32(allocator, out, op.index);
-            try appendBinaryU16(allocator, out, op.value);
-        },
-        .get_field => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU32(allocator, out, op.name);
-        },
-        .set_field => |op| {
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU32(allocator, out, op.name);
-            try appendBinaryU16(allocator, out, op.value);
-        },
-        .new_table => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU32(allocator, out, op.array_hint);
-            try appendBinaryU32(allocator, out, op.hash_hint);
-        },
-        .set_list => |op| {
-            try appendBinaryU16(allocator, out, op.table);
-            try appendBinaryU16(allocator, out, op.first);
-            try appendBinaryU32(allocator, out, op.count);
-            try appendBinaryU32(allocator, out, op.start_index);
-        },
-        .add, .sub, .mul, .div, .idiv, .mod, .pow, .band, .bor, .bxor, .shl, .shr, .eq, .lt, .le, .concat => |op| try appendBinaryBinary(allocator, out, op),
-        .unm, .bnot, .not, .len => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU16(allocator, out, op.source);
-        },
-        .jmp => |offset| try appendBinaryI32(allocator, out, offset),
-        .compare_branch => |op| {
-            try appendBinaryU16(allocator, out, op.left);
-            try appendBinaryU16(allocator, out, op.right);
-            try out.append(allocator, @intCast(@intFromEnum(op.op)));
-            try appendBinaryBool(allocator, out, op.jump_if_truthy);
-            try appendBinaryI32(allocator, out, op.offset);
-        },
-        .test_op => |op| {
-            try appendBinaryU16(allocator, out, op.register);
-            try appendBinaryBool(allocator, out, op.jump_if_truthy);
-            try appendBinaryI32(allocator, out, op.offset);
-        },
-        .test_set => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU16(allocator, out, op.source);
-            try appendBinaryBool(allocator, out, op.jump_if_truthy);
-            try appendBinaryI32(allocator, out, op.offset);
-        },
-        .call, .tail_call => |op| {
-            try appendBinaryU16(allocator, out, op.base);
-            try appendBinaryU16(allocator, out, op.arg_count);
-            try appendBinaryU16(allocator, out, op.return_count);
-        },
-        .ret => |op| {
-            try appendBinaryU16(allocator, out, op.first);
-            try appendBinaryU16(allocator, out, op.count);
-        },
-        .vararg => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU16(allocator, out, op.count);
-        },
-        .closure => |op| {
-            try appendBinaryU16(allocator, out, op.dest);
-            try appendBinaryU32(allocator, out, op.proto);
-        },
-        .close, .check_close, .close_tbc => |register| try appendBinaryU16(allocator, out, register),
-        .for_prep, .for_loop => |op| {
-            try appendBinaryU16(allocator, out, op.base);
-            try appendBinaryI32(allocator, out, op.offset);
-        },
-        .tfor_prep, .tfor_call, .tfor_loop => |op| {
-            try appendBinaryU16(allocator, out, op.base);
-            try appendBinaryU16(allocator, out, op.variable_count);
-            try appendBinaryI32(allocator, out, op.offset);
-        },
-    }
-}
-
-fn appendBinaryMove(allocator: std.mem.Allocator, out: *std.ArrayList(u8), op: bytecode.Move) !void {
-    try appendBinaryU16(allocator, out, op.dest);
-    try appendBinaryU16(allocator, out, op.source);
-}
-
-fn appendBinaryBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), op: bytecode.Binary) !void {
-    try appendBinaryU16(allocator, out, op.dest);
-    try appendBinaryU16(allocator, out, op.left);
-    try appendBinaryU16(allocator, out, op.right);
-}
-
-fn appendBinaryErrorSite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), site: proto_mod.ErrorSite) !void {
-    try appendBinaryU64(allocator, out, site.line);
-    try out.append(allocator, @intCast(@intFromEnum(site.op)));
-    try appendBinaryU32(allocator, out, site.operands.len);
-    for (site.operands) |origin| try appendBinaryOrigin(allocator, out, origin);
-    try appendBinaryBool(allocator, out, site.call_name != null);
-    if (site.call_name) |origin| try appendBinaryOrigin(allocator, out, origin);
-}
-
-fn appendBinaryOrigin(allocator: std.mem.Allocator, out: *std.ArrayList(u8), origin: proto_mod.OperandOrigin) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(origin))));
-    switch (origin) {
-        .temporary => {},
-        .local, .upvalue, .global, .field, .method, .metamethod, .constant => |name| try appendBinaryString(allocator, out, name),
-    }
-}
-
-fn appendBinaryString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
-    try appendBinaryU32(allocator, out, value.len);
-    try out.appendSlice(allocator, value);
-}
-
-fn appendBinaryBool(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: bool) !void {
-    try out.append(allocator, if (value) 1 else 0);
-}
-
-fn appendBinaryU16(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16) !void {
-    var bytes: [2]u8 = undefined;
-    std.mem.writeInt(u16, bytes[0..], value, .little);
-    try out.appendSlice(allocator, bytes[0..]);
-}
-
-fn appendBinaryU32(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: anytype) !void {
-    const int_value = std.math.cast(u32, value) orelse return error.OutOfMemory;
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, bytes[0..], int_value, .little);
-    try out.appendSlice(allocator, bytes[0..]);
-}
-
-fn appendBinaryI32(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i32) !void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(i32, bytes[0..], value, .little);
-    try out.appendSlice(allocator, bytes[0..]);
-}
-
-fn appendBinaryU64(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: anytype) !void {
-    const int_value = std.math.cast(u64, value) orelse return error.OutOfMemory;
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..], int_value, .little);
-    try out.appendSlice(allocator, bytes[0..]);
-}
-
-const BinaryChunkReader = struct {
-    state: *State,
-    source: []const u8,
-    pos: usize,
-
-    fn readProto(self: *BinaryChunkReader, parent_source_name: ?[]const u8) anyerror!*proto_mod.Proto {
-        const proto = try self.state.allocator.create(proto_mod.Proto);
-        errdefer self.state.allocator.destroy(proto);
-        proto.* = proto_mod.Proto.init(self.state.allocator);
-        errdefer proto.deinit();
-        try self.readProtoBody(proto, parent_source_name);
-        return proto;
-    }
-
-    fn readProtoBody(self: *BinaryChunkReader, proto: *proto_mod.Proto, parent_source_name: ?[]const u8) anyerror!void {
-        proto.source_name = if (try self.readBool())
-            try self.readProtoString(proto)
-        else if (parent_source_name) |source_name|
-            try proto.arena.allocator().dupe(u8, source_name)
-        else
-            return self.state.fail("bad binary chunk");
-        if (try self.readBool()) proto.debug_name = try self.readProtoString(proto);
-        proto.defined_line = try self.readUsize();
-        proto.last_defined_line = try self.readUsize();
-        proto.max_registers = try self.readU16();
-        proto.param_count = try self.readU16();
-        proto.is_vararg = try self.readBool();
-        proto.named_vararg = try self.readBool();
-
-        const constant_count = try self.readCount();
-        try proto.constants.ensureTotalCapacity(proto.allocator, constant_count);
-        for (0..constant_count) |_| try proto.constants.append(proto.allocator, try self.readConstant(proto));
-
-        const instruction_count = try self.readCount();
-        try proto.instructions.ensureTotalCapacity(proto.allocator, instruction_count);
-        try proto.line_info.ensureTotalCapacity(proto.allocator, instruction_count);
-        for (0..instruction_count) |_| {
-            try proto.instructions.append(proto.allocator, try self.readInstruction());
-            try proto.line_info.append(proto.allocator, .{ .line = try self.readUsize() });
-        }
-
-        const local_count = try self.readCount();
-        try proto.locals.ensureTotalCapacity(proto.allocator, local_count);
-        for (0..local_count) |_| {
-            const name = try self.readProtoString(proto);
-            const register = try self.readU16();
-            const start_pc = try self.readUsize();
-            const end_pc = try self.readUsize();
-            const to_close = try self.readBool();
-            try proto.locals.append(proto.allocator, .{
-                .name = name,
-                .register = register,
-                .start_pc = start_pc,
-                .end_pc = end_pc,
-                .to_close = to_close,
-            });
-            if (to_close) proto.has_to_close_locals = true;
-        }
-
-        const upvalue_count = try self.readCount();
-        try proto.upvalues.ensureTotalCapacity(proto.allocator, upvalue_count);
-        for (0..upvalue_count) |_| {
-            try proto.upvalues.append(proto.allocator, .{
-                .name = try self.readProtoString(proto),
-                .in_stack = try self.readBool(),
-                .index = try self.readU16(),
-            });
-        }
-
-        const error_site_count = try self.readCount();
-        try proto.error_sites.ensureTotalCapacity(proto.allocator, error_site_count);
-        for (0..error_site_count) |_| {
-            const pc = try self.readUsize();
-            const site = try self.readErrorSite(proto);
-            try proto.error_sites.append(proto.allocator, .{ .pc = pc, .site = site });
-        }
-
-        const child_count = try self.readCount();
-        try proto.children.ensureTotalCapacity(proto.allocator, child_count);
-        for (0..child_count) |_| {
-            const child = try self.readProto(proto.source_name);
-            errdefer {
-                child.deinit();
-                self.state.allocator.destroy(child);
-            }
-            try proto.children.append(proto.allocator, child);
-        }
-    }
-
-    fn readConstant(self: *BinaryChunkReader, proto: *proto_mod.Proto) !bytecode.Constant {
-        const ConstantTag = std.meta.Tag(bytecode.Constant);
-        const tag = try self.readEnum(ConstantTag);
-        return switch (tag) {
-            .nil => .nil,
-            .boolean => .{ .boolean = try self.readBool() },
-            .integer => .{ .integer = try self.readProtoString(proto) },
-            .number => .{ .number = try self.readProtoString(proto) },
-            .string => .{ .string = try self.readProtoString(proto) },
-        };
-    }
-
-    fn readInstruction(self: *BinaryChunkReader) !bytecode.Instruction {
-        const InstructionTag = std.meta.Tag(bytecode.Instruction);
-        const tag = try self.readEnum(InstructionTag);
-        return switch (tag) {
-            .load_nil => .{ .load_nil = try self.readU16() },
-            .load_bool => .{ .load_bool = .{ .dest = try self.readU16(), .value = try self.readBool() } },
-            .load_const => .{ .load_const = .{ .dest = try self.readU16(), .constant = try self.readU32() } },
-            .move => .{ .move = .{ .dest = try self.readU16(), .source = try self.readU16() } },
-            .get_global => .{ .get_global = .{ .register = try self.readU16(), .name = try self.readU32() } },
-            .set_global => .{ .set_global = .{ .register = try self.readU16(), .name = try self.readU32() } },
-            .declare_global => .{ .declare_global = .{ .table = try self.readU16(), .value = try self.readU16(), .name = try self.readU32() } },
-            .get_upvalue => .{ .get_upvalue = .{ .register = try self.readU16(), .upvalue = try self.readU16() } },
-            .set_upvalue => .{ .set_upvalue = .{ .register = try self.readU16(), .upvalue = try self.readU16() } },
-            .get_table => .{ .get_table = .{ .dest = try self.readU16(), .table = try self.readU16(), .key = try self.readU16() } },
-            .set_table => .{ .set_table = .{ .table = try self.readU16(), .key = try self.readU16(), .value = try self.readU16() } },
-            .set_array => .{ .set_array = .{ .table = try self.readU16(), .index = try self.readU32(), .value = try self.readU16() } },
-            .get_field => .{ .get_field = .{ .dest = try self.readU16(), .table = try self.readU16(), .name = try self.readU32() } },
-            .set_field => .{ .set_field = .{ .table = try self.readU16(), .name = try self.readU32(), .value = try self.readU16() } },
-            .new_table => .{ .new_table = .{ .dest = try self.readU16(), .array_hint = try self.readU32(), .hash_hint = try self.readU32() } },
-            .set_list => .{ .set_list = .{ .table = try self.readU16(), .first = try self.readU16(), .count = try self.readU32(), .start_index = try self.readU32() } },
-            .add => .{ .add = try self.readBinary() },
-            .sub => .{ .sub = try self.readBinary() },
-            .mul => .{ .mul = try self.readBinary() },
-            .div => .{ .div = try self.readBinary() },
-            .idiv => .{ .idiv = try self.readBinary() },
-            .mod => .{ .mod = try self.readBinary() },
-            .pow => .{ .pow = try self.readBinary() },
-            .unm => .{ .unm = try self.readUnary() },
-            .band => .{ .band = try self.readBinary() },
-            .bor => .{ .bor = try self.readBinary() },
-            .bxor => .{ .bxor = try self.readBinary() },
-            .bnot => .{ .bnot = try self.readUnary() },
-            .shl => .{ .shl = try self.readBinary() },
-            .shr => .{ .shr = try self.readBinary() },
-            .eq => .{ .eq = try self.readBinary() },
-            .lt => .{ .lt = try self.readBinary() },
-            .le => .{ .le = try self.readBinary() },
-            .not => .{ .not = try self.readUnary() },
-            .len => .{ .len = try self.readUnary() },
-            .concat => .{ .concat = try self.readBinary() },
-            .jmp => .{ .jmp = try self.readI32() },
-            .compare_branch => .{ .compare_branch = .{ .left = try self.readU16(), .right = try self.readU16(), .op = try self.readEnum(bytecode.CompareBranchOp), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
-            .test_op => .{ .test_op = .{ .register = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
-            .test_set => .{ .test_set = .{ .dest = try self.readU16(), .source = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
-            .call => .{ .call = .{ .base = try self.readU16(), .arg_count = try self.readU16(), .return_count = try self.readU16() } },
-            .tail_call => .{ .tail_call = .{ .base = try self.readU16(), .arg_count = try self.readU16(), .return_count = try self.readU16() } },
-            .ret => .{ .ret = .{ .first = try self.readU16(), .count = try self.readU16() } },
-            .vararg => .{ .vararg = .{ .dest = try self.readU16(), .count = try self.readU16() } },
-            .closure => .{ .closure = .{ .dest = try self.readU16(), .proto = try self.readU32() } },
-            .close => .{ .close = try self.readU16() },
-            .check_close => .{ .check_close = try self.readU16() },
-            .close_tbc => .{ .close_tbc = try self.readU16() },
-            .for_prep => .{ .for_prep = .{ .base = try self.readU16(), .offset = try self.readI32() } },
-            .for_loop => .{ .for_loop = .{ .base = try self.readU16(), .offset = try self.readI32() } },
-            .tfor_prep => .{ .tfor_prep = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
-            .tfor_call => .{ .tfor_call = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
-            .tfor_loop => .{ .tfor_loop = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
-        };
-    }
-
-    fn readUnary(self: *BinaryChunkReader) !bytecode.Unary {
-        return .{ .dest = try self.readU16(), .source = try self.readU16() };
-    }
-
-    fn readBinary(self: *BinaryChunkReader) !bytecode.Binary {
-        return .{ .dest = try self.readU16(), .left = try self.readU16(), .right = try self.readU16() };
-    }
-
-    fn readErrorSite(self: *BinaryChunkReader, proto: *proto_mod.Proto) !proto_mod.ErrorSite {
-        const line = try self.readUsize();
-        const op = try self.readEnum(proto_mod.ErrorOp);
-        const operand_count = try self.readCount();
-        const operands = try proto.arena.allocator().alloc(proto_mod.OperandOrigin, operand_count);
-        for (operands) |*operand| operand.* = try self.readOrigin(proto);
-        const call_name = if (try self.readBool()) try self.readOrigin(proto) else null;
-        return .{ .line = line, .op = op, .operands = operands, .call_name = call_name };
-    }
-
-    fn readOrigin(self: *BinaryChunkReader, proto: *proto_mod.Proto) !proto_mod.OperandOrigin {
-        const OriginTag = std.meta.Tag(proto_mod.OperandOrigin);
-        const tag = try self.readEnum(OriginTag);
-        return switch (tag) {
-            .temporary => .temporary,
-            .local => .{ .local = try self.readProtoString(proto) },
-            .upvalue => .{ .upvalue = try self.readProtoString(proto) },
-            .global => .{ .global = try self.readProtoString(proto) },
-            .field => .{ .field = try self.readProtoString(proto) },
-            .method => .{ .method = try self.readProtoString(proto) },
-            .metamethod => .{ .metamethod = try self.readProtoString(proto) },
-            .constant => .{ .constant = try self.readProtoString(proto) },
-        };
-    }
-
-    fn readProtoString(self: *BinaryChunkReader, proto: *proto_mod.Proto) ![]const u8 {
-        const bytes = try self.readStringBytes();
-        return proto.arena.allocator().dupe(u8, bytes);
-    }
-
-    fn readStringBytes(self: *BinaryChunkReader) ![]const u8 {
-        return self.readBytes(try self.readCount());
-    }
-
-    fn readBool(self: *BinaryChunkReader) !bool {
-        return switch (try self.readByte()) {
-            0 => false,
-            1 => true,
-            else => self.state.fail("bad binary chunk"),
-        };
-    }
-
-    fn readEnum(self: *BinaryChunkReader, comptime T: type) !T {
-        const tag = try self.readByte();
-        if (tag >= std.meta.fields(T).len) return self.state.fail("bad binary chunk");
-        return @enumFromInt(tag);
-    }
-
-    fn readCount(self: *BinaryChunkReader) !usize {
-        return std.math.cast(usize, try self.readU32()) orelse self.state.fail("bad binary chunk");
-    }
-
-    fn readUsize(self: *BinaryChunkReader) !usize {
-        return std.math.cast(usize, try self.readU64()) orelse self.state.fail("bad binary chunk");
-    }
-
-    fn readByte(self: *BinaryChunkReader) !u8 {
-        if (self.pos >= self.source.len) return self.state.fail("truncated binary chunk");
-        const byte = self.source[self.pos];
-        self.pos += 1;
-        return byte;
-    }
-
-    fn readBytes(self: *BinaryChunkReader, len: usize) ![]const u8 {
-        if (self.source.len - self.pos < len) return self.state.fail("truncated binary chunk");
-        const bytes = self.source[self.pos .. self.pos + len];
-        self.pos += len;
-        return bytes;
-    }
-
-    fn readU16(self: *BinaryChunkReader) !u16 {
-        return std.mem.readInt(u16, (try self.readBytes(2))[0..2], .little);
-    }
-
-    fn readU32(self: *BinaryChunkReader) !u32 {
-        return std.mem.readInt(u32, (try self.readBytes(4))[0..4], .little);
-    }
-
-    fn readI32(self: *BinaryChunkReader) !i32 {
-        return std.mem.readInt(i32, (try self.readBytes(4))[0..4], .little);
-    }
-
-    fn readU64(self: *BinaryChunkReader) !u64 {
-        return std.mem.readInt(u64, (try self.readBytes(8))[0..8], .little);
-    }
-};
-
-fn appendHeaderInt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64, size: usize) !void {
-    var bytes: [8]u8 = undefined;
-    const unsigned: u64 = @bitCast(value);
-    switch (size) {
-        1 => bytes[0] = @truncate(unsigned),
-        2 => std.mem.writeInt(u16, bytes[0..2], @truncate(unsigned), nativeEndian()),
-        4 => std.mem.writeInt(u32, bytes[0..4], @truncate(unsigned), nativeEndian()),
-        8 => std.mem.writeInt(u64, bytes[0..8], unsigned, nativeEndian()),
-        else => unreachable,
-    }
-    try out.appendSlice(allocator, bytes[0..size]);
-}
-
-fn nativeEndian() std.builtin.Endian {
-    return switch (@import("builtin").target.cpu.arch.endian()) {
-        .little => .little,
-        .big => .big,
-    };
-}
-
-const CoroutineResumeResult = union(enum) {
-    success: []Value,
-    failure: Value,
-};
-
-pub const Closure = struct {
-    proto: *const proto_mod.Proto,
-    upvalues: []*Upvalue,
-    constants: ?[]?Value = null,
-    stripped_debug: bool = false,
-    marked: bool = false,
-};
-
-pub const CClosure = struct {
-    function_id: usize,
-    upvalues: []*CUpvalue,
-    marked: bool = false,
-};
-
-pub const CUpvalue = struct {
-    value: Value = .nil,
-    marked: bool = false,
-};
-
-pub const Upvalue = struct {
-    owner: *Thread,
-    stack_index: usize,
-    closed: Value = .nil,
-    is_open: bool = true,
-    next: ?*Upvalue = null,
-    marked: bool = false,
-};
-
-const TableEntry = struct {
-    key: Value,
-    value: Value,
-};
-
-const TableEntryIndex = std.HashMap(Value, usize, ValueHashContext, std.hash_map.default_max_load_percentage);
-
-const ValueHashContext = struct {
-    pub fn hash(_: ValueHashContext, key: Value) u64 {
-        return hashValue(key);
-    }
-
-    pub fn eql(_: ValueHashContext, lhs: Value, rhs: Value) bool {
-        return valuesEqual(lhs, rhs);
-    }
-};
-
-pub const Table = struct {
-    array: std.ArrayList(Value) = .empty,
-    entries: std.ArrayList(TableEntry) = .empty,
-    entry_index: TableEntryIndex,
-    metatable: ?*Table = null,
-    metatable_prev: ?*Table = null,
-    metatable_next: ?*Table = null,
-    counts_for_gc_count: bool = true,
-    marked: bool = false,
-    finalized: bool = false,
-
-    fn init(allocator: std.mem.Allocator, array_hint: u32, hash_hint: u32) !Table {
-        var table = Table{ .entry_index = TableEntryIndex.init(allocator) };
-        errdefer table.deinit(allocator);
-        try table.array.ensureTotalCapacity(allocator, array_hint);
-        try table.entries.ensureTotalCapacity(allocator, hash_hint);
-        try table.entry_index.ensureTotalCapacity(hash_hint);
-        return table;
-    }
-
-    fn deinit(self: *Table, allocator: std.mem.Allocator) void {
-        self.entry_index.deinit();
-        self.entries.deinit(allocator);
-        self.array.deinit(allocator);
-        self.* = undefined;
-    }
-
-    pub fn get(self: Table, key: Value) Value {
-        if (arrayIndex(key)) |index| {
-            if (index <= self.array.items.len) return self.array.items[index - 1];
-        }
-        if (self.entry_index.get(key)) |index| return self.entries.items[index].value;
-        return .nil;
-    }
-
-    pub fn set(self: *Table, allocator: std.mem.Allocator, key: Value, value: Value) !void {
-        if (arrayIndex(key)) |index| {
-            if (index <= self.array.items.len) {
-                self.array.items[index - 1] = value;
-                return;
-            }
-            if (value != .nil and index == self.array.items.len + 1) {
-                try self.array.append(allocator, value);
-                self.removeHashKey(key);
-                return;
-            }
-            if (value != .nil and index <= self.array.capacity) {
-                const old_len = self.array.items.len;
-                try self.array.resize(allocator, index);
-                @memset(self.array.items[old_len..], .nil);
-                self.array.items[index - 1] = value;
-                self.removeHashKey(key);
-                return;
-            }
-        }
-        if (self.entry_index.get(key)) |index| {
-            if (value == .nil) {
-                self.entries.items[index].value = .nil;
-            } else {
-                self.entries.items[index].value = value;
-            }
-            return;
-        }
-        if (value != .nil) {
-            try self.entries.append(allocator, .{ .key = key, .value = value });
-            errdefer self.entries.items.len -= 1;
-            try self.entry_index.put(key, self.entries.items.len - 1);
-        }
-    }
-
-    fn setExistingNonNil(self: *Table, key: Value, value: Value) bool {
-        if (arrayIndex(key)) |index| {
-            if (index <= self.array.items.len and self.array.items[index - 1] != .nil) {
-                self.array.items[index - 1] = value;
-                return true;
-            }
-            return false;
-        }
-        if (self.entry_index.get(key)) |index| {
-            if (self.entries.items[index].value == .nil) return false;
-            self.entries.items[index].value = value;
-            return true;
-        }
-        return false;
-    }
-
-    pub fn len(self: Table) i64 {
-        var result = self.array.items.len;
-        while (result > 0 and self.array.items[result - 1] == .nil) result -= 1;
-        if (self.entries.items.len == 0) return @intCast(result);
-        while (result < std.math.maxInt(i64)) {
-            const next_index = result + 1;
-            if (self.get(.{ .integer = @intCast(next_index) }) == .nil) break;
-            result = next_index;
-        }
-        return @intCast(result);
-    }
-
-    fn next(self: Table, key: Value) ![2]Value {
-        if (key == .nil) return self.firstEntryAfterArray(0);
-        if (arrayIndex(key)) |index| {
-            if (index <= self.array.items.len) return self.firstEntryAfterArray(index);
-        }
-        if (self.entry_index.get(key)) |index| {
-            return self.firstHashEntryFrom(index + 1);
-        }
-        return error.RuntimeError;
-    }
-
-    fn firstEntryAfterArray(self: Table, index: usize) [2]Value {
-        var next_index = index;
-        while (next_index < self.array.items.len) {
-            next_index += 1;
-            const value = self.array.items[next_index - 1];
-            if (value != .nil) return .{ .{ .integer = @intCast(next_index) }, value };
-        }
-        return self.firstHashEntryFrom(0);
-    }
-
-    fn firstHashEntryFrom(self: Table, start: usize) [2]Value {
-        var index = start;
-        while (index < self.entries.items.len) : (index += 1) {
-            const entry = self.entries.items[index];
-            if (entry.value != .nil) return .{ entry.key, entry.value };
-        }
-        return .{ .nil, .nil };
-    }
-
-    fn removeHashKey(self: *Table, key: Value) void {
-        if (self.entry_index.get(key)) |index| self.removeEntryAt(index);
-    }
-
-    fn removeEntryAt(self: *Table, index: usize) void {
-        const old_key = self.entries.items[index].key;
-        _ = self.entry_index.remove(old_key);
-        var next_index = index + 1;
-        while (next_index < self.entries.items.len) : (next_index += 1) {
-            const shifted_index = next_index - 1;
-            self.entries.items[shifted_index] = self.entries.items[next_index];
-            self.entry_index.getPtr(self.entries.items[shifted_index].key).?.* = shifted_index;
-        }
-        self.entries.items.len -= 1;
-    }
-};
-
-pub const Userdata = struct {
-    ptr: *anyopaque,
-    type_id: usize,
-    type_name: []const u8,
-    metatable: ?*Table = null,
-    finalizer: ?UserdataFinalizer = null,
-    finalizer_data: ?*const anyopaque = null,
-    deinit_fn: ?UserdataDeinit = null,
-    marked: bool = false,
-    finalized: bool = false,
-};
-
-pub const Thread = struct {
-    stack: std.ArrayList(Value) = .empty,
-    frames: std.ArrayList(CallFrame) = .empty,
-    yield_values: std.ArrayList(Value) = .empty,
-    protected_continuations: std.ArrayList(ProtectedContinuation) = .empty,
-    generic_for_continuations: std.ArrayList(GenericForContinuation) = .empty,
-    tail_call_continuations: std.ArrayList(TailCallContinuation) = .empty,
-    call_one_continuations: std.ArrayList(CallOneContinuation) = .empty,
-    open_upvalues: ?*Upvalue = null,
-    hook: Value = .nil,
-    hook_call: bool = false,
-    hook_line: bool = false,
-    hook_return: bool = false,
-    hook_count: u32 = 0,
-    hook_count_remaining: u32 = 0,
-    hook_running: bool = false,
-    hook_return_name: ?[]const u8 = null,
-    hook_level2_func: Value = .nil,
-    hook_transfer_index_base: i64 = 0,
-    hook_transfer_stack_base: usize = 0,
-    hook_transfer_count: usize = 0,
-    hook_transfer_values: []const Value = &.{},
-    next_call_name: ?[]const u8 = null,
-    next_call_namewhat: ?[]const u8 = null,
-    pending_yield_hook_return: bool = false,
-    last_result_base: usize = 0,
-    last_result_count: usize = 0,
-    last_transfer_base: usize = 0,
-    last_transfer_count: usize = 0,
-    yield_result_base: usize = 0,
-    yield_result_count: u16 = 0,
-    native_call_depth: usize = 0,
-    traceback_native_name: ?[]const u8 = null,
-    protected_close_depth: usize = 0,
-    close_error_value: ?Value = null,
-    error_traceback: ?[]const u8 = null,
-    pending_unwind_error: ?Value = null,
-    pending_unwind_resume_frame_count: usize = 0,
-    pending_unwind_target_frame_count: usize = 0,
-    pending_c_continuation: bool = false,
-    resume_parent: ?*Thread = null,
-    entry: Value = .nil,
-    marked: bool = false,
-    started: bool = false,
-    is_main: bool = false,
-    closing: bool = false,
-    status: ThreadStatus = .suspended,
-
-    pub fn initRoot(allocator: std.mem.Allocator, closure: *Closure, stack_value_limit: usize) !Thread {
-        var thread = Thread{};
-        thread.entry = .{ .closure = closure };
-        thread.started = true;
-        thread.is_main = true;
-        thread.status = .running;
-        errdefer thread.deinit(allocator);
-        const proto = closure.proto;
-        try thread.ensureStack(allocator, @max(proto.max_registers, 1), stack_value_limit);
-        try thread.frames.append(allocator, .{ .closure = closure, .proto = proto, .base = 0, .pc = 0, .return_start = 0, .return_count = 0, .varargs = &.{} });
-        return thread;
-    }
-
-    pub fn initCoroutine(entry: Value) Thread {
-        return .{ .entry = entry, .status = .suspended };
-    }
-
-    pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
-        for (self.frames.items) |*frame| frame.deinit(allocator);
-        self.yield_values.deinit(allocator);
-        self.protected_continuations.deinit(allocator);
-        self.generic_for_continuations.deinit(allocator);
-        self.tail_call_continuations.deinit(allocator);
-        self.call_one_continuations.deinit(allocator);
-        self.frames.deinit(allocator);
-        self.stack.deinit(allocator);
-        self.* = undefined;
-    }
-
-    fn ensureStack(self: *Thread, allocator: std.mem.Allocator, size: usize, limit: usize) !void {
-        if (size > limit) return error.StackOverflow;
-        const old_len = self.stack.items.len;
-        if (size <= old_len) return;
-        try self.stack.resize(allocator, size);
-        @memset(self.stack.items[old_len..], .nil);
-    }
-};
-
-const ThreadStatus = enum {
-    suspended,
-    running,
-    normal,
-    dead,
-};
-
-const CallFrame = struct {
-    closure: *Closure,
-    proto: *const proto_mod.Proto,
-    base: usize,
-    pc: usize,
-    return_start: usize,
-    return_count: u16,
-    varargs: []const Value,
-    owns_varargs: bool = false,
-    vararg_table_local: Value = .nil,
-    last_hook_line: ?usize = null,
-    debug_name_override: ?[]const u8 = null,
-    debug_namewhat_override: ?[]const u8 = null,
-    is_tail_call: bool = false,
-    pending_returns: ?[]Value = null,
-
-    fn deinit(self: *CallFrame, allocator: std.mem.Allocator) void {
-        if (self.owns_varargs) allocator.free(self.varargs);
-        if (self.pending_returns) |returns| allocator.free(returns);
-        self.varargs = &.{};
-        self.owns_varargs = false;
-        self.pending_returns = null;
-    }
-};
-
-const StringAllocation = struct {
-    bytes: []const u8,
-    marked: bool = false,
-};
-const PointerAllocationIndex = std.AutoHashMap(usize, usize);
-
-pub const GcMode = enum {
-    incremental,
-    generational,
-
-    fn name(self: GcMode) []const u8 {
-        return switch (self) {
-            .incremental => "incremental",
-            .generational => "generational",
-        };
-    }
-};
-
-pub const GcParam = enum {
-    minormul,
-    majorminor,
-    minormajor,
-    pause,
-    stepmul,
-    stepsize,
-};
-
-const GcParams = struct {
-    minormul: i64 = 20,
-    majorminor: i64 = 50,
-    minormajor: i64 = 70,
-    pause: i64 = 250,
-    stepmul: i64 = 200,
-    stepsize: i64 = 200,
-
-    fn get(self: GcParams, param: GcParam) i64 {
-        return switch (param) {
-            .minormul => self.minormul,
-            .majorminor => self.majorminor,
-            .minormajor => self.minormajor,
-            .pause => self.pause,
-            .stepmul => self.stepmul,
-            .stepsize => self.stepsize,
-        };
-    }
-
-    fn set(self: *GcParams, param: GcParam, value: i64) void {
-        switch (param) {
-            .minormul => self.minormul = value,
-            .majorminor => self.majorminor = value,
-            .minormajor => self.minormajor = value,
-            .pause => self.pause = value,
-            .stepmul => self.stepmul = value,
-            .stepsize => self.stepsize = value,
-        }
-    }
-};
-
-const WeakMode = struct {
-    keys: bool = false,
-    values: bool = false,
-};
-
-const RuntimeAllocationStats = struct {
-    strings: usize,
-    tables: usize,
-    closures: usize,
-    upvalues: usize,
-    threads: usize,
-    bytes: usize,
-
-    fn total(self: RuntimeAllocationStats) usize {
-        return self.bytes;
-    }
-};
+pub const binary_chunk_signature = chunk_mod.binary_chunk_signature;
+pub const binary_chunk_payload_magic = chunk_mod.binary_chunk_payload_magic;
+
+pub const Value = types.Value;
+pub const NativeFn = types.NativeFn;
+pub const UserdataFinalizer = types.UserdataFinalizer;
+pub const UserdataDeinit = types.UserdataDeinit;
+pub const ProtectedCallResult = types.ProtectedCallResult;
+pub const ApiCallbackDispatchFn = types.ApiCallbackDispatchFn;
+pub const CClosureDispatchFn = types.CClosureDispatchFn;
+pub const CClosureResumeDispatchFn = types.CClosureResumeDispatchFn;
+pub const CDebugHookDispatchFn = types.CDebugHookDispatchFn;
+pub const DebugHookEvent = types.DebugHookEvent;
+pub const CDebugHookContext = types.CDebugHookContext;
+pub const CClosureContext = types.CClosureContext;
+pub const CClosureResumeContext = types.CClosureResumeContext;
+pub const ApiCallbackContext = types.ApiCallbackContext;
+pub const RuntimeErrorPayload = types.RuntimeErrorPayload;
+const ProtectedCallContext = types.ProtectedCallContext;
+const ProtectedContinuationKind = types.ProtectedContinuationKind;
+const ProtectedContinuation = types.ProtectedContinuation;
+const GenericForContinuation = types.GenericForContinuation;
+const BranchContinuation = types.BranchContinuation;
+const TailCallContinuation = types.TailCallContinuation;
+const CallOneContinuationResult = types.CallOneContinuationResult;
+const CallOneContinuation = types.CallOneContinuation;
+const BinaryChunkReader = chunk_mod.BinaryChunkReader(State);
+
+pub const appendBinaryChunkHeader = chunk_mod.appendBinaryChunkHeader;
+pub const dumpClosureBinary = chunk_mod.dumpClosureBinary;
+
+const CoroutineResumeResult = types.CoroutineResumeResult;
+pub const Closure = types.Closure;
+pub const CClosure = types.CClosure;
+pub const CUpvalue = types.CUpvalue;
+pub const Upvalue = types.Upvalue;
+const TableEntry = types.TableEntry;
+const TableEntryIndex = types.TableEntryIndex;
+pub const Table = types.Table;
+pub const Userdata = types.Userdata;
+pub const Thread = types.Thread;
+const ThreadStatus = types.ThreadStatus;
+const CallFrame = types.CallFrame;
+const StringAllocation = types.StringAllocation;
+const PointerAllocationIndex = types.PointerAllocationIndex;
+pub const GcMode = types.GcMode;
+pub const GcParam = types.GcParam;
+const GcParams = types.GcParams;
+const WeakMode = types.WeakMode;
+const RuntimeAllocationStats = types.RuntimeAllocationStats;
 
 pub const StdlibMode = stdlib.LibrarySelection;
-
-pub const MemoryFile = struct {
-    path: []const u8,
-    contents: []const u8,
-};
-
-pub const MemoryFilesystem = struct {
-    allocator: std.mem.Allocator,
-    files: std.ArrayList(MemoryFile) = .empty,
-
-    pub fn init(allocator: std.mem.Allocator) MemoryFilesystem {
-        return .{ .allocator = allocator };
-    }
-
-    pub fn initWithFiles(allocator: std.mem.Allocator, files: []const MemoryFile) !MemoryFilesystem {
-        var filesystem = init(allocator);
-        errdefer filesystem.deinit();
-        for (files) |file| try filesystem.writeFile(file.path, file.contents);
-        return filesystem;
-    }
-
-    pub fn deinit(self: *MemoryFilesystem) void {
-        for (self.files.items) |file| {
-            self.allocator.free(file.path);
-            self.allocator.free(file.contents);
-        }
-        self.files.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn readFileAlloc(self: *const MemoryFilesystem, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-        const index = self.find(path) orelse return error.FileNotFound;
-        return allocator.dupe(u8, self.files.items[index].contents);
-    }
-
-    pub fn writeFile(self: *MemoryFilesystem, path: []const u8, contents: []const u8) !void {
-        if (self.find(path)) |index| {
-            const contents_copy = try self.allocator.dupe(u8, contents);
-            self.allocator.free(self.files.items[index].contents);
-            self.files.items[index].contents = contents_copy;
-            return;
-        }
-
-        const path_copy = try self.allocator.dupe(u8, path);
-        errdefer self.allocator.free(path_copy);
-        const contents_copy = try self.allocator.dupe(u8, contents);
-        errdefer self.allocator.free(contents_copy);
-        try self.files.append(self.allocator, .{ .path = path_copy, .contents = contents_copy });
-    }
-
-    pub fn removeFile(self: *MemoryFilesystem, path: []const u8) !void {
-        const index = self.find(path) orelse return error.FileNotFound;
-        const file = self.files.swapRemove(index);
-        self.allocator.free(file.path);
-        self.allocator.free(file.contents);
-    }
-
-    pub fn renameFile(self: *MemoryFilesystem, old_path: []const u8, new_path: []const u8) !void {
-        _ = self.find(old_path) orelse return error.FileNotFound;
-        if (std.mem.eql(u8, old_path, new_path)) return;
-        if (self.find(new_path) != null) try self.removeFile(new_path);
-
-        const index = self.find(old_path) orelse return error.FileNotFound;
-        const path_copy = try self.allocator.dupe(u8, new_path);
-        self.allocator.free(self.files.items[index].path);
-        self.files.items[index].path = path_copy;
-    }
-
-    fn find(self: *const MemoryFilesystem, path: []const u8) ?usize {
-        for (self.files.items, 0..) |file, index| {
-            if (std.mem.eql(u8, file.path, path)) return index;
-        }
-        return null;
-    }
-};
-
-pub const FilesystemCapability = union(enum) {
-    disabled,
-    memory: []const MemoryFile,
-    memory_rw: *MemoryFilesystem,
-    host_cwd,
-};
-
-pub const ClockCapability = union(enum) {
-    disabled,
-    fixed: i64,
-    system,
-};
-
-pub const ProcessCapability = enum {
-    disabled,
-    enabled,
-};
+pub const MemoryFile = host.MemoryFile;
+pub const MemoryFilesystem = host.MemoryFilesystem;
+pub const FilesystemCapability = host.FilesystemCapability;
+pub const ClockCapability = host.ClockCapability;
+pub const ProcessCapability = host.ProcessCapability;
 
 pub const StateOptions = struct {
     stdlib: StdlibMode = .full,
@@ -7017,57 +5755,7 @@ fn unaryMetamethod(op: UnaryMetamethodOp) []const u8 {
 }
 
 pub fn valuesEqual(lhs: Value, rhs: Value) bool {
-    return switch (lhs) {
-        .nil => rhs == .nil,
-        .boolean => |value| rhs == .boolean and rhs.boolean == value,
-        .integer => |value| switch (rhs) {
-            .integer => |other| value == other,
-            .number => |other| if (floatToInteger(other)) |integer| value == integer else false,
-            else => false,
-        },
-        .number => |value| switch (rhs) {
-            .integer => |other| if (floatToInteger(value)) |integer| integer == other else false,
-            .number => |other| value == other,
-            else => false,
-        },
-        .string => |value| rhs == .string and std.mem.eql(u8, value, rhs.string),
-        .table => |value| rhs == .table and value == rhs.table,
-        .userdata => |value| rhs == .userdata and value == rhs.userdata,
-        .closure => |value| rhs == .closure and value == rhs.closure,
-        .c_closure => |value| rhs == .c_closure and value == rhs.c_closure,
-        .thread => |value| rhs == .thread and value == rhs.thread,
-        .coroutine_wrapper => |value| rhs == .coroutine_wrapper and value == rhs.coroutine_wrapper,
-        .gmatch_iterator => |value| rhs == .gmatch_iterator and value == rhs.gmatch_iterator,
-        .native_print => rhs == .native_print,
-        .native_tostring => rhs == .native_tostring,
-        .native_getmetatable => rhs == .native_getmetatable,
-        .native_setmetatable => rhs == .native_setmetatable,
-        .native_rawequal => rhs == .native_rawequal,
-        .native_rawget => rhs == .native_rawget,
-        .native_rawset => rhs == .native_rawset,
-        .native_rawlen => rhs == .native_rawlen,
-        .native_next => rhs == .native_next,
-        .native_pairs => rhs == .native_pairs,
-        .native_ipairs => rhs == .native_ipairs,
-        .native_ipairs_iter => rhs == .native_ipairs_iter,
-        .native_table_create => rhs == .native_table_create,
-        .native_select => rhs == .native_select,
-        .native_assert => rhs == .native_assert,
-        .native_error => rhs == .native_error,
-        .native_pcall => rhs == .native_pcall,
-        .native_xpcall => rhs == .native_xpcall,
-        .native_collectgarbage => rhs == .native_collectgarbage,
-        .native_debug_traceback => rhs == .native_debug_traceback,
-        .native_coroutine_create => rhs == .native_coroutine_create,
-        .native_coroutine_resume => rhs == .native_coroutine_resume,
-        .native_coroutine_yield => rhs == .native_coroutine_yield,
-        .native_coroutine_status => rhs == .native_coroutine_status,
-        .native_coroutine_running => rhs == .native_coroutine_running,
-        .native_coroutine_isyieldable => rhs == .native_coroutine_isyieldable,
-        .native_coroutine_close => rhs == .native_coroutine_close,
-        .native_coroutine_wrap => rhs == .native_coroutine_wrap,
-        .native => |native| rhs == .native and rhs.native == native,
-    };
+    return value_mod.valuesEqual(lhs, rhs);
 }
 
 fn hashValue(value: Value) u64 {
@@ -7232,104 +5920,39 @@ fn lessEqual(lhs: Value, rhs: Value) !bool {
 }
 
 pub fn truthy(value: Value) bool {
-    return switch (value) {
-        .nil => false,
-        .boolean => |boolean| boolean,
-        else => true,
-    };
+    return value_mod.truthy(value);
 }
 
 pub fn toInteger(value: Value) ?i64 {
-    return switch (value) {
-        .integer => |integer| integer,
-        .string => |string| parseIntegerStrict(string),
-        else => null,
-    };
+    return value_mod.toInteger(value);
 }
 
 pub fn toNumber(value: Value) !f64 {
-    return switch (value) {
-        .integer => |integer| @floatFromInt(integer),
-        .number => |number| number,
-        .string => |string| parseLuaNumber(string),
-        else => error.RuntimeError,
-    };
+    return value_mod.toNumber(value);
 }
 
 fn toNumberMaybe(value: Value) ?f64 {
-    return toNumber(value) catch null;
+    return value_mod.toNumberMaybe(value);
 }
 
 fn luaStringLike(value: Value) bool {
-    return switch (value) {
-        .integer, .number, .string => true,
-        else => false,
-    };
+    return value_mod.luaStringLike(value);
 }
 
 fn indexErrorMessage(value: Value) []const u8 {
-    return switch (value) {
-        .integer, .number => "attempt to index a number value",
-        .string => "attempt to index a string value",
-        .boolean => "attempt to index a boolean value",
-        .nil => "attempt to index a nil value",
-        .userdata => "attempt to index a userdata value",
-        else => "attempt to index a non-table value",
-    };
+    return value_mod.indexErrorMessage(value);
 }
 
 fn callErrorMessage(value: Value) []const u8 {
-    return switch (value) {
-        .integer, .number => "attempt to call a number value",
-        .string => "attempt to call a string value",
-        .boolean => "attempt to call a boolean value",
-        .nil => "attempt to call a nil value",
-        .table => "attempt to call a table value",
-        .userdata => "attempt to call a userdata value",
-        else => "attempt to call a non-function value",
-    };
+    return value_mod.callErrorMessage(value);
 }
 
 fn nativeHookName(value: Value) ?[]const u8 {
-    return switch (value) {
-        .native_print => "print",
-        .native_tostring => "tostring",
-        .native_getmetatable => "getmetatable",
-        .native_setmetatable => "setmetatable",
-        .native_rawequal => "rawequal",
-        .native_rawget => "rawget",
-        .native_rawset => "rawset",
-        .native_rawlen => "rawlen",
-        .native_next => "next",
-        .native_pairs => "pairs",
-        .native_ipairs => "ipairs",
-        .native_ipairs_iter => "ipairs iterator",
-        .native_table_create => "create",
-        .native_select => "select",
-        .native_assert => "assert",
-        .native_error => "error",
-        .native_pcall => "pcall",
-        .native_xpcall => "xpcall",
-        .native_collectgarbage => "collectgarbage",
-        .native_debug_traceback => "traceback",
-        .native_coroutine_create => "create",
-        .native_coroutine_resume => "resume",
-        .native_coroutine_yield => "yield",
-        .native_coroutine_status => "status",
-        .native_coroutine_running => "running",
-        .native_coroutine_isyieldable => "isyieldable",
-        .native_coroutine_close => "close",
-        .native_coroutine_wrap => "wrap",
-        .native => |native| shortNativeName(native.name()),
-        else => null,
-    };
+    return value_mod.nativeHookName(value);
 }
 
 fn shortNativeName(name: []const u8) []const u8 {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.');
-    const colon = std.mem.lastIndexOfScalar(u8, name, ':');
-    const start = if (dot) |dot_index| if (colon) |colon_index| @max(dot_index, colon_index) + 1 else dot_index + 1 else if (colon) |colon_index| colon_index + 1 else 0;
-    return name[start..];
+    return value_mod.shortNativeName(name);
 }
 
 const DebugStackSlot = struct {
@@ -7351,50 +5974,7 @@ fn debugStackRegister(thread: *Thread, stack_index: usize) ?DebugStackSlot {
 }
 
 fn debugValueTypeName(value: Value) []const u8 {
-    return switch (value) {
-        .nil => "nil",
-        .boolean => "boolean",
-        .integer => "integer",
-        .number => "number",
-        .string => "string",
-        .table => "table",
-        .userdata => "userdata",
-        .thread => "thread",
-        .closure,
-        .c_closure,
-        .coroutine_wrapper,
-        .gmatch_iterator,
-        .native_print,
-        .native_tostring,
-        .native_getmetatable,
-        .native_setmetatable,
-        .native_rawequal,
-        .native_rawget,
-        .native_rawset,
-        .native_rawlen,
-        .native_next,
-        .native_pairs,
-        .native_ipairs,
-        .native_ipairs_iter,
-        .native_table_create,
-        .native_select,
-        .native_assert,
-        .native_error,
-        .native_pcall,
-        .native_xpcall,
-        .native_collectgarbage,
-        .native_debug_traceback,
-        .native_coroutine_create,
-        .native_coroutine_resume,
-        .native_coroutine_yield,
-        .native_coroutine_status,
-        .native_coroutine_running,
-        .native_coroutine_isyieldable,
-        .native_coroutine_close,
-        .native_coroutine_wrap,
-        .native,
-        => "function",
-    };
+    return value_mod.debugValueTypeName(value);
 }
 
 fn debugHookEvent(event: []const u8) DebugHookEvent {
@@ -7406,10 +5986,7 @@ fn debugHookEvent(event: []const u8) DebugHookEvent {
 }
 
 pub fn appendLuaString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
-    switch (value) {
-        .integer, .number, .string => try appendValue(allocator, out, value),
-        else => return error.RuntimeError,
-    }
+    return value_mod.appendLuaString(allocator, out, value);
 }
 
 fn floorDiv(left: i64, right: i64) i64 {
@@ -7493,7 +6070,7 @@ fn forLoopContinuesNumber(current: f64, limit: f64, step: f64) bool {
 }
 
 pub fn localActiveAt(local: proto_mod.LocalDebug, pc: usize) bool {
-    return local.start_pc <= pc and (local.end_pc == 0 or pc < local.end_pc);
+    return value_mod.localActiveAt(local, pc);
 }
 
 fn isRuntimeError(err: anyerror) bool {
@@ -7534,60 +6111,15 @@ fn constantString(proto: *const proto_mod.Proto, index: bytecode.ConstantIndex) 
 }
 
 fn parseIntegerLiteral(lexeme: []const u8) !Value {
-    if (isHex(lexeme)) {
-        var unsigned: u64 = 0;
-        for (lexeme[2..]) |byte| unsigned = unsigned *% 16 +% hexValue(byte);
-        return .{ .integer = @as(i64, @bitCast(unsigned)) };
-    }
-    if (std.fmt.parseInt(i64, lexeme, 10)) |integer| {
-        return .{ .integer = integer };
-    } else |_| {
-        return .{ .number = try std.fmt.parseFloat(f64, lexeme) };
-    }
+    return value_mod.parseIntegerLiteral(lexeme);
 }
 
 pub fn parseIntegerStrict(text: []const u8) ?i64 {
-    const trimmed = trimAscii(text);
-    if (trimmed.len == 0) return null;
-    const negative = trimmed[0] == '-';
-    const unsigned_text = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
-    if (unsigned_text.len == 0) return null;
-    if (isHex(unsigned_text)) {
-        if (unsigned_text.len == 2) return null;
-        var unsigned: u64 = 0;
-        for (unsigned_text[2..]) |byte| {
-            if (!std.ascii.isHex(byte)) return null;
-            unsigned = unsigned *% 16 +% hexValue(byte);
-        }
-        const integer: i64 = @bitCast(unsigned);
-        return if (negative) -%integer else integer;
-    }
-    for (trimmed, 0..) |byte, index| {
-        if (index == 0 and (byte == '+' or byte == '-')) continue;
-        if (!std.ascii.isDigit(byte)) return null;
-    }
-    return std.fmt.parseInt(i64, trimmed, 10) catch null;
+    return value_mod.parseIntegerStrict(text);
 }
 
 pub fn parseLuaNumber(text: []const u8) !f64 {
-    const trimmed = trimAscii(text);
-    if (trimmed.len == 0) return error.RuntimeError;
-    const negative = trimmed[0] == '-';
-    const unsigned_text = if (trimmed[0] == '+' or trimmed[0] == '-') trimmed[1..] else trimmed;
-    if (unsigned_text.len == 0) return error.RuntimeError;
-    if (isHex(unsigned_text)) {
-        const number = try parseHexNumber(unsigned_text);
-        return if (negative) -number else number;
-    }
-    var has_digit = false;
-    for (unsigned_text) |byte| {
-        if (std.ascii.isDigit(byte)) {
-            has_digit = true;
-            break;
-        }
-    }
-    if (!has_digit) return error.RuntimeError;
-    return std.fmt.parseFloat(f64, trimmed);
+    return value_mod.parseLuaNumber(text);
 }
 
 fn parseHexNumber(text: []const u8) !f64 {
@@ -7629,28 +6161,19 @@ fn parseHexNumber(text: []const u8) !f64 {
 }
 
 pub fn floatToInteger(number: f64) ?i64 {
-    if (!std.math.isFinite(number) or @floor(number) != number) return null;
-    const min = @as(f64, @floatFromInt(std.math.minInt(i64)));
-    const max = @as(f64, @floatFromInt(std.math.maxInt(i64)));
-    if (number < min or number >= max) return null;
-    return @intFromFloat(number);
+    return value_mod.floatToInteger(number);
 }
 
 fn isHex(text: []const u8) bool {
-    return text.len >= 3 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X');
+    return value_mod.isHex(text);
 }
 
 pub fn trimAscii(text: []const u8) []const u8 {
-    return std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
+    return value_mod.trimAscii(text);
 }
 
 fn arrayIndex(value: Value) ?usize {
-    const integer = switch (value) {
-        .integer => |integer| integer,
-        else => return null,
-    };
-    if (integer <= 0) return null;
-    return std.math.cast(usize, integer);
+    return value_mod.arrayIndex(value);
 }
 
 fn fastTableArrayGet(table_value: Value, key_value: Value) ?Value {
@@ -7681,100 +6204,31 @@ fn fastLengthNoMetamethod(value: Value) ?Value {
 }
 
 pub fn runtimeArgValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {
-    if (index >= op.arg_count) return .nil;
-    return state.get(thread, op.base + 1 + index);
+    return value_mod.runtimeArgValue(state, thread, op, index);
 }
 
 pub fn argValue(state: *State, thread: *Thread, op: bytecode.Call, index: u16) Value {
-    return runtimeArgValue(state, thread, op, index);
+    return value_mod.argValue(state, thread, op, index);
 }
 
 pub fn appendValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
-    switch (value) {
-        .nil => try out.appendSlice(allocator, "nil"),
-        .boolean => |boolean| try out.appendSlice(allocator, if (boolean) "true" else "false"),
-        .integer => |integer| try appendFmt(allocator, out, "{d}", .{integer}),
-        .number => |number| try appendNumber(allocator, out, number),
-        .string => |string| try out.appendSlice(allocator, string),
-        .table => |table| if (isFileValue(value)) {
-            if (isClosedFileValue(value)) {
-                try out.appendSlice(allocator, "file (closed)");
-            } else {
-                try appendFmt(allocator, out, "file (0x{x})", .{@intFromPtr(table)});
-            }
-        } else try appendFmt(allocator, out, "table: 0x{x}", .{@intFromPtr(table)}),
-        .userdata => |userdata| try appendFmt(allocator, out, "userdata: 0x{x}", .{@intFromPtr(userdata)}),
-        .closure => |closure| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(closure)}),
-        .c_closure => |closure| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(closure)}),
-        .thread => |thread| try appendFmt(allocator, out, "thread: 0x{x}", .{@intFromPtr(thread)}),
-        .coroutine_wrapper => |thread| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(thread)}),
-        .gmatch_iterator => |table| try appendFmt(allocator, out, "function: 0x{x}", .{@intFromPtr(table)}),
-        .native_print => try out.appendSlice(allocator, "function: print"),
-        .native_tostring => try out.appendSlice(allocator, "function: tostring"),
-        .native_getmetatable => try out.appendSlice(allocator, "function: getmetatable"),
-        .native_setmetatable => try out.appendSlice(allocator, "function: setmetatable"),
-        .native_rawequal => try out.appendSlice(allocator, "function: rawequal"),
-        .native_rawget => try out.appendSlice(allocator, "function: rawget"),
-        .native_rawset => try out.appendSlice(allocator, "function: rawset"),
-        .native_rawlen => try out.appendSlice(allocator, "function: rawlen"),
-        .native_next => try out.appendSlice(allocator, "function: next"),
-        .native_pairs => try out.appendSlice(allocator, "function: pairs"),
-        .native_ipairs => try out.appendSlice(allocator, "function: ipairs"),
-        .native_ipairs_iter => try out.appendSlice(allocator, "function: ipairs iterator"),
-        .native_table_create => try out.appendSlice(allocator, "function: table.create"),
-        .native_select => try out.appendSlice(allocator, "function: select"),
-        .native_assert => try out.appendSlice(allocator, "function: assert"),
-        .native_error => try out.appendSlice(allocator, "function: error"),
-        .native_pcall => try out.appendSlice(allocator, "function: pcall"),
-        .native_xpcall => try out.appendSlice(allocator, "function: xpcall"),
-        .native_collectgarbage => try out.appendSlice(allocator, "function: collectgarbage"),
-        .native_debug_traceback => try out.appendSlice(allocator, "function: debug.traceback"),
-        .native_coroutine_create => try out.appendSlice(allocator, "function: coroutine.create"),
-        .native_coroutine_resume => try out.appendSlice(allocator, "function: coroutine.resume"),
-        .native_coroutine_yield => try out.appendSlice(allocator, "function: coroutine.yield"),
-        .native_coroutine_status => try out.appendSlice(allocator, "function: coroutine.status"),
-        .native_coroutine_running => try out.appendSlice(allocator, "function: coroutine.running"),
-        .native_coroutine_isyieldable => try out.appendSlice(allocator, "function: coroutine.isyieldable"),
-        .native_coroutine_close => try out.appendSlice(allocator, "function: coroutine.close"),
-        .native_coroutine_wrap => try out.appendSlice(allocator, "function: coroutine.wrap"),
-        .native => |native| {
-            try out.appendSlice(allocator, "function: ");
-            try out.appendSlice(allocator, native.name());
-        },
-    }
+    return value_mod.appendValue(allocator, out, value);
 }
 
 pub fn isFileValue(value: Value) bool {
-    return value == .table and value.table.get(.{ .string = "__zlua_file" }) != .nil;
+    return value_mod.isFileValue(value);
 }
 
 pub fn isClosedFileValue(value: Value) bool {
-    if (!isFileValue(value)) return false;
-    const closed = value.table.get(.{ .string = "__zlua_file_closed" });
-    return closed == .boolean and closed.boolean;
+    return value_mod.isClosedFileValue(value);
 }
 
 fn appendNamedValue(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8, value: Value) !void {
-    const address: ?usize = switch (value) {
-        .table => |table| @intFromPtr(table),
-        .userdata => |userdata| @intFromPtr(userdata),
-        .closure => |closure| @intFromPtr(closure),
-        .thread => |thread| @intFromPtr(thread),
-        .coroutine_wrapper => |thread| @intFromPtr(thread),
-        else => null,
-    };
-    if (address) |ptr| {
-        try appendFmt(allocator, out, "{s}: 0x{x}", .{ name, ptr });
-    } else {
-        try out.appendSlice(allocator, name);
-    }
+    return value_mod.appendNamedValue(allocator, out, name, value);
 }
 
 fn freeProtectedResult(allocator: std.mem.Allocator, result: ProtectedCallResult) void {
-    switch (result) {
-        .success => |values| allocator.free(values),
-        .failure => {},
-    }
+    return value_mod.freeProtectedResult(allocator, result);
 }
 
 fn freeCoroutineResumeResult(allocator: std.mem.Allocator, result: CoroutineResumeResult) void {
@@ -7785,25 +6239,15 @@ fn freeCoroutineResumeResult(allocator: std.mem.Allocator, result: CoroutineResu
 }
 
 pub fn appendNumber(allocator: std.mem.Allocator, out: *std.ArrayList(u8), number: f64) !void {
-    try appendFmt(allocator, out, "{d}", .{number});
-    if (@floor(number) == number and std.math.isFinite(number)) {
-        try out.appendSlice(allocator, ".0");
-    }
+    return value_mod.appendNumber(allocator, out, number);
 }
 
 pub fn appendFmt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
-    const text = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(text);
-    try out.appendSlice(allocator, text);
+    return value_mod.appendFmt(allocator, out, fmt, args);
 }
 
 fn hexValue(byte: u8) u32 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => byte - 'a' + 10,
-        'A'...'F' => byte - 'A' + 10,
-        else => 0,
-    };
+    return value_mod.hexValue(byte);
 }
 
 const max_lua_utf8_codepoint: u32 = 0x7fffffff;
@@ -8000,6 +6444,36 @@ test "disabled capabilities block filesystem and process access" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "true\tstring\nfalse\tprocess access disabled\n"));
+}
+
+test "runtime internal phase two re-exports match facade" {
+    const internal = @import("runtime/internal.zig");
+
+    comptime {
+        if (internal.Value != Value) @compileError("internal Value diverged from facade");
+        if (internal.Table != Table) @compileError("internal Table diverged from facade");
+        if (internal.Thread != Thread) @compileError("internal Thread diverged from facade");
+        if (internal.GcMode != GcMode) @compileError("internal GcMode diverged from facade");
+    }
+
+    const memory_file: MemoryFile = internal.MemoryFile{ .path = "init.lua", .contents = "return 1" };
+    _ = memory_file;
+    const filesystem: FilesystemCapability = internal.FilesystemCapability.disabled;
+    _ = filesystem;
+    const clock: ClockCapability = internal.ClockCapability.system;
+    _ = clock;
+    const process_capability: ProcessCapability = internal.ProcessCapability.disabled;
+    _ = process_capability;
+
+    try std.testing.expect(internal.valuesEqual(Value.nil, .nil));
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    try internal.appendValue(std.testing.allocator, &out, .{ .integer = 42 });
+    try std.testing.expect(std.mem.eql(u8, out.items, "42"));
+
+    out.clearRetainingCapacity();
+    try internal.appendBinaryChunkHeader(std.testing.allocator, &out);
+    try std.testing.expect(std.mem.startsWith(u8, out.items, binary_chunk_signature));
 }
 
 test "collects unreachable runtime allocations" {
