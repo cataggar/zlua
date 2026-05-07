@@ -149,17 +149,6 @@ pub fn build(b: *std.Build) void {
             run_example_step.dependOn(&run_example.step);
         }
     }
-    for (example_filters) |filter| {
-        var matched_example = false;
-        for (embedding_examples) |example| {
-            if (exampleMatches(example, filter)) {
-                matched_example = true;
-                break;
-            }
-        }
-        if (!matched_example) std.debug.panic("unknown embedding example '{s}'", .{filter});
-    }
-
     const run_step = b.step("run", "Run zlua");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
