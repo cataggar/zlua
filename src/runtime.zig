@@ -1334,6 +1334,7 @@ pub const State = struct {
     global_table: ?*Table = null,
     strings: std.StringHashMap([]const u8),
     string_allocations: std.ArrayList(StringAllocation) = .empty,
+    string_allocation_index: PointerAllocationIndex,
     table_allocations: std.ArrayList(*Table) = .empty,
     table_allocation_index: PointerAllocationIndex,
     table_metatable_head: ?*Table = null,
@@ -1388,6 +1389,7 @@ pub const State = struct {
             .allocator = allocator,
             .globals = std.StringHashMap(Value).init(allocator),
             .strings = std.StringHashMap([]const u8).init(allocator),
+            .string_allocation_index = PointerAllocationIndex.init(allocator),
             .table_allocation_index = PointerAllocationIndex.init(allocator),
             .options = options,
         };
@@ -1419,6 +1421,7 @@ pub const State = struct {
         self.stderr.deinit(self.allocator);
         self.globals.deinit();
         self.strings.deinit();
+        self.string_allocation_index.deinit();
         self.table_allocation_index.deinit();
         for (self.thread_allocations.items) |thread| self.destroyThread(thread);
         for (self.closure_allocations.items) |closure| self.destroyClosure(closure);
@@ -2283,6 +2286,8 @@ pub const State = struct {
         const allocated = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(allocated);
         try self.string_allocations.append(self.allocator, .{ .bytes = allocated });
+        errdefer _ = self.string_allocations.pop();
+        if (allocated.len != 0) try self.string_allocation_index.put(@intFromPtr(allocated.ptr), self.string_allocations.items.len - 1);
         self.noteAllocationChanged();
         return allocated;
     }
@@ -5311,8 +5316,14 @@ pub const State = struct {
             if (self.strings.get(allocation.bytes)) |interned| {
                 if (interned.ptr == allocation.bytes.ptr and interned.len == allocation.bytes.len) _ = self.strings.remove(allocation.bytes);
             }
+            if (allocation.bytes.len != 0) _ = self.string_allocation_index.remove(@intFromPtr(allocation.bytes.ptr));
             self.allocator.free(allocation.bytes);
+            const moved_index = self.string_allocations.items.len - 1;
             _ = self.string_allocations.swapRemove(index);
+            if (index < moved_index) {
+                const moved = self.string_allocations.items[index];
+                if (moved.bytes.len != 0) self.string_allocation_index.getPtr(@intFromPtr(moved.bytes.ptr)).?.* = index;
+            }
         }
     }
 
@@ -5415,10 +5426,13 @@ pub const State = struct {
     }
 
     fn findStringAllocation(self: *State, bytes: []const u8) ?usize {
-        for (self.string_allocations.items, 0..) |allocation, index| {
-            if (allocation.bytes.ptr == bytes.ptr and allocation.bytes.len == bytes.len) return index;
+        if (bytes.len == 0) {
+            for (self.string_allocations.items, 0..) |allocation, index| {
+                if (allocation.bytes.ptr == bytes.ptr and allocation.bytes.len == bytes.len) return index;
+            }
+            return null;
         }
-        return null;
+        return self.string_allocation_index.get(@intFromPtr(bytes.ptr));
     }
 
     fn isTrackedThread(self: *State, thread: *Thread) bool {
