@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -26,9 +27,15 @@ static void print_call(lua_State *L, int nargs) {
   lua_settop(L, 0);
 }
 
+static int fail_type(lua_State *L) {
+  return luaL_typeerror(L, 1, "table");
+}
+
 int main(void) {
   lua_State *L = luaL_newstate();
   int r1, r2, r3;
+  char *slot;
+  luaL_Buffer b;
 
   lua_pushcfunction(L, checked);
   lua_pushstring(L, "hello");
@@ -56,6 +63,39 @@ int main(void) {
 
   lua_pushnil(L);
   printf("nilref=%d top=%d\n", luaL_ref(L, LUA_REGISTRYINDEX), lua_gettop(L));
+
+  luaL_checkstack(L, 2, "fixture");
+  luaL_where(L, 1);
+  printf("where_len=%zu\n", strlen(lua_tostring(L, -1)));
+  lua_pop(L, 1);
+
+  lua_pushcfunction(L, fail_type);
+  lua_pushinteger(L, 1);
+  int status = lua_pcall(L, 1, 1, 0);
+  printf("typeerror_status=%d contains=%d\n", status, strstr(lua_tostring(L, -1), "table expected, got number") != NULL);
+  lua_settop(L, 0);
+
+  luaL_buffinitsize(L, &b, 4);
+  slot = luaL_prepbuffsize(&b, 4);
+  memcpy(slot, "size", 4);
+  luaL_pushresultsize(&b, 4);
+  printf("resultsize=%s top=%d\n", lua_tostring(L, -1), lua_gettop(L));
+  lua_pop(L, 1);
+
+  printf("makeseed_nonzero=%d\n", luaL_makeseed(L) != 0);
+  lua_pushstring(L, "abcd");
+  printf("len=%lld\n", (long long)luaL_len(L, -1));
+  lua_pop(L, 1);
+
+  errno = 0;
+  int file_returns = luaL_fileresult(L, 1, NULL);
+  printf("fileresult_ok=%d returns=%d top=%d\n", lua_toboolean(L, -1), file_returns, lua_gettop(L));
+  lua_pop(L, 1);
+  errno = 0;
+  int exec_returns = luaL_execresult(L, 0);
+  printf("execresult_ok_returns=%d top=%d\n", exec_returns, lua_gettop(L));
+  printf("execresult=%s,%s,%lld\n", lua_toboolean(L, -3) ? "true" : "fail", lua_tostring(L, -2), (long long)lua_tointeger(L, -1));
+  lua_pop(L, 3);
 
   lua_close(L);
   return 0;

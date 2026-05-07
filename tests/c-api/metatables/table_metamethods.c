@@ -26,6 +26,17 @@ int main(void) {
   printf("index=%s top=%d\n", lua_tostring(L, -1), lua_gettop(L));
   lua_pop(L, 1);
 
+  printf("metafield_type=%s top=%d\n", lua_typename(L, luaL_getmetafield(L, 1, "__index")), lua_gettop(L));
+  lua_pop(L, 1);
+
+  lua_newtable(L);
+  lua_pushstring(L, "namedtable");
+  lua_setfield(L, -2, "__name");
+  lua_setmetatable(L, 1);
+  luaL_tolstring(L, 1, NULL);
+  printf("tolstring_prefix=%.10s top=%d\n", lua_tostring(L, -1), lua_gettop(L));
+  lua_pop(L, 1);
+
   lua_pushstring(L, "written");
   lua_setfield(L, 1, "targeted");
   lua_getglobal(L, "newindex_target");

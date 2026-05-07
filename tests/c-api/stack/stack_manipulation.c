@@ -50,6 +50,12 @@ int main(void) {
   lua_settop(L, 0);
   print_stack(L, "after_clear");
 
+  lua_pushstring(L, "main");
+  lua_State *T = lua_newthread(L);
+  lua_pushstring(L, "thread");
+  lua_xmove(L, T, 1);
+  printf("xmove main_top=%d thread_top=%d thread_value=%s\n", lua_gettop(L), lua_gettop(T), lua_tostring(T, -1));
+
   lua_close(L);
   return 0;
 }

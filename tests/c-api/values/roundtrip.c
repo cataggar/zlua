@@ -1,11 +1,21 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "lua.h"
 #include "lauxlib.h"
 
 static void print_type(lua_State *L, int idx) {
   printf("%s", lua_typename(L, lua_type(L, idx)));
+}
+
+static const char *push_vformat(lua_State *L, const char *fmt, ...) {
+  const char *result;
+  va_list args;
+  va_start(args, fmt);
+  result = lua_pushvfstring(L, fmt, args);
+  va_end(args);
+  return result;
 }
 
 int main(void) {
@@ -34,6 +44,7 @@ int main(void) {
   printf("integer=%lld number=%.1f stringnum=%.1f isnum=%d\n",
       (long long)lua_tointeger(L, 3), lua_tonumber(L, 4),
       lua_tonumberx(L, 6, &isnum), isnum);
+  printf("isnumber=%d,%d,%d\n", lua_isnumber(L, 3), lua_isnumber(L, 6), lua_isnumber(L, 7));
 
   const char *s = lua_tolstring(L, 5, &len);
   printf("embedded_len=%zu bytes=%d,%d,%d rawlen=%llu\n",
@@ -55,8 +66,11 @@ int main(void) {
   print_type(L, -1);
   printf("\n");
 
-  lua_pushfstring(L, "%s:%d", "fmt", 5);
+  lua_pushfstring(L, "%s:%d:%I:%U:%s", "fmt", 5, (lua_Integer)1234567890123LL, (unsigned long)0x24, NULL);
   printf("fstring=%s\n", lua_tostring(L, -1));
+
+  push_vformat(L, "%s:%d", "vfmt", 6);
+  printf("vfstring=%s\n", lua_tostring(L, -1));
 
   lua_close(L);
   return 0;

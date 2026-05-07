@@ -9,6 +9,13 @@ static void print_type(lua_State *L, int idx) {
 
 int main(void) {
   lua_State *L = luaL_newstate();
+  void *ud = NULL;
+  lua_Alloc allocf;
+
+  printf("version=%.0f\n", (double)lua_version(L));
+  allocf = lua_getallocf(L, &ud);
+  luaL_checkversion(L);
+  printf("allocf=%d ud=%d\n", allocf != NULL, ud == NULL);
 
   lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
   printf("globals=");

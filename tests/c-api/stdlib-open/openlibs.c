@@ -25,6 +25,13 @@ int main(void) {
   printf("package_ret=%s loaded=%s preload=%s\n", lua_typename(L, lua_type(L, -3)), lua_typename(L, lua_type(L, -2)), lua_typename(L, lua_type(L, -1)));
   lua_pop(L, 3);
 
+  luaopen_coroutine(L);
+  luaopen_debug(L);
+  luaopen_io(L);
+  luaopen_os(L);
+  printf("opens=%s,%s,%s,%s top=%d\n", lua_typename(L, lua_type(L, -4)), lua_typename(L, lua_type(L, -3)), lua_typename(L, lua_type(L, -2)), lua_typename(L, lua_type(L, -1)), lua_gettop(L));
+  lua_pop(L, 4);
+
   luaL_openselectedlibs(L, LUA_GLIBK | LUA_STRLIBK | LUA_TABLIBK, LUA_UTF8LIBK);
   print_global(L, "_G");
   print_global(L, "string");

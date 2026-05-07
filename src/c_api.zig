@@ -2012,10 +2012,7 @@ pub export fn lua_xmove(from: ?*lua_State, to: ?*lua_State, n: c_int) callconv(.
 pub export fn lua_isnumber(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return 0;
     const value = valueAt(thread, idx) orelse return 0;
-    return switch (value) {
-        .integer, .number => 1,
-        else => 0,
-    };
+    return if (toNumberValue(value) != null) 1 else 0;
 }
 
 pub export fn lua_isstring(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
@@ -2412,16 +2409,9 @@ pub export fn lua_pushstring(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) ?[*
     return lua_pushlstring(L, s, std.mem.len(s.?));
 }
 
-extern fn vsnprintf(?[*]u8, usize, ?[*:0]const u8, VaList) c_int;
-
-pub export fn lua_pushvfstring(L: ?*lua_State, fmt: ?[*:0]const u8, args: VaList) callconv(.c) ?[*:0]const u8 {
+pub export fn lua_pushvfstring(L: ?*lua_State, fmt: ?[*:0]const u8, args: *VaList) callconv(.c) ?[*:0]const u8 {
     const thread = threadFromState(L) orelse return null;
-    var buffer: [4096]u8 = undefined;
-    const written = vsnprintf(&buffer, buffer.len, fmt, args);
-    if (written < 0) return lua_pushstring(L, fmt);
-    const len: usize = @min(@as(usize, @intCast(written)), buffer.len - 1);
-    const string = pushStringBytes(thread, buffer[0..len]) orelse return null;
-    return string.bytes.ptr;
+    return pushFormattedString(thread, fmt, args);
 }
 
 pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv(.c) ?[*:0]const u8 {
@@ -2429,6 +2419,12 @@ pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv
     var args = @cVaStart();
     defer @cVaEnd(&args);
 
+    return pushFormattedString(thread, fmt, &args);
+}
+
+extern fn snprintf(?[*]u8, usize, ?[*:0]const u8, ...) c_int;
+
+fn pushFormattedString(thread: *CThread, fmt: ?[*:0]const u8, args: *VaList) callconv(.c) ?[*:0]const u8 {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(thread.owner.allocator());
     const format = cStringSlice(fmt);
@@ -2442,23 +2438,37 @@ pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv
         switch (format[index]) {
             '%' => out.append(thread.owner.allocator(), '%') catch return null,
             's' => {
-                const value = @cVaArg(&args, ?[*:0]const u8);
-                out.appendSlice(thread.owner.allocator(), cStringSlice(value)) catch return null;
+                const value = @cVaArg(args, ?[*:0]const u8);
+                out.appendSlice(thread.owner.allocator(), if (value) |ptr| std.mem.span(ptr) else "(null)") catch return null;
             },
             'd' => {
-                const value = @cVaArg(&args, c_int);
+                const value = @cVaArg(args, c_int);
                 appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
             },
             'I' => {
-                const value = @cVaArg(&args, lua_Integer);
+                const value = @cVaArg(args, lua_Integer);
                 appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
             },
             'f' => {
-                const value = @cVaArg(&args, f64);
-                appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
+                const value = @cVaArg(args, f64);
+                appendValueString(thread.owner.allocator(), &out, .{ .number = value }) catch return null;
+            },
+            'p' => {
+                const value = @cVaArg(args, ?*anyopaque);
+                var buffer: [64]u8 = undefined;
+                const written = snprintf(&buffer, buffer.len, zstr("%p"), value);
+                if (written < 0) return null;
+                const len: usize = @min(@as(usize, @intCast(written)), buffer.len - 1);
+                out.appendSlice(thread.owner.allocator(), buffer[0..len]) catch return null;
+            },
+            'U' => {
+                const value: u32 = @truncate(@cVaArg(args, c_ulong));
+                var buffer: [6]u8 = undefined;
+                const len = encodeLuaUtf8(value, &buffer) orelse return null;
+                out.appendSlice(thread.owner.allocator(), buffer[0..len]) catch return null;
             },
             'c' => {
-                const value = @cVaArg(&args, c_int);
+                const value = @cVaArg(args, c_int);
                 out.append(thread.owner.allocator(), @intCast(value)) catch return null;
             },
             else => {
@@ -2469,6 +2479,49 @@ pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv
     }
     const string = pushStringBytes(thread, out.items) orelse return null;
     return string.bytes.ptr;
+}
+
+fn encodeLuaUtf8(code: u32, out: *[6]u8) ?usize {
+    if (code <= 0x7f) {
+        out[0] = @intCast(code);
+        return 1;
+    }
+    if (code <= 0x7ff) {
+        out[0] = 0xc0 | @as(u8, @intCast(code >> 6));
+        out[1] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 2;
+    }
+    if (code <= 0xffff) {
+        out[0] = 0xe0 | @as(u8, @intCast(code >> 12));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 3;
+    }
+    if (code <= 0x1fffff) {
+        out[0] = 0xf0 | @as(u8, @intCast(code >> 18));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 4;
+    }
+    if (code <= 0x3ffffff) {
+        out[0] = 0xf8 | @as(u8, @intCast(code >> 24));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 5;
+    }
+    if (code <= 0x7fffffff) {
+        out[0] = 0xfc | @as(u8, @intCast(code >> 30));
+        out[1] = 0x80 | @as(u8, @intCast((code >> 24) & 0x3f));
+        out[2] = 0x80 | @as(u8, @intCast((code >> 18) & 0x3f));
+        out[3] = 0x80 | @as(u8, @intCast((code >> 12) & 0x3f));
+        out[4] = 0x80 | @as(u8, @intCast((code >> 6) & 0x3f));
+        out[5] = 0x80 | @as(u8, @intCast(code & 0x3f));
+        return 6;
+    }
+    return null;
 }
 
 pub export fn lua_pushcclosure(L: ?*lua_State, function: lua_CFunction, n: c_int) callconv(.c) void {
