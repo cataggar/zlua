@@ -927,6 +927,22 @@ pub const Table = struct {
         }
     }
 
+    fn setExistingNonNil(self: *Table, key: Value, value: Value) bool {
+        if (arrayIndex(key)) |index| {
+            if (index <= self.array.items.len and self.array.items[index - 1] != .nil) {
+                self.array.items[index - 1] = value;
+                return true;
+            }
+            return false;
+        }
+        if (self.entry_index.get(key)) |index| {
+            if (self.entries.items[index].value == .nil) return false;
+            self.entries.items[index].value = value;
+            return true;
+        }
+        return false;
+    }
+
     pub fn len(self: Table) i64 {
         var result = self.array.items.len;
         while (result > 0 and self.array.items[result - 1] == .nil) result -= 1;
@@ -1349,6 +1365,8 @@ pub const State = struct {
     gc_mode: GcMode = .generational,
     gc_params: GcParams = .{},
     gc_next_total: usize = 0,
+    gc_known_total: usize = 0,
+    gc_allocation_dirty: bool = true,
     mark_all_stack_registers: bool = false,
     conservative_gc_depth: usize = 0,
     random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
@@ -1382,9 +1400,9 @@ pub const State = struct {
 
     pub fn fileMetatable(state: *State) !*Table {
         const value = try state.newTableWithHints(0, 3);
-        try value.table.set(state.allocator, .{ .string = try state.intern("__name") }, .{ .string = try state.intern("FILE*") });
-        try value.table.set(state.allocator, .{ .string = try state.intern("__close") }, .{ .native = .io_file_close });
-        try value.table.set(state.allocator, .{ .string = try state.intern("__gc") }, .{ .native = .io_file_close });
+        try state.setTableRaw(value.table, .{ .string = try state.intern("__name") }, .{ .string = try state.intern("FILE*") });
+        try state.setTableRaw(value.table, .{ .string = try state.intern("__close") }, .{ .native = .io_file_close });
+        try state.setTableRaw(value.table, .{ .string = try state.intern("__gc") }, .{ .native = .io_file_close });
         return value.table;
     }
 
@@ -1609,10 +1627,35 @@ pub const State = struct {
         }
 
         if (self.options.max_memory) |max_memory| {
-            if (self.allocationStats().total() <= max_memory) return;
+            if (self.refreshAllocationTotal() <= max_memory) return;
             if (self.gc_running and !self.is_collecting) try self.collectGarbageConservatively(thread);
-            if (self.allocationStats().total() > max_memory) return self.failRuntimeDetail(thread, "memory limit exceeded");
+            if (self.refreshAllocationTotal() > max_memory) return self.failRuntimeDetail(thread, "memory limit exceeded");
         }
+    }
+
+    fn noteAllocationChanged(self: *State) void {
+        self.gc_allocation_dirty = true;
+    }
+
+    fn refreshAllocationTotal(self: *State) usize {
+        const total = self.allocationStats().total();
+        self.gc_known_total = total;
+        self.gc_allocation_dirty = false;
+        return total;
+    }
+
+    fn currentAllocationTotal(self: *State) usize {
+        return if (self.gc_allocation_dirty) self.refreshAllocationTotal() else self.gc_known_total;
+    }
+
+    fn tableCapacityBytes(table: *const Table) usize {
+        return table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
+    }
+
+    fn setTableRaw(self: *State, table: *Table, key: Value, value: Value) !void {
+        const old_capacity_bytes = tableCapacityBytes(table);
+        try table.set(self.allocator, key, value);
+        if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
     }
 
     fn traceInstruction(self: *State, frame: CallFrame, pc: usize, instruction: bytecode.Instruction) !void {
@@ -1651,7 +1694,7 @@ pub const State = struct {
         const key = if (self.globals.contains(name)) name else try self.intern(name);
         try self.globals.put(key, value);
         if (self.global_table) |table| {
-            try table.set(self.allocator, .{ .string = key }, value);
+            try self.setTableRaw(table, .{ .string = key }, value);
             self.writeTableBarrier(table, .{ .string = key }, value);
         }
         self.markValue(value);
@@ -1894,6 +1937,7 @@ pub const State = struct {
             errdefer self.allocator.destroy(upvalue);
             upvalue.* = .{ .value = value };
             try self.c_upvalue_allocations.append(self.allocator, upvalue);
+            self.noteAllocationChanged();
             upvalues[index] = upvalue;
         }
 
@@ -1901,6 +1945,7 @@ pub const State = struct {
         closure.* = .{ .function_id = function_id, .upvalues = upvalues };
         errdefer self.destroyCClosure(closure);
         try self.c_closure_allocations.append(self.allocator, closure);
+        self.noteAllocationChanged();
         return closure;
     }
 
@@ -2214,6 +2259,7 @@ pub const State = struct {
         const allocated = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(allocated);
         try self.string_allocations.append(self.allocator, .{ .bytes = allocated });
+        self.noteAllocationChanged();
         return allocated;
     }
 
@@ -2341,6 +2387,7 @@ pub const State = struct {
         table.* = try Table.init(self.allocator, array_hint, hash_hint);
         errdefer table.deinit(self.allocator);
         try self.table_allocations.append(self.allocator, table);
+        self.noteAllocationChanged();
         return .{ .table = table };
     }
 
@@ -2356,6 +2403,7 @@ pub const State = struct {
             .deinit_fn = deinit_fn,
         };
         try self.userdata_allocations.append(self.allocator, userdata);
+        self.noteAllocationChanged();
         return .{ .userdata = userdata };
     }
 
@@ -2380,6 +2428,7 @@ pub const State = struct {
                 .is_open = false,
             };
             try self.upvalue_allocations.append(self.allocator, upvalue);
+            self.noteAllocationChanged();
             upvalues[index] = upvalue;
         }
 
@@ -2387,6 +2436,7 @@ pub const State = struct {
         errdefer self.allocator.destroy(closure);
         closure.* = .{ .proto = proto, .upvalues = upvalues };
         try self.closure_allocations.append(self.allocator, closure);
+        self.noteAllocationChanged();
         return closure;
     }
 
@@ -2411,6 +2461,7 @@ pub const State = struct {
                 .is_open = false,
             };
             try self.upvalue_allocations.append(self.allocator, upvalue);
+            self.noteAllocationChanged();
             upvalues[index] = upvalue;
         }
 
@@ -2418,6 +2469,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
+        self.noteAllocationChanged();
         return .{ .closure = closure };
     }
 
@@ -2436,6 +2488,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = parent.closure.stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
+        self.noteAllocationChanged();
         return .{ .closure = closure };
     }
 
@@ -2449,6 +2502,7 @@ pub const State = struct {
         errdefer self.allocator.destroy(upvalue);
         upvalue.* = .{ .owner = thread, .stack_index = stack_index, .next = thread.open_upvalues };
         try self.upvalue_allocations.append(self.allocator, upvalue);
+        self.noteAllocationChanged();
         thread.open_upvalues = upvalue;
         return upvalue;
     }
@@ -2796,8 +2850,7 @@ pub const State = struct {
 
         if (table_value == .table) {
             const table = table_value.table;
-            if (table.get(key) != .nil) {
-                try table.set(self.allocator, key, value);
+            if (table.setExistingNonNil(key, value)) {
                 self.writeTableBarrier(table, key, value);
                 return;
             }
@@ -2805,7 +2858,7 @@ pub const State = struct {
 
         const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
             if (table_value == .table) {
-                try table_value.table.set(self.allocator, key, value);
+                try self.setTableRaw(table_value.table, key, value);
                 self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
@@ -2828,8 +2881,7 @@ pub const State = struct {
 
         if (table_value == .table) {
             const table = table_value.table;
-            if (table.get(key) != .nil) {
-                try table.set(self.allocator, key, value);
+            if (table.setExistingNonNil(key, value)) {
                 self.writeTableBarrier(table, key, value);
                 return;
             }
@@ -2837,7 +2889,7 @@ pub const State = struct {
 
         const metamethod = try self.getMetamethod(table_value, "__newindex") orelse {
             if (table_value == .table) {
-                try table_value.table.set(self.allocator, key, value);
+                try self.setTableRaw(table_value.table, key, value);
                 self.writeTableBarrier(table_value.table, key, value);
                 return;
             }
@@ -3765,9 +3817,9 @@ pub const State = struct {
         const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
         const table = table_value.table;
         table.counts_for_gc_count = false;
-        try table.set(self.allocator, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
+        try self.setTableRaw(table, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
         for (varargs, 0..) |value, index| {
-            try table.set(self.allocator, .{ .integer = @intCast(index + 1) }, value);
+            try self.setTableRaw(table, .{ .integer = @intCast(index + 1) }, value);
         }
         return table_value;
     }
@@ -4197,6 +4249,7 @@ pub const State = struct {
         thread.* = Thread.initCoroutine(entry);
         errdefer thread.deinit(self.allocator);
         try self.thread_allocations.append(self.allocator, thread);
+        self.noteAllocationChanged();
         return thread;
     }
 
@@ -4343,6 +4396,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
+        self.noteAllocationChanged();
         return closure;
     }
 
@@ -4419,7 +4473,7 @@ pub const State = struct {
     fn rawSet(self: *State, table_value: Value, key_value: Value, value: Value) !void {
         const table = try self.expectTable(table_value);
         const key = try self.writableTableKey(key_value);
-        try table.set(self.allocator, key, value);
+        try self.setTableRaw(table, key, value);
         self.writeTableBarrier(table, key, value);
     }
 
@@ -4614,7 +4668,7 @@ pub const State = struct {
             return;
         }
         if (option == .string and std.mem.eql(u8, option.string, "count")) {
-            try self.returnValues(thread, op.base, op.return_count, &.{.{ .number = @as(f64, @floatFromInt(self.allocationStats().total())) / 1024.0 }});
+            try self.returnValues(thread, op.base, op.return_count, &.{.{ .number = @as(f64, @floatFromInt(self.refreshAllocationTotal())) / 1024.0 }});
             return;
         }
         if (option == .string and std.mem.eql(u8, option.string, "isrunning")) {
@@ -4751,12 +4805,12 @@ pub const State = struct {
         self.resetAutoGcThreshold();
     }
 
-    fn shouldRunAutoGc(self: State) bool {
-        return !self.is_collecting and self.allocationStats().total() >= self.gc_next_total;
+    fn shouldRunAutoGc(self: *State) bool {
+        return !self.is_collecting and self.currentAllocationTotal() >= self.gc_next_total;
     }
 
     fn resetAutoGcThreshold(self: *State) void {
-        const total = self.allocationStats().total();
+        const total = self.refreshAllocationTotal();
         self.gc_next_total = total + @max(total / 2, 256);
     }
 
