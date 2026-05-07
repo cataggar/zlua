@@ -74,8 +74,8 @@ const Value = union(enum) {
     table: *CTable,
     thread: *CThread,
     light_userdata: ?*anyopaque,
-    c_function: lua_CFunction,
     lua_closure: *runtime.Closure,
+    c_closure: *runtime.CClosure,
 
     fn typeTag(self: Value) c_int {
         return switch (self) {
@@ -86,7 +86,7 @@ const Value = union(enum) {
             .table => LUA_TTABLE,
             .thread => LUA_TTHREAD,
             .light_userdata => LUA_TLIGHTUSERDATA,
-            .c_function, .lua_closure => LUA_TFUNCTION,
+            .lua_closure, .c_closure => LUA_TFUNCTION,
         };
     }
 };
@@ -183,6 +183,7 @@ const CThread = struct {
     stack: std.ArrayList(Value) = .empty,
     status: c_int = 0,
     pending_error: ?Value = null,
+    current_c_closure: ?*runtime.CClosure = null,
     c_call_depth: usize = 0,
 
     fn deinit(self: *CThread) void {
@@ -313,6 +314,11 @@ fn stackSlot(thread: *CThread, idx: c_int) ?*Value {
 
 fn valueAt(thread: *CThread, idx: c_int) ?Value {
     if (idx == LUA_REGISTRYINDEX) return .{ .table = thread.owner.registry_table };
+    if (upvaluePseudoIndex(idx)) |upvalue_index| {
+        const closure = thread.current_c_closure orelse return null;
+        if (upvalue_index >= closure.upvalues.len) return null;
+        return runtimeToCValue(thread.owner, closure.upvalues[upvalue_index].value, 0) catch null;
+    }
     return if (stackSlot(thread, idx)) |slot| slot.* else null;
 }
 
@@ -395,14 +401,41 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         .table => |value| rhs == .table and value == rhs.table,
         .thread => |value| rhs == .thread and value == rhs.thread,
         .light_userdata => |value| rhs == .light_userdata and value == rhs.light_userdata,
-        .c_function => |value| rhs == .c_function and value == rhs.c_function,
         .lua_closure => |value| rhs == .lua_closure and value == rhs.lua_closure,
+        .c_closure => |value| rhs == .c_closure and value == rhs.c_closure,
     };
 }
 
 fn cStringSlice(s: ?[*:0]const u8) []const u8 {
     const ptr = s orelse return &.{};
     return std.mem.span(ptr);
+}
+
+fn functionId(function: lua_CFunction) usize {
+    return if (function) |ptr| @intFromPtr(ptr) else 0;
+}
+
+fn functionFromId(id: usize) lua_CFunction {
+    return if (id == 0) null else @ptrFromInt(id);
+}
+
+fn upvaluePseudoIndex(idx: c_int) ?usize {
+    if (idx >= LUA_REGISTRYINDEX) return null;
+    const raw = LUA_REGISTRYINDEX - idx;
+    if (raw <= 0) return null;
+    return @intCast(raw - 1);
+}
+
+fn readRuntimeUpvalue(upvalue: *runtime.Upvalue) runtime.Value {
+    return if (upvalue.is_open) upvalue.owner.stack.items[upvalue.stack_index] else upvalue.closed;
+}
+
+fn writeRuntimeUpvalue(upvalue: *runtime.Upvalue, value: runtime.Value) void {
+    if (upvalue.is_open) {
+        upvalue.owner.stack.items[upvalue.stack_index] = value;
+    } else {
+        upvalue.closed = value;
+    }
 }
 
 fn stringLikeBytes(thread: *CThread, value: Value) ?[]const u8 {
@@ -432,7 +465,7 @@ fn appendValueString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), valu
         .table => |table| try appendFmt(out, allocator, "table: 0x{x}", .{@intFromPtr(table)}),
         .thread => |target| try appendFmt(out, allocator, "thread: 0x{x}", .{@intFromPtr(target)}),
         .light_userdata => |ptr| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(ptr)}),
-        .c_function, .lua_closure => try out.appendSlice(allocator, "function"),
+        .lua_closure, .c_closure => try out.appendSlice(allocator, "function"),
     }
 }
 
@@ -520,7 +553,8 @@ fn cToRuntimeValue(state: *CState, value: Value, depth: usize) !runtime.Value {
             }
             break :blk .{ .table = runtime_table };
         },
-        .thread, .light_userdata, .c_function => .nil,
+        .c_closure => |closure| .{ .c_closure = closure },
+        .thread, .light_userdata => .nil,
     };
 }
 
@@ -533,6 +567,7 @@ fn runtimeToCValue(state: *CState, value: runtime.Value, depth: usize) !Value {
         .number => |number| .{ .number = number },
         .string => |string| .{ .string = createString(state, string) orelse return error.OutOfMemory },
         .closure => |closure| .{ .lua_closure = closure },
+        .c_closure => |closure| .{ .c_closure = closure },
         .table => |table| blk: {
             const c_table = createTable(state, @intCast(table.array.items.len), @intCast(table.entries.items.len)) orelse return error.OutOfMemory;
             for (table.array.items, 0..) |item, index| {
@@ -568,6 +603,13 @@ fn syncRuntimeGlobalsToC(state: *CState) void {
         if (std.mem.eql(u8, entry.key_ptr.*, "_G")) continue;
         const key = createString(state, entry.key_ptr.*) orelse continue;
         const value = runtimeToCValue(state, entry.value_ptr.*, 0) catch continue;
+        state.global_table.set(state.allocator(), .{ .string = key }, value) catch continue;
+    }
+    const runtime_globals = state.runtime_state.global_table orelse return;
+    for (runtime_globals.entries.items) |entry| {
+        if (entry.key != .string or std.mem.eql(u8, entry.key.string, "_G")) continue;
+        const key = createString(state, entry.key.string) orelse continue;
+        const value = runtimeToCValue(state, entry.value, 0) catch continue;
         state.global_table.set(state.allocator(), .{ .string = key }, value) catch continue;
     }
 }
@@ -616,44 +658,88 @@ fn finishCallResults(thread: *CThread, base: usize, results: []const Value, nres
     }
 }
 
-fn callCFunction(thread: *CThread, function: lua_CFunction, args: []const Value, nresults: c_int, protected: bool) c_int {
-    const base = thread.stack.items.len - args.len - 1;
+const CCallbackResult = union(enum) {
+    success: []Value,
+    failure: Value,
+    memory_error,
+};
+
+fn runCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Value, protected: bool) CCallbackResult {
     const allocator = thread.owner.allocator();
-    const saved = allocator.dupe(Value, thread.stack.items[0..base]) catch return LUA_ERRMEM;
+    const saved = allocator.dupe(Value, thread.stack.items) catch return .memory_error;
     defer allocator.free(saved);
-    const call_args = allocator.dupe(Value, args) catch return LUA_ERRMEM;
+    const call_args = allocator.dupe(Value, args) catch return .memory_error;
     defer allocator.free(call_args);
 
     thread.stack.clearRetainingCapacity();
-    thread.stack.appendSlice(allocator, call_args) catch return LUA_ERRMEM;
+    thread.stack.appendSlice(allocator, call_args) catch return .memory_error;
     thread.pending_error = null;
+    const previous_closure = thread.current_c_closure;
+    thread.current_c_closure = closure;
     thread.c_call_depth += 1;
-    defer thread.c_call_depth -= 1;
+    defer {
+        thread.c_call_depth -= 1;
+        thread.current_c_closure = previous_closure;
+    }
+    const function = functionFromId(closure.function_id);
     const returned = if (function) |func| func(@ptrCast(thread.public_state)) else 0;
     const pending = thread.pending_error;
     thread.pending_error = null;
 
     if (pending) |err_value| {
         thread.stack.clearRetainingCapacity();
-        thread.stack.appendSlice(allocator, saved) catch return LUA_ERRMEM;
-        if (protected) {
-            _ = pushValue(thread, err_value);
-            return LUA_ERRRUN;
-        }
+        thread.stack.appendSlice(allocator, saved) catch return .memory_error;
+        if (protected) return .{ .failure = err_value };
         _ = pushValue(thread, err_value);
         raiseUnprotected(thread);
-        return LUA_ERRRUN;
     }
 
     const raw_count = @max(returned, 0);
     const count: usize = @min(@as(usize, @intCast(raw_count)), thread.stack.items.len);
     const start = thread.stack.items.len - count;
-    const results = allocator.dupe(Value, thread.stack.items[start..]) catch return LUA_ERRMEM;
-    defer allocator.free(results);
+    const results = allocator.dupe(Value, thread.stack.items[start..]) catch return .memory_error;
     thread.stack.clearRetainingCapacity();
-    thread.stack.appendSlice(allocator, saved) catch return LUA_ERRMEM;
-    finishCallResults(thread, saved.len, results, nresults);
-    return LUA_OK;
+    thread.stack.appendSlice(allocator, saved) catch {
+        allocator.free(results);
+        return .memory_error;
+    };
+    return .{ .success = results };
+}
+
+fn callCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Value, nresults: c_int, protected: bool) c_int {
+    const base = thread.stack.items.len - args.len - 1;
+    const allocator = thread.owner.allocator();
+    switch (runCClosure(thread, closure, args, protected)) {
+        .success => |results| {
+            defer allocator.free(results);
+            finishCallResults(thread, base, results, nresults);
+            return LUA_OK;
+        },
+        .failure => |err_value| {
+            thread.stack.items.len = base;
+            _ = pushValue(thread, err_value);
+            return LUA_ERRRUN;
+        },
+        .memory_error => return LUA_ERRMEM,
+    }
+}
+
+fn cClosureDispatch(context: *runtime.CClosureContext) anyerror!void {
+    const state: *CState = @ptrCast(@alignCast(context.user_data orelse return error.RuntimeError));
+    const thread = &state.main_thread;
+    const allocator = state.allocator();
+    const args = try allocator.alloc(Value, context.argCount());
+    defer allocator.free(args);
+    for (args, 0..) |*arg, index| arg.* = try runtimeToCValue(state, context.argValue(index), 0);
+
+    switch (runCClosure(thread, context.closure, args, true)) {
+        .success => |results| {
+            defer allocator.free(results);
+            for (results) |result| try context.appendReturn(try cToRuntimeValue(state, result, 0));
+        },
+        .failure => |err_value| return context.raise(try cToRuntimeValue(state, err_value, 0)),
+        .memory_error => return error.OutOfMemory,
+    }
 }
 
 fn callLuaClosure(thread: *CThread, closure: *runtime.Closure, args: []const Value, nresults: c_int, protected: bool) c_int {
@@ -726,8 +812,8 @@ fn callStackFunction(thread: *CThread, nargs: c_int, nresults: c_int, protected:
     const callable = thread.stack.items[base];
     const args = thread.stack.items[base + 1 ..];
     return switch (callable) {
-        .c_function => |function| callCFunction(thread, function, args, nresults, protected),
         .lua_closure => |closure| callLuaClosure(thread, closure, args, nresults, protected),
+        .c_closure => |closure| callCClosure(thread, closure, args, nresults, protected),
         else => blk: {
             thread.stack.items.len = base;
             _ = pushStringBytes(thread, "attempt to call a non-function value");
@@ -784,6 +870,7 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
         freeHost(CState, f, ud, state);
         return null;
     };
+    state.runtime_state.setCClosureDispatch(cClosureDispatch, state);
     const runtime_globals = state.runtime_state.newTableWithHints(0, 1) catch {
         state.runtime_state.deinit();
         freeHost(StateBlock, f, ud, block);
@@ -951,7 +1038,7 @@ pub export fn lua_iscfunction(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return 0;
     const value = valueAt(thread, idx) orelse return 0;
     return switch (value) {
-        .c_function => 1,
+        .c_closure => 1,
         else => 0,
     };
 }
@@ -1117,7 +1204,7 @@ pub export fn lua_tocfunction(L: ?*lua_State, idx: c_int) callconv(.c) lua_CFunc
     const thread = threadFromState(L) orelse return null;
     const value = valueAt(thread, idx) orelse return null;
     return switch (value) {
-        .c_function => |function| function,
+        .c_closure => |closure| functionFromId(closure.function_id),
         else => null,
     };
 }
@@ -1148,8 +1235,8 @@ pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const any
         .table => |table| table,
         .thread => |target| target.public_state,
         .light_userdata => |ptr| ptr,
-        .c_function => null,
         .lua_closure => |closure| closure,
+        .c_closure => |closure| closure,
         else => null,
     };
 }
@@ -1374,9 +1461,18 @@ pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv
     return string.bytes.ptr;
 }
 
-pub export fn lua_pushcclosure(L: ?*lua_State, function: lua_CFunction, _: c_int) callconv(.c) void {
+pub export fn lua_pushcclosure(L: ?*lua_State, function: lua_CFunction, n: c_int) callconv(.c) void {
     const thread = threadFromState(L) orelse return;
-    _ = pushValue(thread, .{ .c_function = function });
+    const capture_count: usize = @intCast(@max(n, 0));
+    if (capture_count > thread.stack.items.len) return;
+    const allocator = thread.owner.allocator();
+    const upvalues = allocator.alloc(runtime.Value, capture_count) catch return;
+    defer allocator.free(upvalues);
+    const start = thread.stack.items.len - capture_count;
+    for (upvalues, 0..) |*upvalue, index| upvalue.* = cToRuntimeValue(thread.owner, thread.stack.items[start + index], 0) catch .nil;
+    thread.stack.items.len = start;
+    const closure = thread.owner.runtime_state.newCClosure(functionId(function), upvalues) catch return;
+    _ = pushValue(thread, .{ .c_closure = closure });
 }
 
 pub export fn lua_pushboolean(L: ?*lua_State, b: c_int) callconv(.c) void {
@@ -1774,19 +1870,80 @@ pub export fn lua_setlocal(_: ?*lua_State, _: ?*const lua_Debug, _: c_int) callc
     return null;
 }
 
-pub export fn lua_getupvalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) ?[*:0]const u8 {
-    return null;
+pub export fn lua_getupvalue(L: ?*lua_State, funcindex: c_int, n: c_int) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    if (n <= 0) return null;
+    const upvalue_index: usize = @intCast(n - 1);
+    const function = valueAt(thread, funcindex) orelse return null;
+    switch (function) {
+        .c_closure => |closure| {
+            if (upvalue_index >= closure.upvalues.len) return null;
+            _ = pushValue(thread, runtimeToCValue(thread.owner, closure.upvalues[upvalue_index].value, 0) catch .nil);
+            return zstr("");
+        },
+        .lua_closure => |closure| {
+            if (upvalue_index >= closure.upvalues.len) return null;
+            _ = pushValue(thread, runtimeToCValue(thread.owner, readRuntimeUpvalue(closure.upvalues[upvalue_index]), 0) catch .nil);
+            const name = if (upvalue_index < closure.proto.upvalues.items.len) closure.proto.upvalues.items[upvalue_index].name else "";
+            return (createString(thread.owner, name) orelse return zstr("")).bytes.ptr;
+        },
+        else => return null,
+    }
 }
 
-pub export fn lua_setupvalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) ?[*:0]const u8 {
-    return null;
+pub export fn lua_setupvalue(L: ?*lua_State, funcindex: c_int, n: c_int) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    if (n <= 0 or thread.stack.items.len == 0) return null;
+    const upvalue_index: usize = @intCast(n - 1);
+    const function = valueAt(thread, funcindex) orelse return null;
+    const value = thread.stack.pop().?;
+    switch (function) {
+        .c_closure => |closure| {
+            if (upvalue_index >= closure.upvalues.len) return null;
+            closure.upvalues[upvalue_index].value = cToRuntimeValue(thread.owner, value, 0) catch .nil;
+            return zstr("");
+        },
+        .lua_closure => |closure| {
+            if (upvalue_index >= closure.upvalues.len) return null;
+            writeRuntimeUpvalue(closure.upvalues[upvalue_index], cToRuntimeValue(thread.owner, value, 0) catch .nil);
+            const name = if (upvalue_index < closure.proto.upvalues.items.len) closure.proto.upvalues.items[upvalue_index].name else "";
+            return (createString(thread.owner, name) orelse return zstr("")).bytes.ptr;
+        },
+        else => return null,
+    }
 }
 
-pub export fn lua_upvalueid(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) ?*anyopaque {
-    return null;
+pub export fn lua_upvalueid(L: ?*lua_State, funcindex: c_int, n: c_int) callconv(.c) ?*anyopaque {
+    const thread = threadFromState(L) orelse return null;
+    if (n <= 0) return null;
+    const upvalue_index: usize = @intCast(n - 1);
+    const function = valueAt(thread, funcindex) orelse return null;
+    return switch (function) {
+        .c_closure => |closure| if (upvalue_index < closure.upvalues.len) closure.upvalues[upvalue_index] else null,
+        .lua_closure => |closure| if (upvalue_index < closure.upvalues.len) closure.upvalues[upvalue_index] else null,
+        else => null,
+    };
 }
 
-pub export fn lua_upvaluejoin(_: ?*lua_State, _: c_int, _: c_int, _: c_int, _: c_int) callconv(.c) void {}
+pub export fn lua_upvaluejoin(L: ?*lua_State, fidx1: c_int, n1: c_int, fidx2: c_int, n2: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (n1 <= 0 or n2 <= 0) return;
+    const left_index: usize = @intCast(n1 - 1);
+    const right_index: usize = @intCast(n2 - 1);
+    const left = valueAt(thread, fidx1) orelse return;
+    const right = valueAt(thread, fidx2) orelse return;
+    switch (left) {
+        .c_closure => |left_closure| {
+            if (right != .c_closure or left_index >= left_closure.upvalues.len or right_index >= right.c_closure.upvalues.len) return;
+            left_closure.upvalues[left_index] = right.c_closure.upvalues[right_index];
+        },
+        .lua_closure => |left_closure| {
+            if (right != .lua_closure or left_index >= left_closure.upvalues.len or right_index >= right.lua_closure.upvalues.len) return;
+            left_closure.upvalues[left_index] = right.lua_closure.upvalues[right_index];
+        },
+        else => {},
+    }
+}
 pub export fn lua_sethook(_: ?*lua_State, _: lua_Hook, _: c_int, _: c_int) callconv(.c) void {}
 
 pub export fn lua_gethook(_: ?*lua_State) callconv(.c) lua_Hook {
