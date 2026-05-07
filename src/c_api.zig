@@ -19,7 +19,7 @@ const lua_WarnFunction = ?*const fn (?*anyopaque, ?[*:0]const u8, c_int) callcon
 const lua_Hook = ?*const fn (?*lua_State, ?*lua_Debug) callconv(.c) void;
 const VaList = std.builtin.VaList;
 
-pub export const lua_ident: [18:0]u8 = "zlua C API phase 1".*;
+pub export const lua_ident: [18:0]u8 = "zlua C API phase 2".*;
 
 const LUA_TNONE: c_int = -1;
 const LUA_TNIL: c_int = 0;
@@ -38,11 +38,31 @@ const LUA_RIDX_MAINTHREAD: lua_Integer = 3;
 const LUA_REGISTRYINDEX: c_int = -(std.math.maxInt(c_int) / 2 + 1000);
 const LUA_EXTRASPACE: usize = @sizeOf(?*anyopaque);
 
+const LUA_OPADD: c_int = 0;
+const LUA_OPSUB: c_int = 1;
+const LUA_OPMUL: c_int = 2;
+const LUA_OPMOD: c_int = 3;
+const LUA_OPPOW: c_int = 4;
+const LUA_OPDIV: c_int = 5;
+const LUA_OPIDIV: c_int = 6;
+const LUA_OPBAND: c_int = 7;
+const LUA_OPBOR: c_int = 8;
+const LUA_OPBXOR: c_int = 9;
+const LUA_OPSHL: c_int = 10;
+const LUA_OPSHR: c_int = 11;
+const LUA_OPUNM: c_int = 12;
+const LUA_OPBNOT: c_int = 13;
+
+const LUA_OPEQ: c_int = 0;
+const LUA_OPLT: c_int = 1;
+const LUA_OPLE: c_int = 2;
+
 const Value = union(enum) {
     nil,
     boolean: bool,
     integer: lua_Integer,
     number: lua_Number,
+    string: *CString,
     table: *CTable,
     thread: *CThread,
     light_userdata: ?*anyopaque,
@@ -53,6 +73,7 @@ const Value = union(enum) {
             .nil => LUA_TNIL,
             .boolean => LUA_TBOOLEAN,
             .integer, .number => LUA_TNUMBER,
+            .string => LUA_TSTRING,
             .table => LUA_TTABLE,
             .thread => LUA_TTHREAD,
             .light_userdata => LUA_TLIGHTUSERDATA,
@@ -61,7 +82,87 @@ const Value = union(enum) {
     }
 };
 
-const CTable = runtime.Table;
+const CString = struct {
+    bytes: [:0]u8,
+
+    fn deinit(self: *CString, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        allocator.destroy(self);
+    }
+};
+
+const TableEntry = struct {
+    key: Value,
+    value: Value,
+};
+
+const CTable = struct {
+    entries: std.ArrayList(TableEntry) = .empty,
+    metatable: ?*CTable = null,
+
+    fn create(allocator: std.mem.Allocator, array_hint: c_int, record_hint: c_int) !*CTable {
+        const table = try allocator.create(CTable);
+        table.* = .{};
+        errdefer allocator.destroy(table);
+        const capacity = @as(usize, @intCast(@max(array_hint, 0))) + @as(usize, @intCast(@max(record_hint, 0)));
+        try table.entries.ensureTotalCapacity(allocator, capacity);
+        return table;
+    }
+
+    fn deinit(self: *CTable, allocator: std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    fn get(self: *CTable, key: Value) Value {
+        const normalized = normalizeKey(key) orelse return .nil;
+        for (self.entries.items) |entry| {
+            if (entry.value != .nil and valuesEqual(entry.key, normalized)) return entry.value;
+        }
+        return .nil;
+    }
+
+    fn set(self: *CTable, allocator: std.mem.Allocator, key: Value, value: Value) !void {
+        const normalized = normalizeKey(key) orelse return;
+        for (self.entries.items, 0..) |entry, index| {
+            if (valuesEqual(entry.key, normalized)) {
+                if (value == .nil) {
+                    _ = self.entries.orderedRemove(index);
+                } else {
+                    self.entries.items[index].value = value;
+                }
+                return;
+            }
+        }
+        if (value != .nil) try self.entries.append(allocator, .{ .key = normalized, .value = value });
+    }
+
+    fn len(self: *CTable) lua_Integer {
+        var result: lua_Integer = 0;
+        while (true) {
+            const next_index = result + 1;
+            if (self.get(.{ .integer = next_index }) == .nil) return result;
+            result = next_index;
+        }
+    }
+
+    fn next(self: *CTable, key: Value) ?TableEntry {
+        var start: usize = 0;
+        if (key != .nil) {
+            const normalized = normalizeKey(key) orelse return null;
+            for (self.entries.items, 0..) |entry, index| {
+                if (entry.value != .nil and valuesEqual(entry.key, normalized)) {
+                    start = index + 1;
+                    break;
+                }
+            } else return null;
+        }
+        for (self.entries.items[start..]) |entry| {
+            if (entry.value != .nil) return entry;
+        }
+        return null;
+    }
+};
 
 const LuaStateHeader = extern struct {
     thread: *CThread,
@@ -95,10 +196,20 @@ const CState = struct {
     main_thread: CThread,
     registry_table: *CTable,
     global_table: *CTable,
+    strings: std.ArrayList(*CString) = .empty,
+    tables: std.ArrayList(*CTable) = .empty,
     panicf: lua_CFunction = null,
 
     fn allocator(self: *CState) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &lua_allocator_vtable };
+    }
+
+    fn deinitOwnedObjects(self: *CState) void {
+        const alloc = self.allocator();
+        for (self.tables.items) |table| table.deinit(alloc);
+        for (self.strings.items) |string| string.deinit(alloc);
+        self.tables.deinit(alloc);
+        self.strings.deinit(alloc);
     }
 };
 
@@ -215,6 +326,170 @@ fn setTop(thread: *CThread, idx: c_int) void {
     for (0..extra) |_| thread.stack.appendAssumeCapacity(.nil);
 }
 
+fn createString(state: *CState, bytes: []const u8) ?*CString {
+    const allocator = state.allocator();
+    const storage = allocator.allocSentinel(u8, bytes.len, 0) catch return null;
+    @memcpy(storage[0..bytes.len], bytes);
+    const string = allocator.create(CString) catch {
+        allocator.free(storage);
+        return null;
+    };
+    string.* = .{ .bytes = storage };
+    state.strings.append(allocator, string) catch {
+        string.deinit(allocator);
+        return null;
+    };
+    return string;
+}
+
+fn pushStringBytes(thread: *CThread, bytes: []const u8) ?*CString {
+    const string = createString(thread.owner, bytes) orelse return null;
+    if (!pushValue(thread, .{ .string = string })) return null;
+    return string;
+}
+
+fn createTable(state: *CState, array_hint: c_int, record_hint: c_int) ?*CTable {
+    const allocator = state.allocator();
+    const table = CTable.create(allocator, array_hint, record_hint) catch return null;
+    state.tables.append(allocator, table) catch {
+        table.deinit(allocator);
+        return null;
+    };
+    return table;
+}
+
+fn normalizeKey(value: Value) ?Value {
+    return switch (value) {
+        .nil => null,
+        .number => |number| if (floatToInteger(number)) |integer| .{ .integer = integer } else value,
+        else => value,
+    };
+}
+
+fn valuesEqual(lhs: Value, rhs: Value) bool {
+    return switch (lhs) {
+        .nil => rhs == .nil,
+        .boolean => |value| rhs == .boolean and rhs.boolean == value,
+        .integer => |value| switch (rhs) {
+            .integer => |other| value == other,
+            .number => |other| if (floatToInteger(other)) |integer| value == integer else false,
+            else => false,
+        },
+        .number => |value| switch (rhs) {
+            .integer => |other| if (floatToInteger(value)) |integer| integer == other else false,
+            .number => |other| value == other,
+            else => false,
+        },
+        .string => |value| rhs == .string and std.mem.eql(u8, value.bytes, rhs.string.bytes),
+        .table => |value| rhs == .table and value == rhs.table,
+        .thread => |value| rhs == .thread and value == rhs.thread,
+        .light_userdata => |value| rhs == .light_userdata and value == rhs.light_userdata,
+        .c_function => |value| rhs == .c_function and value == rhs.c_function,
+    };
+}
+
+fn cStringSlice(s: ?[*:0]const u8) []const u8 {
+    const ptr = s orelse return &.{};
+    return std.mem.span(ptr);
+}
+
+fn stringLikeBytes(thread: *CThread, value: Value) ?[]const u8 {
+    switch (value) {
+        .string => |string| return string.bytes,
+        .integer, .number => {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(thread.owner.allocator());
+            appendValueString(thread.owner.allocator(), &out, value) catch return null;
+            const string = createString(thread.owner, out.items) orelse return null;
+            return string.bytes;
+        },
+        else => return null,
+    }
+}
+
+fn appendValueString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: Value) !void {
+    switch (value) {
+        .string => |string| try out.appendSlice(allocator, string.bytes),
+        .integer => |integer| try appendFmt(out, allocator, "{d}", .{integer}),
+        .number => |number| {
+            try appendFmt(out, allocator, "{d}", .{number});
+            if (@floor(number) == number and std.math.isFinite(number)) try out.appendSlice(allocator, ".0");
+        },
+        .nil => try out.appendSlice(allocator, "nil"),
+        .boolean => |boolean| try out.appendSlice(allocator, if (boolean) "true" else "false"),
+        .table => |table| try appendFmt(out, allocator, "table: 0x{x}", .{@intFromPtr(table)}),
+        .thread => |target| try appendFmt(out, allocator, "thread: 0x{x}", .{@intFromPtr(target)}),
+        .light_userdata => |ptr| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(ptr)}),
+        .c_function => try out.appendSlice(allocator, "function"),
+    }
+}
+
+fn appendFmt(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(allocator, fmt, args);
+    defer allocator.free(text);
+    try out.appendSlice(allocator, text);
+}
+
+fn toNumberValue(value: Value) ?lua_Number {
+    return switch (value) {
+        .integer => |integer| @floatFromInt(integer),
+        .number => |number| number,
+        .string => |string| std.fmt.parseFloat(lua_Number, std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c")) catch null,
+        else => null,
+    };
+}
+
+fn toIntegerValue(value: Value) ?lua_Integer {
+    return switch (value) {
+        .integer => |integer| integer,
+        .number => |number| floatToInteger(number),
+        .string => |string| blk: {
+            const trimmed = std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c");
+            if (std.fmt.parseInt(lua_Integer, trimmed, 10)) |integer| break :blk integer else |_| {}
+            break :blk if (std.fmt.parseFloat(lua_Number, trimmed)) |number| floatToInteger(number) else |_| null;
+        },
+        else => null,
+    };
+}
+
+fn floatToInteger(number: f64) ?lua_Integer {
+    if (!std.math.isFinite(number) or @floor(number) != number) return null;
+    const min = @as(f64, @floatFromInt(std.math.minInt(lua_Integer)));
+    const max = @as(f64, @floatFromInt(std.math.maxInt(lua_Integer)));
+    if (number < min or number >= max) return null;
+    return @intFromFloat(number);
+}
+
+fn tableMetafield(table: *CTable, name: []const u8) Value {
+    const metatable = table.metatable orelse return .nil;
+    for (metatable.entries.items) |entry| {
+        if (entry.key == .string and std.mem.eql(u8, entry.key.string.bytes, name)) return entry.value;
+    }
+    return .nil;
+}
+
+fn getTable(thread: *CThread, table: *CTable, key: Value, depth: usize) Value {
+    const value = table.get(key);
+    if (value != .nil) return value;
+    if (depth >= 15) return .nil;
+    return switch (tableMetafield(table, "__index")) {
+        .table => |index_table| getTable(thread, index_table, key, depth + 1),
+        else => .nil,
+    };
+}
+
+fn setTable(thread: *CThread, table: *CTable, key: Value, value: Value, depth: usize) void {
+    const allocator = thread.owner.allocator();
+    if (table.get(key) != .nil or depth >= 15) {
+        table.set(allocator, key, value) catch return;
+        return;
+    }
+    switch (tableMetafield(table, "__newindex")) {
+        .table => |newindex_table| setTable(thread, newindex_table, key, value, depth + 1),
+        else => table.set(allocator, key, value) catch return,
+    }
+}
+
 pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callconv(.c) ?*lua_State {
     const f = alloc_f orelse return null;
 
@@ -246,21 +521,28 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
         return null;
     };
 
-    state.registry_table = (state.runtime_state.newTableWithHints(0, 3) catch {
+    state.registry_table = createTable(state, 0, 3) orelse {
         state.runtime_state.deinit();
         freeHost(StateBlock, f, ud, block);
         freeHost(CState, f, ud, state);
         return null;
-    }).table;
+    };
 
-    state.global_table = (state.runtime_state.newTableWithHints(0, 0) catch {
+    state.global_table = createTable(state, 0, 0) orelse {
+        state.deinitOwnedObjects();
         state.runtime_state.deinit();
         freeHost(StateBlock, f, ud, block);
         freeHost(CState, f, ud, state);
         return null;
-    }).table;
+    };
 
-    if (!ensureStack(&state.main_thread, LUA_MINSTACK)) return null;
+    if (!ensureStack(&state.main_thread, LUA_MINSTACK)) {
+        state.deinitOwnedObjects();
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    }
     return @ptrCast(&block.header);
 }
 
@@ -272,6 +554,7 @@ pub export fn lua_close(L: ?*lua_State) callconv(.c) void {
     const block = state.block;
 
     thread.deinit();
+    state.deinitOwnedObjects();
     state.runtime_state.deinit();
     freeHost(StateBlock, alloc_f, alloc_ud, block);
     freeHost(CState, alloc_f, alloc_ud, state);
@@ -372,8 +655,13 @@ pub export fn lua_isnumber(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     };
 }
 
-pub export fn lua_isstring(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_isstring(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .integer, .number, .string => 1,
+        else => 0,
+    };
 }
 
 pub export fn lua_iscfunction(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
@@ -442,6 +730,15 @@ pub export fn lua_tonumberx(L: ?*lua_State, idx: c_int, isnum: ?*c_int) callconv
             if (isnum) |ptr| ptr.* = 1;
             break :blk number;
         },
+        .string => |string| blk: {
+            if (std.fmt.parseFloat(lua_Number, std.mem.trim(u8, string.bytes, " \t\n\r\x0b\x0c"))) |number| {
+                if (isnum) |ptr| ptr.* = 1;
+                break :blk number;
+            } else |_| {
+                if (isnum) |ptr| ptr.* = 0;
+                break :blk 0;
+            }
+        },
         else => blk: {
             if (isnum) |ptr| ptr.* = 0;
             break :blk 0;
@@ -463,6 +760,14 @@ pub export fn lua_tointegerx(L: ?*lua_State, idx: c_int, isnum: ?*c_int) callcon
             if (isnum) |ptr| ptr.* = 1;
             break :blk integer;
         },
+        .number, .string => blk: {
+            if (toIntegerValue(value)) |integer| {
+                if (isnum) |ptr| ptr.* = 1;
+                break :blk integer;
+            }
+            if (isnum) |ptr| ptr.* = 0;
+            break :blk 0;
+        },
         else => blk: {
             if (isnum) |ptr| ptr.* = 0;
             break :blk 0;
@@ -480,13 +785,49 @@ pub export fn lua_toboolean(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     };
 }
 
-pub export fn lua_tolstring(_: ?*lua_State, _: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
-    if (len) |ptr| ptr.* = 0;
-    return null;
+pub export fn lua_tolstring(L: ?*lua_State, idx: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse {
+        if (len) |ptr| ptr.* = 0;
+        return null;
+    };
+    const slot = stackSlot(thread, idx);
+    const value = if (slot) |ptr| ptr.* else valueAt(thread, idx) orelse {
+        if (len) |ptr| ptr.* = 0;
+        return null;
+    };
+    const string = switch (value) {
+        .string => |string| string,
+        .integer, .number => blk: {
+            var out = std.ArrayList(u8).empty;
+            defer out.deinit(thread.owner.allocator());
+            appendValueString(thread.owner.allocator(), &out, value) catch {
+                if (len) |ptr| ptr.* = 0;
+                return null;
+            };
+            const converted = createString(thread.owner, out.items) orelse {
+                if (len) |ptr| ptr.* = 0;
+                return null;
+            };
+            if (slot) |ptr| ptr.* = .{ .string = converted };
+            break :blk converted;
+        },
+        else => {
+            if (len) |ptr| ptr.* = 0;
+            return null;
+        },
+    };
+    if (len) |ptr| ptr.* = string.bytes.len;
+    return string.bytes.ptr;
 }
 
-pub export fn lua_rawlen(_: ?*lua_State, _: c_int) callconv(.c) lua_Unsigned {
-    return 0;
+pub export fn lua_rawlen(L: ?*lua_State, idx: c_int) callconv(.c) lua_Unsigned {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .string => |string| @intCast(string.bytes.len),
+        .table => |table| @intCast(table.len()),
+        else => 0,
+    };
 }
 
 pub export fn lua_tocfunction(L: ?*lua_State, idx: c_int) callconv(.c) lua_CFunction {
@@ -520,6 +861,7 @@ pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const any
     const thread = threadFromState(L) orelse return null;
     const value = valueAt(thread, idx) orelse return null;
     return switch (value) {
+        .string => |string| string.bytes.ptr,
         .table => |table| table,
         .thread => |target| target.public_state,
         .light_userdata => |ptr| ptr,
@@ -528,14 +870,131 @@ pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const any
     };
 }
 
-pub export fn lua_arith(_: ?*lua_State, _: c_int) callconv(.c) void {}
+pub export fn lua_arith(L: ?*lua_State, op: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const unary = op == LUA_OPUNM or op == LUA_OPBNOT;
+    const required: usize = if (unary) 1 else 2;
+    if (thread.stack.items.len < required) return;
+    const rhs = thread.stack.pop().?;
+    const lhs = if (unary) rhs else thread.stack.pop().?;
 
-pub export fn lua_rawequal(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) c_int {
-    return 0;
+    const result: Value = switch (op) {
+        LUA_OPADD => arithmeticBinary(lhs, rhs, .add) orelse .nil,
+        LUA_OPSUB => arithmeticBinary(lhs, rhs, .sub) orelse .nil,
+        LUA_OPMUL => arithmeticBinary(lhs, rhs, .mul) orelse .nil,
+        LUA_OPMOD => arithmeticBinary(lhs, rhs, .mod) orelse .nil,
+        LUA_OPPOW => .{ .number = std.math.pow(lua_Number, toNumberValue(lhs) orelse 0, toNumberValue(rhs) orelse 0) },
+        LUA_OPDIV => .{ .number = (toNumberValue(lhs) orelse 0) / (toNumberValue(rhs) orelse 1) },
+        LUA_OPIDIV => arithmeticBinary(lhs, rhs, .idiv) orelse .nil,
+        LUA_OPBAND => bitwiseBinary(lhs, rhs, .band) orelse .nil,
+        LUA_OPBOR => bitwiseBinary(lhs, rhs, .bor) orelse .nil,
+        LUA_OPBXOR => bitwiseBinary(lhs, rhs, .bxor) orelse .nil,
+        LUA_OPSHL => bitwiseBinary(lhs, rhs, .shl) orelse .nil,
+        LUA_OPSHR => bitwiseBinary(lhs, rhs, .shr) orelse .nil,
+        LUA_OPUNM => switch (rhs) {
+            .integer => |integer| .{ .integer = -%integer },
+            else => .{ .number = -(toNumberValue(rhs) orelse 0) },
+        },
+        LUA_OPBNOT => if (toIntegerValue(rhs)) |integer| .{ .integer = ~integer } else .nil,
+        else => .nil,
+    };
+    _ = pushValue(thread, result);
 }
 
-pub export fn lua_compare(_: ?*lua_State, _: c_int, _: c_int, _: c_int) callconv(.c) c_int {
-    return 0;
+const ArithmeticKind = enum { add, sub, mul, mod, idiv };
+const BitwiseKind = enum { band, bor, bxor, shl, shr };
+
+fn arithmeticBinary(lhs: Value, rhs: Value, kind: ArithmeticKind) ?Value {
+    if (toIntegerValue(lhs)) |left| {
+        if (toIntegerValue(rhs)) |right| {
+            return switch (kind) {
+                .add => .{ .integer = left +% right },
+                .sub => .{ .integer = left -% right },
+                .mul => .{ .integer = left *% right },
+                .mod => .{ .integer = floorModInteger(left, right) },
+                .idiv => .{ .integer = floorDivInteger(left, right) },
+            };
+        }
+    }
+    const left = toNumberValue(lhs) orelse return null;
+    const right = toNumberValue(rhs) orelse return null;
+    return switch (kind) {
+        .add => .{ .number = left + right },
+        .sub => .{ .number = left - right },
+        .mul => .{ .number = left * right },
+        .mod => .{ .number = floorModNumber(left, right) },
+        .idiv => .{ .number = @floor(left / right) },
+    };
+}
+
+fn bitwiseBinary(lhs: Value, rhs: Value, kind: BitwiseKind) ?Value {
+    const left = toIntegerValue(lhs) orelse return null;
+    const right = toIntegerValue(rhs) orelse return null;
+    return .{ .integer = switch (kind) {
+        .band => left & right,
+        .bor => left | right,
+        .bxor => left ^ right,
+        .shl => shiftInteger(left, right),
+        .shr => if (right == std.math.minInt(lua_Integer)) 0 else shiftInteger(left, -right),
+    } };
+}
+
+fn floorDivInteger(left: lua_Integer, right: lua_Integer) lua_Integer {
+    var quotient = @divTrunc(left, right);
+    const remainder = @rem(left, right);
+    if (remainder != 0 and ((remainder < 0) != (right < 0))) quotient -= 1;
+    return quotient;
+}
+
+fn floorModInteger(left: lua_Integer, right: lua_Integer) lua_Integer {
+    return left - floorDivInteger(left, right) *% right;
+}
+
+fn floorModNumber(left: lua_Number, right: lua_Number) lua_Number {
+    var result = @rem(left, right);
+    if (result != 0 and ((result < 0) != (right < 0))) result += right;
+    return result;
+}
+
+fn shiftInteger(value: lua_Integer, amount: lua_Integer) lua_Integer {
+    if (amount == 0) return value;
+    if (amount >= 64 or amount <= -64) return 0;
+    return if (amount > 0)
+        value << @intCast(amount)
+    else
+        @as(lua_Integer, @bitCast(@as(lua_Unsigned, @bitCast(value)) >> @intCast(-amount)));
+}
+
+pub export fn lua_rawequal(L: ?*lua_State, idx1: c_int, idx2: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const lhs = valueAt(thread, idx1) orelse return 0;
+    const rhs = valueAt(thread, idx2) orelse return 0;
+    return if (valuesEqual(lhs, rhs)) 1 else 0;
+}
+
+pub export fn lua_compare(L: ?*lua_State, idx1: c_int, idx2: c_int, op: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const lhs = valueAt(thread, idx1) orelse return 0;
+    const rhs = valueAt(thread, idx2) orelse return 0;
+    const result = switch (op) {
+        LUA_OPEQ => valuesEqual(lhs, rhs),
+        LUA_OPLT => compareLess(lhs, rhs) orelse false,
+        LUA_OPLE => compareLessEqual(lhs, rhs) orelse false,
+        else => false,
+    };
+    return if (result) 1 else 0;
+}
+
+fn compareLess(lhs: Value, rhs: Value) ?bool {
+    if (toNumberValue(lhs)) |left| if (toNumberValue(rhs)) |right| return left < right;
+    if (lhs == .string and rhs == .string) return std.mem.lessThan(u8, lhs.string.bytes, rhs.string.bytes);
+    return null;
+}
+
+fn compareLessEqual(lhs: Value, rhs: Value) ?bool {
+    if (toNumberValue(lhs)) |left| if (toNumberValue(rhs)) |right| return left <= right;
+    if (lhs == .string and rhs == .string) return !std.mem.lessThan(u8, rhs.string.bytes, lhs.string.bytes);
+    return null;
 }
 
 pub export fn lua_pushnil(L: ?*lua_State) callconv(.c) void {
@@ -553,24 +1012,82 @@ pub export fn lua_pushinteger(L: ?*lua_State, n: lua_Integer) callconv(.c) void 
     _ = pushValue(thread, .{ .integer = n });
 }
 
-pub export fn lua_pushlstring(_: ?*lua_State, s: ?[*]const u8, _: usize) callconv(.c) ?[*:0]const u8 {
-    return @ptrCast(s);
+pub export fn lua_pushlstring(L: ?*lua_State, s: ?[*]const u8, len: usize) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    const source = if (s) |ptr| ptr[0..len] else &.{};
+    const string = pushStringBytes(thread, source) orelse return null;
+    return string.bytes.ptr;
 }
 
-pub export fn lua_pushexternalstring(_: ?*lua_State, s: ?[*]const u8, _: usize, _: lua_Alloc, _: ?*anyopaque) callconv(.c) ?[*:0]const u8 {
-    return @ptrCast(s);
+pub export fn lua_pushexternalstring(L: ?*lua_State, s: ?[*]const u8, len: usize, _: lua_Alloc, _: ?*anyopaque) callconv(.c) ?[*:0]const u8 {
+    return lua_pushlstring(L, s, len);
 }
 
-pub export fn lua_pushstring(_: ?*lua_State, s: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    return s;
+pub export fn lua_pushstring(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    if (s == null) {
+        lua_pushnil(L);
+        return null;
+    }
+    return lua_pushlstring(L, s, std.mem.len(s.?));
 }
 
-pub export fn lua_pushvfstring(_: ?*lua_State, fmt: ?[*:0]const u8, _: VaList) callconv(.c) ?[*:0]const u8 {
-    return fmt;
+extern fn vsnprintf(?[*]u8, usize, ?[*:0]const u8, VaList) c_int;
+
+pub export fn lua_pushvfstring(L: ?*lua_State, fmt: ?[*:0]const u8, args: VaList) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    var buffer: [4096]u8 = undefined;
+    const written = vsnprintf(&buffer, buffer.len, fmt, args);
+    if (written < 0) return lua_pushstring(L, fmt);
+    const len: usize = @min(@as(usize, @intCast(written)), buffer.len - 1);
+    const string = pushStringBytes(thread, buffer[0..len]) orelse return null;
+    return string.bytes.ptr;
 }
 
-pub export fn lua_pushfstring(_: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv(.c) ?[*:0]const u8 {
-    return fmt;
+pub export fn lua_pushfstring(L: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv(.c) ?[*:0]const u8 {
+    const thread = threadFromState(L) orelse return null;
+    var args = @cVaStart();
+    defer @cVaEnd(&args);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(thread.owner.allocator());
+    const format = cStringSlice(fmt);
+    var index: usize = 0;
+    while (index < format.len) : (index += 1) {
+        if (format[index] != '%' or index + 1 >= format.len) {
+            out.append(thread.owner.allocator(), format[index]) catch return null;
+            continue;
+        }
+        index += 1;
+        switch (format[index]) {
+            '%' => out.append(thread.owner.allocator(), '%') catch return null,
+            's' => {
+                const value = @cVaArg(&args, ?[*:0]const u8);
+                out.appendSlice(thread.owner.allocator(), cStringSlice(value)) catch return null;
+            },
+            'd' => {
+                const value = @cVaArg(&args, c_int);
+                appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
+            },
+            'I' => {
+                const value = @cVaArg(&args, lua_Integer);
+                appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
+            },
+            'f' => {
+                const value = @cVaArg(&args, f64);
+                appendFmt(&out, thread.owner.allocator(), "{d}", .{value}) catch return null;
+            },
+            'c' => {
+                const value = @cVaArg(&args, c_int);
+                out.append(thread.owner.allocator(), @intCast(value)) catch return null;
+            },
+            else => {
+                out.append(thread.owner.allocator(), '%') catch return null;
+                out.append(thread.owner.allocator(), format[index]) catch return null;
+            },
+        }
+    }
+    const string = pushStringBytes(thread, out.items) orelse return null;
+    return string.bytes.ptr;
 }
 
 pub export fn lua_pushcclosure(L: ?*lua_State, function: lua_CFunction, _: c_int) callconv(.c) void {
@@ -594,24 +1111,61 @@ pub export fn lua_pushthread(L: ?*lua_State) callconv(.c) c_int {
     return if (thread == &thread.owner.main_thread) 1 else 0;
 }
 
-pub export fn lua_getglobal(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn lua_getglobal(L: ?*lua_State, name: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    const key = createString(thread.owner, cStringSlice(name)) orelse return LUA_TNIL;
+    const value = thread.owner.global_table.get(.{ .string = key });
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_gettable(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_gettable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    if (thread.stack.items.len == 0) return LUA_TNONE;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const key = thread.stack.pop().?;
+    const value = switch (table_value) {
+        .table => |table| getTable(thread, table, key, 0),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_getfield(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn lua_getfield(L: ?*lua_State, idx: c_int, key: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    const string = createString(thread.owner, cStringSlice(key)) orelse return LUA_TNIL;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = switch (table_value) {
+        .table => |table| getTable(thread, table, .{ .string = string }, 0),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_geti(_: ?*lua_State, _: c_int, _: lua_Integer) callconv(.c) c_int {
-    return 0;
+pub export fn lua_geti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = switch (table_value) {
+        .table => |table| getTable(thread, table, .{ .integer = n }, 0),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_rawget(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_rawget(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    if (thread.stack.items.len == 0) return LUA_TNONE;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const key = thread.stack.pop().?;
+    const value = switch (table_value) {
+        .table => |table| table.get(key),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
 pub export fn lua_rawgeti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) c_int {
@@ -626,38 +1180,124 @@ pub export fn lua_rawgeti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.
         _ = pushValue(thread, value);
         return value.typeTag();
     }
-    _ = pushValue(thread, .nil);
-    return LUA_TNIL;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = switch (table_value) {
+        .table => |table| table.get(.{ .integer = n }),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_rawgetp(_: ?*lua_State, _: c_int, _: ?*const anyopaque) callconv(.c) c_int {
-    return 0;
+pub export fn lua_rawgetp(L: ?*lua_State, idx: c_int, ptr: ?*const anyopaque) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = switch (table_value) {
+        .table => |table| table.get(.{ .light_userdata = @constCast(ptr) }),
+        else => .nil,
+    };
+    _ = pushValue(thread, value);
+    return value.typeTag();
 }
 
-pub export fn lua_createtable(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
+pub export fn lua_createtable(L: ?*lua_State, narr: c_int, nrec: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const table = createTable(thread.owner, narr, nrec) orelse return;
+    _ = pushValue(thread, .{ .table = table });
+}
 
 pub export fn lua_newuserdatauv(_: ?*lua_State, _: usize, _: c_int) callconv(.c) ?*anyopaque {
     return null;
 }
 
-pub export fn lua_getmetatable(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_getmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    const metatable = switch (value) {
+        .table => |table| table.metatable,
+        else => null,
+    } orelse return 0;
+    _ = pushValue(thread, .{ .table = metatable });
+    return 1;
 }
 
 pub export fn lua_getiuservalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) c_int {
     return 0;
 }
 
-pub export fn lua_setglobal(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) void {}
-pub export fn lua_settable(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_setfield(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) void {}
-pub export fn lua_seti(_: ?*lua_State, _: c_int, _: lua_Integer) callconv(.c) void {}
-pub export fn lua_rawset(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_rawseti(_: ?*lua_State, _: c_int, _: lua_Integer) callconv(.c) void {}
-pub export fn lua_rawsetp(_: ?*lua_State, _: c_int, _: ?*const anyopaque) callconv(.c) void {}
+pub export fn lua_setglobal(L: ?*lua_State, name: ?[*:0]const u8) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len == 0) return;
+    const value = thread.stack.pop().?;
+    const key = createString(thread.owner, cStringSlice(name)) orelse return;
+    thread.owner.global_table.set(thread.owner.allocator(), .{ .string = key }, value) catch return;
+}
 
-pub export fn lua_setmetatable(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_settable(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len < 2) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    const key = thread.stack.pop().?;
+    if (table_value == .table) setTable(thread, table_value.table, key, value, 0);
+}
+
+pub export fn lua_setfield(L: ?*lua_State, idx: c_int, key: ?[*:0]const u8) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len == 0) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    const string = createString(thread.owner, cStringSlice(key)) orelse return;
+    if (table_value == .table) setTable(thread, table_value.table, .{ .string = string }, value, 0);
+}
+
+pub export fn lua_seti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len == 0) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    if (table_value == .table) setTable(thread, table_value.table, .{ .integer = n }, value, 0);
+}
+
+pub export fn lua_rawset(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len < 2) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    const key = thread.stack.pop().?;
+    if (table_value == .table) table_value.table.set(thread.owner.allocator(), key, value) catch return;
+}
+
+pub export fn lua_rawseti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len == 0) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    if (table_value == .table) table_value.table.set(thread.owner.allocator(), .{ .integer = n }, value) catch return;
+}
+
+pub export fn lua_rawsetp(L: ?*lua_State, idx: c_int, ptr: ?*const anyopaque) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (thread.stack.items.len == 0) return;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    const value = thread.stack.pop().?;
+    if (table_value == .table) table_value.table.set(thread.owner.allocator(), .{ .light_userdata = @constCast(ptr) }, value) catch return;
+}
+
+pub export fn lua_setmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (thread.stack.items.len == 0) return 0;
+    const target = valueAt(thread, idx) orelse return 0;
+    const metatable_value = thread.stack.pop().?;
+    switch (target) {
+        .table => |table| table.metatable = switch (metatable_value) {
+            .nil => null,
+            .table => |metatable| metatable,
+            else => table.metatable,
+        },
+        else => {},
+    }
+    return 1;
 }
 
 pub export fn lua_setiuservalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) c_int {
@@ -706,20 +1346,78 @@ pub export fn lua_error(_: ?*lua_State) callconv(.c) c_int {
     return 0;
 }
 
-pub export fn lua_next(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_next(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (thread.stack.items.len == 0) return 0;
+    const table_value = valueAt(thread, idx) orelse .nil;
+    if (table_value != .table) return 0;
+    const key = thread.stack.pop().?;
+    const entry = table_value.table.next(key) orelse return 0;
+    _ = pushValue(thread, entry.key);
+    _ = pushValue(thread, entry.value);
+    return 1;
 }
 
-pub export fn lua_concat(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_len(_: ?*lua_State, _: c_int) callconv(.c) void {}
-
-pub export fn lua_numbertocstring(_: ?*lua_State, _: c_int, buff: ?[*]u8) callconv(.c) c_uint {
-    if (buff) |ptr| ptr[0] = 0;
-    return 0;
+pub export fn lua_concat(L: ?*lua_State, n: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    if (n <= 0) {
+        _ = pushStringBytes(thread, &.{});
+        return;
+    }
+    const count: usize = @intCast(n);
+    if (count == 1 or count > thread.stack.items.len) return;
+    const start = thread.stack.items.len - count;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(thread.owner.allocator());
+    for (thread.stack.items[start..]) |value| {
+        const bytes = stringLikeBytes(thread, value) orelse return;
+        out.appendSlice(thread.owner.allocator(), bytes) catch return;
+    }
+    thread.stack.items.len = start;
+    _ = pushStringBytes(thread, out.items);
 }
 
-pub export fn lua_stringtonumber(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) usize {
-    return 0;
+pub export fn lua_len(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const value = valueAt(thread, idx) orelse .nil;
+    const result: Value = switch (value) {
+        .string => |string| .{ .integer = @intCast(string.bytes.len) },
+        .table => |table| .{ .integer = table.len() },
+        else => .nil,
+    };
+    _ = pushValue(thread, result);
+}
+
+pub export fn lua_numbertocstring(L: ?*lua_State, idx: c_int, buff: ?[*]u8) callconv(.c) c_uint {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    switch (value) {
+        .integer, .number => {},
+        else => return 0,
+    }
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(thread.owner.allocator());
+    appendValueString(thread.owner.allocator(), &out, value) catch return 0;
+    if (buff) |ptr| {
+        @memcpy(ptr[0..out.items.len], out.items);
+        ptr[out.items.len] = 0;
+    }
+    return @intCast(out.items.len);
+}
+
+pub export fn lua_stringtonumber(L: ?*lua_State, s: ?[*:0]const u8) callconv(.c) usize {
+    const thread = threadFromState(L) orelse return 0;
+    const text = cStringSlice(s);
+    const trimmed = std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
+    if (trimmed.len != text.len) return 0;
+    if (std.fmt.parseInt(lua_Integer, text, 10)) |integer| {
+        _ = pushValue(thread, .{ .integer = integer });
+        return text.len + 1;
+    } else |_| {}
+    if (std.fmt.parseFloat(lua_Number, text)) |number| {
+        _ = pushValue(thread, .{ .number = number });
+        return text.len + 1;
+    } else |_| return 0;
 }
 
 pub export fn lua_getallocf(L: ?*lua_State, ud: ?*?*anyopaque) callconv(.c) lua_Alloc {
@@ -906,8 +1604,11 @@ pub export fn luaL_makeseed(_: ?*lua_State) callconv(.c) c_uint {
     return 0;
 }
 
-pub export fn luaL_len(_: ?*lua_State, _: c_int) callconv(.c) lua_Integer {
-    return 0;
+pub export fn luaL_len(L: ?*lua_State, idx: c_int) callconv(.c) lua_Integer {
+    lua_len(L, idx);
+    const value = lua_tointegerx(L, -1, null);
+    lua_settop(L, -2);
+    return value;
 }
 
 pub export fn luaL_addgsub(_: ?*luaL_Buffer, _: ?[*:0]const u8, _: ?[*:0]const u8, _: ?[*:0]const u8) callconv(.c) void {}
