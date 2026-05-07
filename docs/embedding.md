@@ -141,6 +141,23 @@ const answer = try chunk.call(.{}, i64);
 
 `LoadOptions.mode` accepts `source_only`, `binary_only`, and `source_or_binary`. Binary loading supports zlua binary chunks produced by zlua, such as data from Lua `string.dump`; PUC Lua `luac` chunks are rejected.
 
+For host-managed bytecode round trips, dump a loaded function and reload it directly:
+
+```zig
+var chunk = try lua.loadString("return 40 + ...", .{ .name = "=cached" });
+defer chunk.deinit();
+
+const bytecode = try chunk.dumpBytecode(.{ .strip_debug = true });
+defer lua.allocator().free(bytecode);
+
+var cached = try lua.loadBytecode(bytecode, .{});
+defer cached.deinit();
+
+const value = try cached.call(.{42}, i64);
+```
+
+`dumpBytecode` returns zlua-owned bytecode only. It is intended for zlua-to-zlua caching or transfer and is not compatible with PUC Lua `luac` output.
+
 Use `loadString` or `loadFile` when you want a reusable, rooted function handle:
 
 ```zig
@@ -464,6 +481,7 @@ Embedding examples live under `examples/embed`:
 examples/embed/run_script.zig
 examples/embed/register_function.zig
 examples/embed/plugin_sandbox.zig
+examples/embed/bytecode_roundtrip.zig
 examples/embed/memory_rw_files.zig
 examples/embed/userdata_counter.zig
 examples/embed/preload_module.zig

@@ -98,6 +98,14 @@ pub const LoadOptions = struct {
 
 pub const DoOptions = LoadOptions;
 
+pub const BytecodeLoadOptions = struct {
+    environment: ?Table = null,
+};
+
+pub const BytecodeDumpOptions = struct {
+    strip_debug: bool = false,
+};
+
 pub const TableOptions = struct {
     array_hint: u32 = 0,
     hash_hint: u32 = 0,
@@ -298,6 +306,12 @@ pub const State = struct {
         return Function.fromRuntime(self, loaded);
     }
 
+    pub fn loadBytecode(self: *State, bytecode: []const u8, options: BytecodeLoadOptions) !Function {
+        const environment = try self.environmentValue(options.environment);
+        const loaded = self.raw_state.loadBinaryDump(bytecode, environment) catch |err| return self.captureLuaError(err);
+        return Function.fromRuntime(self, loaded);
+    }
+
     pub fn doString(self: *State, source: []const u8, options: DoOptions) !void {
         var function = try self.loadString(source, options);
         defer function.deinit();
@@ -335,7 +349,11 @@ pub const State = struct {
     }
 
     fn loadEnvironment(self: *State, options: LoadOptions) !runtime.Value {
-        return if (options.environment) |environment| try environment.rawValue() else if (self.raw_state.global_table) |table| .{ .table = table } else self.raw_state.getGlobal("_G");
+        return self.environmentValue(options.environment);
+    }
+
+    fn environmentValue(self: *State, environment: ?Table) !runtime.Value {
+        return if (environment) |table| try table.rawValue() else if (self.raw_state.global_table) |table| .{ .table = table } else self.raw_state.getGlobal("_G");
     }
 
     fn loadBuffer(self: *State, source: []const u8, source_name: ?[]const u8, environment: runtime.Value, mode: LoadMode) !runtime.Value {
@@ -526,6 +544,13 @@ pub const Function = struct {
                 return .{ .lua_error = try ErrorRef.fromRuntime(self.ref.state, value) };
             },
         }
+    }
+
+    pub fn dumpBytecode(self: Function, options: BytecodeDumpOptions) ![]const u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.ref.state.allocator());
+        try runtime.dumpClosureBinary(self.ref.state.allocator(), &out, try self.rawClosure(), options.strip_debug);
+        return out.toOwnedSlice(self.ref.state.allocator());
     }
 
     fn rawClosure(self: Function) !*runtime.Closure {
@@ -1917,6 +1942,35 @@ test "api load options support environments and binary modes" {
 
     try std.testing.expectError(error.LuaError, lua.loadString(dumped, .{ .mode = .source_only }));
     try std.testing.expectError(error.LuaError, lua.loadString("return 1", .{ .mode = .binary_only }));
+}
+
+test "api dumps and loads zlua bytecode" {
+    var source_state = try State.init(std.testing.allocator, .{});
+    defer source_state.deinit();
+
+    var source_chunk = try source_state.loadString("return secret, ...", .{ .name = "=api-bytecode" });
+    defer source_chunk.deinit();
+
+    const dumped = try source_chunk.dumpBytecode(.{ .strip_debug = true });
+    defer source_state.allocator().free(dumped);
+
+    var target_state = try State.init(std.testing.allocator, .{});
+    defer target_state.deinit();
+
+    var env = try target_state.createTable(.{ .hash_hint = 1 });
+    defer env.deinit();
+    try env.set("secret", "roundtrip");
+
+    var loaded = try target_state.loadBytecode(dumped, .{ .environment = env });
+    defer loaded.deinit();
+
+    const Result = Tuple(&.{ []const u8, i64 });
+    var result = try loaded.call(.{42}, Result);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("roundtrip", result.get(0));
+    try std.testing.expectEqual(@as(i64, 42), result.get(1));
+    try std.testing.expectError(error.LuaError, target_state.loadBytecode("return 1", .{}));
 }
 
 test "api stack value limit returns a protected Lua error" {

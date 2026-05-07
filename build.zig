@@ -118,6 +118,7 @@ pub fn build(b: *std.Build) void {
         .{ .key = "register_function", .name = "zlua-embed-register-function", .path = "examples/embed/register_function.zig" },
         .{ .key = "typed_host_function", .name = "zlua-embed-typed-host-function", .path = "examples/embed/typed_host_function.zig" },
         .{ .key = "plugin_sandbox", .name = "zlua-embed-plugin-sandbox", .path = "examples/embed/plugin_sandbox.zig" },
+        .{ .key = "bytecode_roundtrip", .name = "zlua-embed-bytecode-roundtrip", .path = "examples/embed/bytecode_roundtrip.zig" },
         .{ .key = "memory_rw_files", .name = "zlua-embed-memory-rw-files", .path = "examples/embed/memory_rw_files.zig" },
         .{ .key = "userdata_counter", .name = "zlua-embed-userdata-counter", .path = "examples/embed/userdata_counter.zig" },
         .{ .key = "preload_module", .name = "zlua-embed-preload-module", .path = "examples/embed/preload_module.zig" },
