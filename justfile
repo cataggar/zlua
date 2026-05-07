@@ -52,6 +52,10 @@ diff *args:
 official *args:
     {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 {{args}}
 
+# Run all C API fixtures, or one fixture file/directory.
+c-api *args:
+    {{zig}} build --summary all test-c-api -- {{args}}
+
 # Run ReleaseFast zlua vs CLua benchmarks, or one benchmark file/directory.
 bench *args:
     {{zig}} build -Doptimize=ReleaseFast --summary all run-test-bench -- {{args}}

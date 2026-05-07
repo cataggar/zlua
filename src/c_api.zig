@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime = @import("runtime.zig");
 
 pub const lua_State = opaque {};
 const lua_Debug = opaque {};
@@ -18,17 +19,263 @@ const lua_WarnFunction = ?*const fn (?*anyopaque, ?[*:0]const u8, c_int) callcon
 const lua_Hook = ?*const fn (?*lua_State, ?*lua_Debug) callconv(.c) void;
 const VaList = std.builtin.VaList;
 
-pub export const lua_ident: [18:0]u8 = "zlua C API phase 0".*;
+pub export const lua_ident: [18:0]u8 = "zlua C API phase 1".*;
+
+const LUA_TNONE: c_int = -1;
+const LUA_TNIL: c_int = 0;
+const LUA_TBOOLEAN: c_int = 1;
+const LUA_TLIGHTUSERDATA: c_int = 2;
+const LUA_TNUMBER: c_int = 3;
+const LUA_TSTRING: c_int = 4;
+const LUA_TTABLE: c_int = 5;
+const LUA_TFUNCTION: c_int = 6;
+const LUA_TUSERDATA: c_int = 7;
+const LUA_TTHREAD: c_int = 8;
+
+const LUA_MINSTACK: usize = 20;
+const LUA_RIDX_GLOBALS: lua_Integer = 2;
+const LUA_RIDX_MAINTHREAD: lua_Integer = 3;
+const LUA_REGISTRYINDEX: c_int = -(std.math.maxInt(c_int) / 2 + 1000);
+const LUA_EXTRASPACE: usize = @sizeOf(?*anyopaque);
+
+const Value = union(enum) {
+    nil,
+    boolean: bool,
+    integer: lua_Integer,
+    number: lua_Number,
+    table: *CTable,
+    thread: *CThread,
+    light_userdata: ?*anyopaque,
+    c_function: lua_CFunction,
+
+    fn typeTag(self: Value) c_int {
+        return switch (self) {
+            .nil => LUA_TNIL,
+            .boolean => LUA_TBOOLEAN,
+            .integer, .number => LUA_TNUMBER,
+            .table => LUA_TTABLE,
+            .thread => LUA_TTHREAD,
+            .light_userdata => LUA_TLIGHTUSERDATA,
+            .c_function => LUA_TFUNCTION,
+        };
+    }
+};
+
+const CTable = runtime.Table;
+
+const LuaStateHeader = extern struct {
+    thread: *CThread,
+};
+
+const CThread = struct {
+    owner: *CState,
+    public_state: *LuaStateHeader,
+    stack: std.ArrayList(Value) = .empty,
+    status: c_int = 0,
+
+    fn deinit(self: *CThread) void {
+        self.stack.deinit(self.owner.allocator());
+    }
+};
+
+const StateBlock = extern struct {
+    extraspace: [LUA_EXTRASPACE]u8 = .{0} ** LUA_EXTRASPACE,
+    header: LuaStateHeader,
+};
+
+comptime {
+    std.debug.assert(@offsetOf(StateBlock, "header") == LUA_EXTRASPACE);
+}
+
+const CState = struct {
+    alloc_f: lua_Alloc,
+    alloc_ud: ?*anyopaque,
+    block: *StateBlock,
+    runtime_state: runtime.State,
+    main_thread: CThread,
+    registry_table: *CTable,
+    global_table: *CTable,
+    panicf: lua_CFunction = null,
+
+    fn allocator(self: *CState) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &lua_allocator_vtable };
+    }
+};
+
+const lua_allocator_vtable = std.mem.Allocator.VTable{
+    .alloc = luaAllocatorAlloc,
+    .resize = luaAllocatorResize,
+    .remap = luaAllocatorRemap,
+    .free = luaAllocatorFree,
+};
+
+fn luaAllocatorAlloc(ctx: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+    const state: *CState = @ptrCast(@alignCast(ctx));
+    const alloc_f = state.alloc_f orelse return null;
+    const ptr = alloc_f(state.alloc_ud, null, 0, len) orelse return null;
+    return @ptrCast(ptr);
+}
+
+fn luaAllocatorResize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+    return false;
+}
+
+fn luaAllocatorRemap(ctx: *anyopaque, memory: []u8, _: std.mem.Alignment, new_len: usize, _: usize) ?[*]u8 {
+    const state: *CState = @ptrCast(@alignCast(ctx));
+    const alloc_f = state.alloc_f orelse return null;
+    const ptr = alloc_f(state.alloc_ud, memory.ptr, memory.len, new_len) orelse return null;
+    return @ptrCast(ptr);
+}
+
+fn luaAllocatorFree(ctx: *anyopaque, memory: []u8, _: std.mem.Alignment, _: usize) void {
+    const state: *CState = @ptrCast(@alignCast(ctx));
+    const alloc_f = state.alloc_f orelse return;
+    _ = alloc_f(state.alloc_ud, memory.ptr, memory.len, 0);
+}
 
 fn zstr(comptime value: [:0]const u8) [*:0]const u8 {
     return value.ptr;
 }
 
-pub export fn lua_newstate(_: lua_Alloc, _: ?*anyopaque, _: c_uint) callconv(.c) ?*lua_State {
+fn threadFromState(L: ?*lua_State) ?*CThread {
+    const raw = L orelse return null;
+    const header: *LuaStateHeader = @ptrCast(@alignCast(raw));
+    return header.thread;
+}
+
+fn stateFromThread(L: ?*lua_State) ?*CState {
+    const thread = threadFromState(L) orelse return null;
+    return thread.owner;
+}
+
+fn allocateHost(comptime T: type, alloc_f: lua_Alloc, ud: ?*anyopaque) ?*T {
+    const f = alloc_f orelse return null;
+    const raw = f(ud, null, 0, @sizeOf(T)) orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+fn freeHost(comptime T: type, alloc_f: lua_Alloc, ud: ?*anyopaque, ptr: *T) void {
+    const f = alloc_f orelse return;
+    _ = f(ud, ptr, @sizeOf(T), 0);
+}
+
+fn pushValue(thread: *CThread, value: Value) bool {
+    thread.stack.append(thread.owner.allocator(), value) catch return false;
+    return true;
+}
+
+fn ensureStack(thread: *CThread, extra: usize) bool {
+    thread.stack.ensureUnusedCapacity(thread.owner.allocator(), extra) catch return false;
+    return true;
+}
+
+fn stackAbsIndex(thread: *CThread, idx: c_int) ?usize {
+    if (idx > 0) {
+        const index: usize = @intCast(idx - 1);
+        return if (index < thread.stack.items.len) index else null;
+    }
+    if (idx < 0 and idx > LUA_REGISTRYINDEX) {
+        const top: isize = @intCast(thread.stack.items.len);
+        const absolute = top + @as(isize, @intCast(idx));
+        if (absolute < 0) return null;
+        const index: usize = @intCast(absolute);
+        return if (index < thread.stack.items.len) index else null;
+    }
     return null;
 }
 
-pub export fn lua_close(_: ?*lua_State) callconv(.c) void {}
+fn stackSlot(thread: *CThread, idx: c_int) ?*Value {
+    const index = stackAbsIndex(thread, idx) orelse return null;
+    return &thread.stack.items[index];
+}
+
+fn valueAt(thread: *CThread, idx: c_int) ?Value {
+    if (idx == LUA_REGISTRYINDEX) return .{ .table = thread.owner.registry_table };
+    return if (stackSlot(thread, idx)) |slot| slot.* else null;
+}
+
+fn typeAt(thread: *CThread, idx: c_int) c_int {
+    return if (valueAt(thread, idx)) |value| value.typeTag() else LUA_TNONE;
+}
+
+fn setTop(thread: *CThread, idx: c_int) void {
+    const current = thread.stack.items.len;
+    const new_top: usize = if (idx >= 0) @intCast(idx) else blk: {
+        const relative = @as(isize, @intCast(current)) + @as(isize, @intCast(idx)) + 1;
+        break :blk if (relative <= 0) 0 else @intCast(relative);
+    };
+
+    if (new_top <= current) {
+        thread.stack.items.len = new_top;
+        return;
+    }
+
+    const extra = new_top - current;
+    if (!ensureStack(thread, extra)) return;
+    for (0..extra) |_| thread.stack.appendAssumeCapacity(.nil);
+}
+
+pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callconv(.c) ?*lua_State {
+    const f = alloc_f orelse return null;
+
+    const state = allocateHost(CState, f, ud) orelse return null;
+    const block = allocateHost(StateBlock, f, ud) orelse {
+        freeHost(CState, f, ud, state);
+        return null;
+    };
+
+    state.* = .{
+        .alloc_f = f,
+        .alloc_ud = ud,
+        .block = block,
+        .runtime_state = undefined,
+        .main_thread = undefined,
+        .registry_table = undefined,
+        .global_table = undefined,
+    };
+
+    block.* = .{
+        .header = .{ .thread = &state.main_thread },
+    };
+    state.main_thread = .{ .owner = state, .public_state = &block.header };
+
+    const allocator = state.allocator();
+    state.runtime_state = runtime.State.initWithOptions(allocator, .{ .stdlib = .none }) catch {
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    };
+
+    state.registry_table = (state.runtime_state.newTableWithHints(0, 3) catch {
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    }).table;
+
+    state.global_table = (state.runtime_state.newTableWithHints(0, 0) catch {
+        state.runtime_state.deinit();
+        freeHost(StateBlock, f, ud, block);
+        freeHost(CState, f, ud, state);
+        return null;
+    }).table;
+
+    if (!ensureStack(&state.main_thread, LUA_MINSTACK)) return null;
+    return @ptrCast(&block.header);
+}
+
+pub export fn lua_close(L: ?*lua_State) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const state = thread.owner;
+    const alloc_f = state.alloc_f;
+    const alloc_ud = state.alloc_ud;
+    const block = state.block;
+
+    thread.deinit();
+    state.runtime_state.deinit();
+    freeHost(StateBlock, alloc_f, alloc_ud, block);
+    freeHost(CState, alloc_f, alloc_ud, state);
+}
 
 pub export fn lua_newthread(_: ?*lua_State) callconv(.c) ?*lua_State {
     return null;
@@ -38,55 +285,127 @@ pub export fn lua_closethread(_: ?*lua_State, _: ?*lua_State) callconv(.c) c_int
     return 0;
 }
 
-pub export fn lua_atpanic(_: ?*lua_State, panicf: lua_CFunction) callconv(.c) lua_CFunction {
-    return panicf;
+pub export fn lua_atpanic(L: ?*lua_State, panicf: lua_CFunction) callconv(.c) lua_CFunction {
+    const state = stateFromThread(L) orelse return null;
+    const old = state.panicf;
+    state.panicf = panicf;
+    return old;
 }
 
 pub export fn lua_version(_: ?*lua_State) callconv(.c) lua_Number {
     return 505;
 }
 
-pub export fn lua_absindex(_: ?*lua_State, idx: c_int) callconv(.c) c_int {
-    return idx;
+pub export fn lua_absindex(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return idx;
+    if (idx > 0 or idx <= LUA_REGISTRYINDEX) return idx;
+    return @as(c_int, @intCast(thread.stack.items.len)) + idx + 1;
 }
 
-pub export fn lua_gettop(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_gettop(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    return @intCast(thread.stack.items.len);
 }
 
-pub export fn lua_settop(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_pushvalue(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_rotate(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
-pub export fn lua_copy(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
-
-pub export fn lua_checkstack(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_settop(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    setTop(thread, idx);
 }
 
-pub export fn lua_xmove(_: ?*lua_State, _: ?*lua_State, _: c_int) callconv(.c) void {}
+pub export fn lua_pushvalue(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const value = valueAt(thread, idx) orelse .nil;
+    _ = pushValue(thread, value);
+}
 
-pub export fn lua_isnumber(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_rotate(L: ?*lua_State, idx: c_int, n: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const start = stackAbsIndex(thread, idx) orelse return;
+    const len = thread.stack.items.len - start;
+    if (len == 0) return;
+
+    const len_i: c_int = @intCast(len);
+    var shift = @mod(n, len_i);
+    if (shift < 0) shift += len_i;
+    if (shift == 0) return;
+
+    const allocator = thread.owner.allocator();
+    const temp = allocator.alloc(Value, len) catch return;
+    defer allocator.free(temp);
+    @memcpy(temp, thread.stack.items[start..]);
+    for (temp, 0..) |value, source_index| {
+        const dest = (@as(usize, @intCast(shift)) + source_index) % len;
+        thread.stack.items[start + dest] = value;
+    }
+}
+
+pub export fn lua_copy(L: ?*lua_State, fromidx: c_int, toidx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const value = valueAt(thread, fromidx) orelse .nil;
+    if (stackSlot(thread, toidx)) |slot| slot.* = value;
+}
+
+pub export fn lua_checkstack(L: ?*lua_State, n: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (n < 0) return 0;
+    return if (ensureStack(thread, @intCast(n))) 1 else 0;
+}
+
+pub export fn lua_xmove(from: ?*lua_State, to: ?*lua_State, n: c_int) callconv(.c) void {
+    const source = threadFromState(from) orelse return;
+    const dest = threadFromState(to) orelse return;
+    if (source.owner != dest.owner or n <= 0) return;
+    const count: usize = @intCast(n);
+    if (count > source.stack.items.len) return;
+    if (!ensureStack(dest, count)) return;
+    const start = source.stack.items.len - count;
+    dest.stack.appendSliceAssumeCapacity(source.stack.items[start..]);
+    source.stack.items.len = start;
+}
+
+pub export fn lua_isnumber(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .integer, .number => 1,
+        else => 0,
+    };
 }
 
 pub export fn lua_isstring(_: ?*lua_State, _: c_int) callconv(.c) c_int {
     return 0;
 }
 
-pub export fn lua_iscfunction(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_iscfunction(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .c_function => 1,
+        else => 0,
+    };
 }
 
-pub export fn lua_isinteger(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_isinteger(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .integer => 1,
+        else => 0,
+    };
 }
 
-pub export fn lua_isuserdata(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_isuserdata(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .light_userdata => 1,
+        else => 0,
+    };
 }
 
-pub export fn lua_type(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return -1;
+pub export fn lua_type(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    return typeAt(thread, idx);
 }
 
 pub export fn lua_typename(_: ?*lua_State, tp: c_int) callconv(.c) [*:0]const u8 {
@@ -105,18 +424,60 @@ pub export fn lua_typename(_: ?*lua_State, tp: c_int) callconv(.c) [*:0]const u8
     };
 }
 
-pub export fn lua_tonumberx(_: ?*lua_State, _: c_int, isnum: ?*c_int) callconv(.c) lua_Number {
-    if (isnum) |ptr| ptr.* = 0;
-    return 0;
+pub export fn lua_tonumberx(L: ?*lua_State, idx: c_int, isnum: ?*c_int) callconv(.c) lua_Number {
+    const thread = threadFromState(L) orelse {
+        if (isnum) |ptr| ptr.* = 0;
+        return 0;
+    };
+    const value = valueAt(thread, idx) orelse {
+        if (isnum) |ptr| ptr.* = 0;
+        return 0;
+    };
+    return switch (value) {
+        .integer => |integer| blk: {
+            if (isnum) |ptr| ptr.* = 1;
+            break :blk @floatFromInt(integer);
+        },
+        .number => |number| blk: {
+            if (isnum) |ptr| ptr.* = 1;
+            break :blk number;
+        },
+        else => blk: {
+            if (isnum) |ptr| ptr.* = 0;
+            break :blk 0;
+        },
+    };
 }
 
-pub export fn lua_tointegerx(_: ?*lua_State, _: c_int, isnum: ?*c_int) callconv(.c) lua_Integer {
-    if (isnum) |ptr| ptr.* = 0;
-    return 0;
+pub export fn lua_tointegerx(L: ?*lua_State, idx: c_int, isnum: ?*c_int) callconv(.c) lua_Integer {
+    const thread = threadFromState(L) orelse {
+        if (isnum) |ptr| ptr.* = 0;
+        return 0;
+    };
+    const value = valueAt(thread, idx) orelse {
+        if (isnum) |ptr| ptr.* = 0;
+        return 0;
+    };
+    return switch (value) {
+        .integer => |integer| blk: {
+            if (isnum) |ptr| ptr.* = 1;
+            break :blk integer;
+        },
+        else => blk: {
+            if (isnum) |ptr| ptr.* = 0;
+            break :blk 0;
+        },
+    };
 }
 
-pub export fn lua_toboolean(_: ?*lua_State, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_toboolean(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const value = valueAt(thread, idx) orelse return 0;
+    return switch (value) {
+        .nil => 0,
+        .boolean => |boolean| if (boolean) 1 else 0,
+        else => 1,
+    };
 }
 
 pub export fn lua_tolstring(_: ?*lua_State, _: c_int, len: ?*usize) callconv(.c) ?[*:0]const u8 {
@@ -128,20 +489,43 @@ pub export fn lua_rawlen(_: ?*lua_State, _: c_int) callconv(.c) lua_Unsigned {
     return 0;
 }
 
-pub export fn lua_tocfunction(_: ?*lua_State, _: c_int) callconv(.c) lua_CFunction {
-    return null;
+pub export fn lua_tocfunction(L: ?*lua_State, idx: c_int) callconv(.c) lua_CFunction {
+    const thread = threadFromState(L) orelse return null;
+    const value = valueAt(thread, idx) orelse return null;
+    return switch (value) {
+        .c_function => |function| function,
+        else => null,
+    };
 }
 
-pub export fn lua_touserdata(_: ?*lua_State, _: c_int) callconv(.c) ?*anyopaque {
-    return null;
+pub export fn lua_touserdata(L: ?*lua_State, idx: c_int) callconv(.c) ?*anyopaque {
+    const thread = threadFromState(L) orelse return null;
+    const value = valueAt(thread, idx) orelse return null;
+    return switch (value) {
+        .light_userdata => |ptr| ptr,
+        else => null,
+    };
 }
 
-pub export fn lua_tothread(_: ?*lua_State, _: c_int) callconv(.c) ?*lua_State {
-    return null;
+pub export fn lua_tothread(L: ?*lua_State, idx: c_int) callconv(.c) ?*lua_State {
+    const thread = threadFromState(L) orelse return null;
+    const value = valueAt(thread, idx) orelse return null;
+    return switch (value) {
+        .thread => |target| @ptrCast(target.public_state),
+        else => null,
+    };
 }
 
-pub export fn lua_topointer(_: ?*lua_State, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const anyopaque {
+    const thread = threadFromState(L) orelse return null;
+    const value = valueAt(thread, idx) orelse return null;
+    return switch (value) {
+        .table => |table| table,
+        .thread => |target| target.public_state,
+        .light_userdata => |ptr| ptr,
+        .c_function => null,
+        else => null,
+    };
 }
 
 pub export fn lua_arith(_: ?*lua_State, _: c_int) callconv(.c) void {}
@@ -154,9 +538,20 @@ pub export fn lua_compare(_: ?*lua_State, _: c_int, _: c_int, _: c_int) callconv
     return 0;
 }
 
-pub export fn lua_pushnil(_: ?*lua_State) callconv(.c) void {}
-pub export fn lua_pushnumber(_: ?*lua_State, _: lua_Number) callconv(.c) void {}
-pub export fn lua_pushinteger(_: ?*lua_State, _: lua_Integer) callconv(.c) void {}
+pub export fn lua_pushnil(L: ?*lua_State) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .nil);
+}
+
+pub export fn lua_pushnumber(L: ?*lua_State, n: lua_Number) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .{ .number = n });
+}
+
+pub export fn lua_pushinteger(L: ?*lua_State, n: lua_Integer) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .{ .integer = n });
+}
 
 pub export fn lua_pushlstring(_: ?*lua_State, s: ?[*]const u8, _: usize) callconv(.c) ?[*:0]const u8 {
     return @ptrCast(s);
@@ -178,12 +573,25 @@ pub export fn lua_pushfstring(_: ?*lua_State, fmt: ?[*:0]const u8, ...) callconv
     return fmt;
 }
 
-pub export fn lua_pushcclosure(_: ?*lua_State, _: lua_CFunction, _: c_int) callconv(.c) void {}
-pub export fn lua_pushboolean(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_pushlightuserdata(_: ?*lua_State, _: ?*anyopaque) callconv(.c) void {}
+pub export fn lua_pushcclosure(L: ?*lua_State, function: lua_CFunction, _: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .{ .c_function = function });
+}
 
-pub export fn lua_pushthread(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_pushboolean(L: ?*lua_State, b: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .{ .boolean = b != 0 });
+}
+
+pub export fn lua_pushlightuserdata(L: ?*lua_State, ptr: ?*anyopaque) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    _ = pushValue(thread, .{ .light_userdata = ptr });
+}
+
+pub export fn lua_pushthread(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    _ = pushValue(thread, .{ .thread = thread });
+    return if (thread == &thread.owner.main_thread) 1 else 0;
 }
 
 pub export fn lua_getglobal(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) c_int {
@@ -206,8 +614,20 @@ pub export fn lua_rawget(_: ?*lua_State, _: c_int) callconv(.c) c_int {
     return 0;
 }
 
-pub export fn lua_rawgeti(_: ?*lua_State, _: c_int, _: lua_Integer) callconv(.c) c_int {
-    return 0;
+pub export fn lua_rawgeti(L: ?*lua_State, idx: c_int, n: lua_Integer) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    if (idx == LUA_REGISTRYINDEX) {
+        const value: Value = switch (n) {
+            1 => .{ .boolean = false },
+            LUA_RIDX_GLOBALS => .{ .table = thread.owner.global_table },
+            LUA_RIDX_MAINTHREAD => .{ .thread = &thread.owner.main_thread },
+            else => .nil,
+        };
+        _ = pushValue(thread, value);
+        return value.typeTag();
+    }
+    _ = pushValue(thread, .nil);
+    return LUA_TNIL;
 }
 
 pub export fn lua_rawgetp(_: ?*lua_State, _: c_int, _: ?*const anyopaque) callconv(.c) c_int {
@@ -302,12 +722,20 @@ pub export fn lua_stringtonumber(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c)
     return 0;
 }
 
-pub export fn lua_getallocf(_: ?*lua_State, ud: ?*?*anyopaque) callconv(.c) lua_Alloc {
-    if (ud) |ptr| ptr.* = null;
-    return null;
+pub export fn lua_getallocf(L: ?*lua_State, ud: ?*?*anyopaque) callconv(.c) lua_Alloc {
+    const state = stateFromThread(L) orelse {
+        if (ud) |ptr| ptr.* = null;
+        return null;
+    };
+    if (ud) |ptr| ptr.* = state.alloc_ud;
+    return state.alloc_f;
 }
 
-pub export fn lua_setallocf(_: ?*lua_State, _: lua_Alloc, _: ?*anyopaque) callconv(.c) void {}
+pub export fn lua_setallocf(L: ?*lua_State, alloc_f: lua_Alloc, ud: ?*anyopaque) callconv(.c) void {
+    const state = stateFromThread(L) orelse return;
+    state.alloc_f = alloc_f;
+    state.alloc_ud = ud;
+}
 pub export fn lua_toclose(_: ?*lua_State, _: c_int) callconv(.c) void {}
 pub export fn lua_closeslot(_: ?*lua_State, _: c_int) callconv(.c) void {}
 
@@ -439,8 +867,17 @@ pub export fn luaL_execresult(_: ?*lua_State, stat: c_int) callconv(.c) c_int {
     return stat;
 }
 
-pub export fn luaL_alloc(_: ?*anyopaque, _: ?*anyopaque, _: usize, _: usize) callconv(.c) ?*anyopaque {
-    return null;
+extern fn malloc(usize) ?*anyopaque;
+extern fn realloc(?*anyopaque, usize) ?*anyopaque;
+extern fn free(?*anyopaque) void;
+
+pub export fn luaL_alloc(_: ?*anyopaque, ptr: ?*anyopaque, _: usize, nsize: usize) callconv(.c) ?*anyopaque {
+    if (nsize == 0) {
+        free(ptr);
+        return null;
+    }
+    if (ptr == null) return malloc(nsize);
+    return realloc(ptr, nsize);
 }
 
 pub export fn luaL_ref(_: ?*lua_State, _: c_int) callconv(.c) c_int {
@@ -462,7 +899,7 @@ pub export fn luaL_loadstring(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) c_
 }
 
 pub export fn luaL_newstate() callconv(.c) ?*lua_State {
-    return null;
+    return lua_newstate(luaL_alloc, null, 0);
 }
 
 pub export fn luaL_makeseed(_: ?*lua_State) callconv(.c) c_uint {
