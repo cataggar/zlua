@@ -13,18 +13,3 @@ zlua is a Zig implementation of Lua 5.5. The current project documentation is or
 | [Embedding](embedding.md) | Zig-native host API for creating states, loading code, exposing callbacks, sandboxing, bytecode, and userdata. |
 | [Next Steps](next-steps.md) | Remaining hardening, performance, API, and release-documentation work. |
 
-Historical planning and status documents live in [old](old/). They can be useful for context, but the current docs and code are the source of truth.
-
-## Common Commands
-
-```sh
-zig build ci
-zig build fetch-lua
-zig build test
-zig build test-diff
-zig build test-official
-zig build examples
-just bench
-```
-
-The build uses Zig `0.16.0`, downloads Lua 5.5 source and official tests into `.zlua-deps/`, and builds CLua as the behavioral oracle. A system Lua installation is not required for normal build, test, or benchmark workflows.
