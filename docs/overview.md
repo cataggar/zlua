@@ -1878,6 +1878,8 @@ zlua bytecode round-trips without source recompilation
 
 ## Milestone 24: Performance and hardening
 
+Detailed scope: [`docs/milestone-24-performance-hardening.md`](milestone-24-performance-hardening.md).
+
 ### Goal
 
 Improve speed and reliability after compatibility is credible.
