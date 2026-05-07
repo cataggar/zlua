@@ -41,7 +41,7 @@ Capabilities are the host services Lua code may use. The default is sandboxed:
 var lua = try zlua.State.init(allocator, .{});
 ```
 
-This opens safe libraries while leaving filesystem, environment, and process access disabled.
+This opens safe libraries while leaving filesystem, environment, clock, process, and default output access disabled unless explicitly configured.
 
 To capture output and provide deterministic time:
 
@@ -100,6 +100,8 @@ const report = try filesystem.readFileAlloc(allocator, "report.txt");
 defer allocator.free(report);
 ```
 
+`State.addMemoryFile` can add owned files to a state that was initialized with disabled or read-only memory filesystem access. It writes through to `.memory_rw` filesystems and returns `error.UnsupportedOption` for host-filesystem states.
+
 ## Limits
 
 Public options include memory, instruction, stack value, and call frame limits:
@@ -115,7 +117,7 @@ var lua = try zlua.State.init(allocator, .{
 });
 ```
 
-When a protected call hits these limits, zlua returns a Lua error value through `Function.protectedCall`. Convenience APIs such as `doString` return `error.LuaError` and store the error details on the state.
+When a protected call hits these limits, zlua returns a Lua error value through `Function.protectedCall`. Convenience APIs such as `doString` return `error.LuaError` and store the error details on the state. `State.stepGc` currently performs a full collection and returns `.complete`; `GcOptions` is reserved for future tuning.
 
 ## Loading And Running Code
 
@@ -461,12 +463,13 @@ There is no stable high-level raw escape hatch in the embedding API yet. Importi
 
 If you need a low-level operation that is not available through `zlua.State`, prefer adding a small facade method to `src/api.zig` rather than exposing runtime internals to application code.
 
-## Current Unsupported Areas
+## Current Reserved Or Unsupported Areas
 
 These areas are reserved or incomplete in the current embedding surface:
 
 ```text
 GcOptions is reserved for future tuning.
+State.stepGc accepts a budget but currently performs a full collection.
 There is no State.callGlobal or State.protectedCallGlobal convenience method; get a Function and call it.
 There is no stable zlua.api.Raw wrapper.
 Coroutine/thread handles are not exposed through the high-level API.
@@ -480,6 +483,7 @@ Embedding examples live under `examples/embed`:
 ```text
 examples/embed/run_script.zig
 examples/embed/register_function.zig
+examples/embed/typed_host_function.zig
 examples/embed/plugin_sandbox.zig
 examples/embed/bytecode_roundtrip.zig
 examples/embed/memory_rw_files.zig
