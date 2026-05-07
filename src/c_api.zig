@@ -19,10 +19,11 @@ const lua_WarnFunction = ?*const fn (?*anyopaque, ?[*:0]const u8, c_int) callcon
 const lua_Hook = ?*const fn (?*lua_State, ?*lua_Debug) callconv(.c) void;
 const VaList = std.builtin.VaList;
 
-pub export const lua_ident: [18:0]u8 = "zlua C API phase 3".*;
+pub export const lua_ident: [18:0]u8 = "zlua C API phase 6".*;
 
 const LUA_MULTRET: c_int = -1;
 const LUA_OK: c_int = 0;
+const LUA_YIELD: c_int = 1;
 const LUA_ERRRUN: c_int = 2;
 const LUA_ERRSYNTAX: c_int = 3;
 const LUA_ERRMEM: c_int = 4;
@@ -222,17 +223,38 @@ const LuaStateHeader = extern struct {
 const CThread = struct {
     owner: *CState,
     public_state: *LuaStateHeader,
+    owned_block: ?*StateBlock = null,
+    runtime_thread: ?*runtime.Thread = null,
     stack: std.ArrayList(Value) = .empty,
     to_close_slots: std.ArrayList(usize) = .empty,
     status: c_int = 0,
+    started: bool = false,
+    running: bool = false,
+    dead: bool = false,
+    resume_result_count: usize = 0,
     pending_error: ?Value = null,
+    pending_yield: ?PendingYield = null,
+    continuation: ?CContinuation = null,
     current_c_closure: ?*runtime.CClosure = null,
     c_call_depth: usize = 0,
+    yieldable_call_depth: usize = 0,
 
     fn deinit(self: *CThread) void {
         self.to_close_slots.deinit(self.owner.allocator());
         self.stack.deinit(self.owner.allocator());
     }
+};
+
+const PendingYield = struct {
+    values: []Value,
+    result_count: usize,
+    ctx: lua_KContext,
+    k: lua_KFunction,
+};
+
+const CContinuation = struct {
+    ctx: lua_KContext,
+    k: *const fn (?*lua_State, c_int, lua_KContext) callconv(.c) c_int,
 };
 
 const StateBlock = extern struct {
@@ -255,6 +277,7 @@ const CState = struct {
     strings: std.ArrayList(*CString) = .empty,
     tables: std.ArrayList(*CTable) = .empty,
     userdata: std.ArrayList(*CUserdata) = .empty,
+    threads: std.ArrayList(*CThread) = .empty,
     panicf: lua_CFunction = null,
 
     fn allocator(self: *CState) std.mem.Allocator {
@@ -269,6 +292,7 @@ const CState = struct {
         self.tables.deinit(alloc);
         self.userdata.deinit(alloc);
         self.strings.deinit(alloc);
+        self.threads.deinit(alloc);
     }
 };
 
@@ -431,6 +455,77 @@ fn createUserdata(state: *CState, size: usize, uservalue_count: usize) ?*CUserda
         return null;
     };
     return userdata;
+}
+
+fn createThread(parent: *CThread) ?*CThread {
+    const state = parent.owner;
+    const allocator = state.allocator();
+    const block = allocator.create(StateBlock) catch return null;
+    const thread = allocator.create(CThread) catch {
+        allocator.destroy(block);
+        return null;
+    };
+    block.* = .{ .header = .{ .thread = thread } };
+    thread.* = .{ .owner = state, .public_state = &block.header, .owned_block = block };
+    if (!ensureStack(thread, LUA_MINSTACK)) {
+        thread.deinit();
+        allocator.destroy(thread);
+        allocator.destroy(block);
+        return null;
+    }
+    state.threads.append(allocator, thread) catch {
+        thread.deinit();
+        allocator.destroy(thread);
+        allocator.destroy(block);
+        return null;
+    };
+    return thread;
+}
+
+fn destroyThread(state: *CState, thread: *CThread) void {
+    const allocator = state.allocator();
+    if (thread.pending_yield) |pending| allocator.free(pending.values);
+    thread.deinit();
+    if (thread.owned_block) |block| allocator.destroy(block);
+    allocator.destroy(thread);
+}
+
+fn collectTopValues(thread: *CThread, count: usize) ?[]Value {
+    if (count > thread.stack.items.len) return null;
+    const start = thread.stack.items.len - count;
+    const values = thread.owner.allocator().dupe(Value, thread.stack.items[start..]) catch return null;
+    thread.stack.items.len = start;
+    return values;
+}
+
+fn topValueSlice(thread: *CThread, count: usize) []Value {
+    if (count > thread.stack.items.len) return thread.stack.items;
+    return thread.stack.items[thread.stack.items.len - count ..];
+}
+
+fn replaceStack(thread: *CThread, values: []const Value) bool {
+    thread.stack.clearRetainingCapacity();
+    thread.stack.appendSlice(thread.owner.allocator(), values) catch return false;
+    return true;
+}
+
+fn canYield(thread: *CThread) bool {
+    return thread != &thread.owner.main_thread and thread.running and (thread.c_call_depth == 1 or thread.yieldable_call_depth != 0);
+}
+
+fn installYieldContinuation(thread: *CThread, ctx: lua_KContext, k: lua_KFunction) bool {
+    const result_count = thread.resume_result_count;
+    const values = thread.owner.allocator().dupe(Value, topValueSlice(thread, result_count)) catch return false;
+    thread.pending_yield = .{ .values = values, .result_count = result_count, .ctx = ctx, .k = k };
+    return true;
+}
+
+fn findThreadForRuntime(state: *CState, target: *runtime.Thread) ?*CThread {
+    if (state.main_thread.runtime_thread == target) return &state.main_thread;
+    for (state.threads.items) |thread| {
+        if (thread.runtime_thread == target) return thread;
+    }
+    return null;
 }
 
 fn findUserdataByPtr(state: *CState, ptr: *anyopaque) ?*CUserdata {
@@ -744,6 +839,7 @@ fn finishCallResults(thread: *CThread, base: usize, results: []const Value, nres
 const CCallbackResult = union(enum) {
     success: []Value,
     failure: Value,
+    yielded,
     memory_error,
 };
 
@@ -766,6 +862,28 @@ fn runCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Value
     }
     const function = functionFromId(closure.function_id);
     const returned = if (function) |func| func(@ptrCast(thread.public_state)) else 0;
+    if (thread.pending_yield) |pending| {
+        thread.pending_yield = null;
+        const yield_stack = allocator.dupe(Value, thread.stack.items) catch {
+            allocator.free(pending.values);
+            thread.stack.clearRetainingCapacity();
+            thread.stack.appendSlice(allocator, saved) catch {};
+            return .memory_error;
+        };
+        defer allocator.free(yield_stack);
+        thread.stack.clearRetainingCapacity();
+        thread.stack.appendSlice(allocator, yield_stack) catch {
+            allocator.free(pending.values);
+            thread.stack.appendSlice(allocator, saved) catch {};
+            return .memory_error;
+        };
+        allocator.free(pending.values);
+        thread.resume_result_count = pending.result_count;
+        thread.continuation = if (pending.k) |k| .{ .ctx = pending.ctx, .k = k } else null;
+        thread.status = LUA_YIELD;
+        thread.running = false;
+        return .yielded;
+    }
     const pending = thread.pending_error;
     thread.pending_error = null;
 
@@ -803,13 +921,14 @@ fn callCClosure(thread: *CThread, closure: *runtime.CClosure, args: []const Valu
             _ = pushValue(thread, err_value);
             return LUA_ERRRUN;
         },
+        .yielded => return LUA_YIELD,
         .memory_error => return LUA_ERRMEM,
     }
 }
 
 fn cClosureDispatch(context: *runtime.CClosureContext) anyerror!void {
     const state: *CState = @ptrCast(@alignCast(context.user_data orelse return error.RuntimeError));
-    const thread = &state.main_thread;
+    const thread = findThreadForRuntime(state, context.thread) orelse &state.main_thread;
     const allocator = state.allocator();
     const args = try allocator.alloc(Value, context.argCount());
     defer allocator.free(args);
@@ -821,7 +940,41 @@ fn cClosureDispatch(context: *runtime.CClosureContext) anyerror!void {
             for (results) |result| try context.appendReturn(try cToRuntimeValue(state, result, 0));
         },
         .failure => |err_value| return context.raise(try cToRuntimeValue(state, err_value, 0)),
+        .yielded => {
+            const yielded = topValueSlice(thread, thread.resume_result_count);
+            const values = try allocator.alloc(runtime.Value, yielded.len);
+            defer allocator.free(values);
+            for (values, 0..) |*value, index| value.* = try cToRuntimeValue(state, yielded[index], 0);
+            try context.yieldWithReturns(values);
+        },
         .memory_error => return error.OutOfMemory,
+    }
+}
+
+fn cClosureResumeDispatch(context: *runtime.CClosureResumeContext) anyerror!void {
+    const state: *CState = @ptrCast(@alignCast(context.user_data orelse return error.RuntimeError));
+    const thread = findThreadForRuntime(state, context.thread) orelse return error.RuntimeError;
+    const allocator = state.allocator();
+    const c_args = try allocator.alloc(Value, context.args.len);
+    defer allocator.free(c_args);
+    for (c_args, 0..) |*arg, index| arg.* = try runtimeToCValue(state, context.args[index], 0);
+    if (!replaceStack(thread, c_args)) return error.OutOfMemory;
+
+    switch (runContinuation(thread, @intCast(c_args.len))) {
+        LUA_OK => {
+            for (thread.stack.items) |value| try context.appendReturn(try cToRuntimeValue(state, value, 0));
+        },
+        LUA_YIELD => {
+            const yielded = topValueSlice(thread, thread.resume_result_count);
+            const values = try allocator.alloc(runtime.Value, yielded.len);
+            defer allocator.free(values);
+            for (values, 0..) |*value, index| value.* = try cToRuntimeValue(state, yielded[index], 0);
+            try context.yieldWithReturns(values);
+        },
+        else => {
+            const err_value = if (thread.stack.items.len == 0) Value.nil else thread.stack.items[thread.stack.items.len - 1];
+            return context.raise(try cToRuntimeValue(state, err_value, 0));
+        },
     }
 }
 
@@ -906,6 +1059,165 @@ fn callStackFunction(thread: *CThread, nargs: c_int, nresults: c_int, protected:
     };
 }
 
+fn runtimeArgsFromTop(thread: *CThread, narg: c_int) ?[]runtime.Value {
+    if (narg < 0) return null;
+    const arg_count: usize = @intCast(narg);
+    if (arg_count > thread.stack.items.len) return null;
+    const start = thread.stack.items.len - arg_count;
+    const args = thread.owner.allocator().alloc(runtime.Value, arg_count) catch return null;
+    for (args, 0..) |*arg, index| arg.* = cToRuntimeValue(thread.owner, thread.stack.items[start + index], 0) catch .nil;
+    return args;
+}
+
+fn finishRuntimeResume(thread: *CThread, result: runtime.ProtectedCallResult) c_int {
+    const allocator = thread.owner.allocator();
+    switch (result) {
+        .success => |values| {
+            defer thread.owner.runtime_state.allocator.free(values);
+            if (thread.runtime_thread) |target| {
+                if (thread.owner.runtime_state.threadWasYielded(target)) {
+                    if (thread.continuation == null) {
+                        const c_values = allocator.alloc(Value, values.len) catch return LUA_ERRMEM;
+                        defer allocator.free(c_values);
+                        for (values, 0..) |value, index| c_values[index] = runtimeToCValue(thread.owner, value, 0) catch return LUA_ERRMEM;
+                        if (!replaceStack(thread, c_values)) return LUA_ERRMEM;
+                        thread.resume_result_count = c_values.len;
+                    }
+                    thread.status = LUA_YIELD;
+                    thread.running = false;
+                    return LUA_YIELD;
+                }
+            }
+            const c_values = allocator.alloc(Value, values.len) catch return LUA_ERRMEM;
+            defer allocator.free(c_values);
+            for (values, 0..) |value, index| c_values[index] = runtimeToCValue(thread.owner, value, 0) catch return LUA_ERRMEM;
+            if (!replaceStack(thread, c_values)) return LUA_ERRMEM;
+            thread.status = LUA_OK;
+            thread.running = false;
+            thread.dead = true;
+            return LUA_OK;
+        },
+        .failure => |failure| {
+            thread.stack.clearRetainingCapacity();
+            _ = pushValue(thread, runtimeToCValue(thread.owner, failure, 0) catch .nil);
+            thread.status = LUA_ERRRUN;
+            thread.running = false;
+            thread.dead = true;
+            return LUA_ERRRUN;
+        },
+    }
+}
+
+fn resumeRuntimeThread(thread: *CThread, narg: c_int) c_int {
+    const args = runtimeArgsFromTop(thread, narg) orelse return LUA_ERRRUN;
+    defer thread.owner.allocator().free(args);
+    const target = thread.runtime_thread orelse blk: {
+        if (narg < 0) return LUA_ERRRUN;
+        const arg_count: usize = @intCast(narg);
+        if (thread.stack.items.len < arg_count + 1) return LUA_ERRRUN;
+        const base = thread.stack.items.len - arg_count - 1;
+        const entry = cToRuntimeValue(thread.owner, thread.stack.items[base], 0) catch return LUA_ERRMEM;
+        thread.stack.items.len = base;
+        const created = thread.owner.runtime_state.newCoroutine(entry) catch return LUA_ERRMEM;
+        thread.runtime_thread = created;
+        break :blk created;
+    };
+    thread.started = true;
+    thread.running = true;
+    thread.dead = false;
+    const result = thread.owner.runtime_state.resumeThread(target, args) catch |err| switch (err) {
+        error.OutOfMemory => return LUA_ERRMEM,
+        else => {
+            thread.stack.clearRetainingCapacity();
+            _ = pushStringBytes(thread, @errorName(err));
+            return LUA_ERRRUN;
+        },
+    };
+    syncRuntimeGlobalsToC(thread.owner);
+    return finishRuntimeResume(thread, result);
+}
+
+fn runContinuation(thread: *CThread, narg: c_int) c_int {
+    const continuation = thread.continuation orelse {
+        const values = collectTopValues(thread, @intCast(@max(narg, 0))) orelse return LUA_ERRRUN;
+        defer thread.owner.allocator().free(values);
+        if (!replaceStack(thread, values)) return LUA_ERRMEM;
+        thread.status = LUA_OK;
+        thread.dead = true;
+        return LUA_OK;
+    };
+    thread.continuation = null;
+    const values = collectTopValues(thread, @intCast(@max(narg, 0))) orelse return LUA_ERRRUN;
+    defer thread.owner.allocator().free(values);
+    if (!replaceStack(thread, values)) return LUA_ERRMEM;
+
+    thread.running = true;
+    thread.status = LUA_OK;
+    thread.c_call_depth += 1;
+    const returned = continuation.k(@ptrCast(thread.public_state), LUA_YIELD, continuation.ctx);
+    thread.c_call_depth -= 1;
+
+    if (thread.pending_yield) |pending| {
+        thread.pending_yield = null;
+        const yield_stack = thread.owner.allocator().dupe(Value, thread.stack.items) catch {
+            thread.owner.allocator().free(pending.values);
+            return LUA_ERRMEM;
+        };
+        defer thread.owner.allocator().free(yield_stack);
+        thread.stack.clearRetainingCapacity();
+        thread.stack.appendSlice(thread.owner.allocator(), yield_stack) catch {
+            thread.owner.allocator().free(pending.values);
+            return LUA_ERRMEM;
+        };
+        thread.owner.allocator().free(pending.values);
+        thread.resume_result_count = pending.result_count;
+        thread.continuation = if (pending.k) |k| .{ .ctx = pending.ctx, .k = k } else null;
+        thread.status = LUA_YIELD;
+        thread.running = false;
+        return LUA_YIELD;
+    }
+    if (thread.pending_error) |err_value| {
+        thread.pending_error = null;
+        thread.stack.clearRetainingCapacity();
+        _ = pushValue(thread, err_value);
+        thread.status = LUA_ERRRUN;
+        thread.running = false;
+        thread.dead = true;
+        return LUA_ERRRUN;
+    }
+
+    const result_count: usize = @min(@as(usize, @intCast(@max(returned, 0))), thread.stack.items.len);
+    const start = thread.stack.items.len - result_count;
+    const results = thread.owner.allocator().dupe(Value, thread.stack.items[start..]) catch return LUA_ERRMEM;
+    defer thread.owner.allocator().free(results);
+    if (!replaceStack(thread, results)) return LUA_ERRMEM;
+    thread.status = LUA_OK;
+    thread.running = false;
+    thread.dead = true;
+    return LUA_OK;
+}
+
+fn resumeCThread(thread: *CThread, narg: c_int) c_int {
+    if (thread.status == LUA_YIELD) return runContinuation(thread, narg);
+    thread.started = true;
+    thread.running = true;
+    thread.dead = false;
+    const status = callStackFunction(thread, narg, LUA_MULTRET, true);
+    thread.running = false;
+    switch (status) {
+        LUA_OK => {
+            thread.status = LUA_OK;
+            thread.dead = true;
+        },
+        LUA_YIELD => {},
+        else => {
+            thread.status = status;
+            thread.dead = true;
+        },
+    }
+    return status;
+}
+
 fn applyMessageHandler(thread: *CThread, handler: Value, error_value: Value) ?Value {
     _ = pushValue(thread, handler);
     _ = pushValue(thread, error_value);
@@ -925,6 +1237,7 @@ fn callMetamethod(thread: *CThread, function: Value, args: []const Value) bool {
                     return true;
                 },
                 .failure => return false,
+                .yielded => return false,
                 .memory_error => return false,
             }
         },
@@ -976,7 +1289,10 @@ fn markCUserdata(state: *CState, userdata: *CUserdata) void {
 
 fn markCRoots(thread: *CThread) void {
     const state = thread.owner;
-    for (thread.stack.items) |value| markCValue(state, value);
+    for (state.main_thread.stack.items) |value| markCValue(state, value);
+    for (state.threads.items) |child| {
+        for (child.stack.items) |value| markCValue(state, value);
+    }
     markCTable(state, state.registry_table);
     markCTable(state, state.global_table);
 }
@@ -1074,6 +1390,7 @@ pub export fn lua_newstate(alloc_f: lua_Alloc, ud: ?*anyopaque, _: c_uint) callc
         return null;
     };
     state.runtime_state.setCClosureDispatch(cClosureDispatch, state);
+    state.runtime_state.setCClosureResumeDispatch(cClosureResumeDispatch);
     const runtime_globals = state.runtime_state.newTableWithHints(0, 1) catch {
         state.runtime_state.deinit();
         freeHost(StateBlock, f, ud, block);
@@ -1127,6 +1444,8 @@ pub export fn lua_close(L: ?*lua_State) callconv(.c) void {
     const block = state.block;
 
     for (state.userdata.items) |userdata| finalizeCUserdata(thread, userdata);
+    for (state.threads.items) |child| destroyThread(state, child);
+    state.threads.clearRetainingCapacity();
     thread.deinit();
     state.deinitOwnedObjects();
     state.runtime_state.deinit();
@@ -1134,12 +1453,36 @@ pub export fn lua_close(L: ?*lua_State) callconv(.c) void {
     freeHost(CState, alloc_f, alloc_ud, state);
 }
 
-pub export fn lua_newthread(_: ?*lua_State) callconv(.c) ?*lua_State {
-    return null;
+pub export fn lua_newthread(L: ?*lua_State) callconv(.c) ?*lua_State {
+    const parent = threadFromState(L) orelse return null;
+    const child = createThread(parent) orelse return null;
+    _ = pushValue(parent, .{ .thread = child });
+    return @ptrCast(child.public_state);
 }
 
-pub export fn lua_closethread(_: ?*lua_State, _: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_closethread(L: ?*lua_State, _: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_OK;
+    if (thread == &thread.owner.main_thread) return LUA_OK;
+    if (thread.runtime_thread) |target| {
+        if (thread.owner.runtime_state.closeThread(target) catch null) |error_value| {
+            thread.stack.clearRetainingCapacity();
+            _ = pushValue(thread, runtimeToCValue(thread.owner, error_value, 0) catch .nil);
+            thread.status = LUA_ERRRUN;
+            thread.running = false;
+            thread.dead = true;
+            return LUA_ERRRUN;
+        }
+    }
+    closeToCloseSlots(thread, 0, thread.stack.items.len);
+    thread.stack.clearRetainingCapacity();
+    thread.pending_error = null;
+    if (thread.pending_yield) |pending| thread.owner.allocator().free(pending.values);
+    thread.pending_yield = null;
+    thread.continuation = null;
+    thread.status = LUA_OK;
+    thread.running = false;
+    thread.dead = true;
+    return LUA_OK;
 }
 
 pub export fn lua_atpanic(L: ?*lua_State, panicf: lua_CFunction) callconv(.c) lua_CFunction {
@@ -1924,16 +2267,25 @@ pub export fn lua_setiuservalue(L: ?*lua_State, idx: c_int, n: c_int) callconv(.
     return 1;
 }
 
-pub export fn lua_callk(L: ?*lua_State, nargs: c_int, nresults: c_int, _: lua_KContext, _: lua_KFunction) callconv(.c) void {
+pub export fn lua_callk(L: ?*lua_State, nargs: c_int, nresults: c_int, ctx: lua_KContext, k: lua_KFunction) callconv(.c) void {
     const thread = threadFromState(L) orelse return;
-    _ = callStackFunction(thread, nargs, nresults, false);
+    if (k != null) thread.yieldable_call_depth += 1;
+    const status = callStackFunction(thread, nargs, nresults, false);
+    if (k != null) thread.yieldable_call_depth -= 1;
+    if (status == LUA_YIELD and k != null) _ = installYieldContinuation(thread, ctx, k);
 }
 
-pub export fn lua_pcallk(L: ?*lua_State, nargs: c_int, nresults: c_int, msgh: c_int, _: lua_KContext, _: lua_KFunction) callconv(.c) c_int {
+pub export fn lua_pcallk(L: ?*lua_State, nargs: c_int, nresults: c_int, msgh: c_int, ctx: lua_KContext, k: lua_KFunction) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return LUA_ERRRUN;
     const handler_abs = if (msgh == 0) 0 else lua_absindex(L, msgh);
     const handler = if (handler_abs == 0) null else valueAt(thread, handler_abs);
+    if (k != null) thread.yieldable_call_depth += 1;
     const status = callStackFunction(thread, nargs, nresults, true);
+    if (k != null) thread.yieldable_call_depth -= 1;
+    if (status == LUA_YIELD and k != null) {
+        if (!installYieldContinuation(thread, ctx, k)) return LUA_ERRMEM;
+        return LUA_YIELD;
+    }
     if (status == LUA_OK) return LUA_OK;
     if (status == LUA_ERRRUN) {
         if (handler) |handler_value| {
@@ -1970,21 +2322,84 @@ pub export fn lua_dump(_: ?*lua_State, _: lua_Writer, _: ?*anyopaque, _: c_int) 
     return 0;
 }
 
-pub export fn lua_yieldk(_: ?*lua_State, _: c_int, _: lua_KContext, _: lua_KFunction) callconv(.c) c_int {
+pub export fn lua_yieldk(L: ?*lua_State, nresults: c_int, ctx: lua_KContext, k: lua_KFunction) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (nresults < 0 or @as(usize, @intCast(nresults)) > thread.stack.items.len) {
+        thread.pending_error = .{ .string = createString(thread.owner, "attempt to yield with too many results") orelse return 0 };
+        return 0;
+    }
+    if (!canYield(thread)) {
+        const message = if (thread == &thread.owner.main_thread or !thread.running)
+            "attempt to yield from outside a coroutine"
+        else
+            "attempt to yield across a C-call boundary";
+        thread.pending_error = .{ .string = createString(thread.owner, message) orelse return 0 };
+        return 0;
+    }
+    const count: usize = @intCast(nresults);
+    const start = thread.stack.items.len - count;
+    const values = thread.owner.allocator().dupe(Value, thread.stack.items[start..]) catch {
+        thread.pending_error = .{ .string = createString(thread.owner, "not enough memory") orelse return 0 };
+        return 0;
+    };
+    thread.pending_yield = .{ .values = values, .result_count = count, .ctx = ctx, .k = k };
     return 0;
 }
 
-pub export fn lua_resume(_: ?*lua_State, _: ?*lua_State, _: c_int, nres: ?*c_int) callconv(.c) c_int {
-    if (nres) |ptr| ptr.* = 0;
-    return 0;
+pub export fn lua_resume(L: ?*lua_State, _: ?*lua_State, narg: c_int, nres: ?*c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse {
+        if (nres) |ptr| ptr.* = 0;
+        return LUA_ERRRUN;
+    };
+    if (thread == &thread.owner.main_thread) {
+        _ = pushStringBytes(thread, "cannot resume main coroutine");
+        if (nres) |ptr| ptr.* = 1;
+        return LUA_ERRRUN;
+    }
+    if (thread.dead and thread.status != LUA_YIELD) {
+        _ = pushStringBytes(thread, "cannot resume dead coroutine");
+        if (nres) |ptr| ptr.* = 1;
+        return LUA_ERRRUN;
+    }
+    if (thread.running) {
+        _ = pushStringBytes(thread, "cannot resume non-suspended coroutine");
+        if (nres) |ptr| ptr.* = 1;
+        return LUA_ERRRUN;
+    }
+
+    const status = if (thread.runtime_thread != null)
+        resumeRuntimeThread(thread, narg)
+    else blk: {
+        if (thread.status == LUA_YIELD) break :blk resumeCThread(thread, narg);
+        if (narg < 0 or thread.stack.items.len < @as(usize, @intCast(narg)) + 1) break :blk LUA_ERRRUN;
+        const base = thread.stack.items.len - @as(usize, @intCast(narg)) - 1;
+        break :blk switch (thread.stack.items[base]) {
+            .lua_closure => resumeRuntimeThread(thread, narg),
+            .c_closure => resumeCThread(thread, narg),
+            else => err_blk: {
+                thread.stack.items.len = base;
+                _ = pushStringBytes(thread, "attempt to call a non-function value");
+                break :err_blk LUA_ERRRUN;
+            },
+        };
+    };
+    if (status != LUA_OK and status != LUA_YIELD) {
+        thread.status = status;
+        thread.running = false;
+        thread.dead = true;
+    }
+    if (nres) |ptr| ptr.* = @intCast(if (status == LUA_YIELD) thread.resume_result_count else thread.stack.items.len);
+    return status;
 }
 
-pub export fn lua_status(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_status(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_OK;
+    return thread.status;
 }
 
-pub export fn lua_isyieldable(_: ?*lua_State) callconv(.c) c_int {
-    return 0;
+pub export fn lua_isyieldable(L: ?*lua_State) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    return if (thread != &thread.owner.main_thread and !thread.dead) 1 else 0;
 }
 
 pub export fn lua_setwarnf(_: ?*lua_State, _: lua_WarnFunction, _: ?*anyopaque) callconv(.c) void {}

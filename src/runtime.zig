@@ -77,6 +77,7 @@ pub const ProtectedCallResult = union(enum) {
 
 pub const ApiCallbackDispatchFn = *const fn (*ApiCallbackContext) anyerror!void;
 pub const CClosureDispatchFn = *const fn (*CClosureContext) anyerror!void;
+pub const CClosureResumeDispatchFn = *const fn (*CClosureResumeContext) anyerror!void;
 
 pub const CClosureContext = struct {
     state: *State,
@@ -107,6 +108,47 @@ pub const CClosureContext = struct {
     pub fn raise(self: *CClosureContext, value: Value) error{LuaError} {
         self.error_value = value;
         return error.LuaError;
+    }
+
+    pub fn yieldWithReturns(self: *CClosureContext, values: []const Value) !void {
+        self.thread.yield_values.clearRetainingCapacity();
+        try self.thread.yield_values.appendSlice(self.state.allocator, values);
+        const frame = self.thread.frames.items[self.thread.frames.items.len - 1];
+        self.thread.yield_result_base = frame.base + self.op.base;
+        self.thread.yield_result_count = self.op.return_count;
+        self.thread.pending_c_continuation = true;
+        self.thread.status = .suspended;
+        return error.CoroutineYield;
+    }
+};
+
+pub const CClosureResumeContext = struct {
+    state: *State,
+    thread: *Thread,
+    args: []const Value,
+    user_data: ?*anyopaque,
+    returns: std.ArrayList(Value) = .empty,
+    error_value: ?Value = null,
+
+    pub fn deinit(self: *CClosureResumeContext) void {
+        self.returns.deinit(self.state.allocator);
+    }
+
+    pub fn appendReturn(self: *CClosureResumeContext, value: Value) !void {
+        try self.returns.append(self.state.allocator, value);
+    }
+
+    pub fn raise(self: *CClosureResumeContext, value: Value) error{LuaError} {
+        self.error_value = value;
+        return error.LuaError;
+    }
+
+    pub fn yieldWithReturns(self: *CClosureResumeContext, values: []const Value) !void {
+        self.thread.yield_values.clearRetainingCapacity();
+        try self.thread.yield_values.appendSlice(self.state.allocator, values);
+        self.thread.pending_c_continuation = true;
+        self.thread.status = .suspended;
+        return error.CoroutineYield;
     }
 };
 
@@ -489,6 +531,7 @@ pub const Thread = struct {
     pending_unwind_error: ?Value = null,
     pending_unwind_resume_frame_count: usize = 0,
     pending_unwind_target_frame_count: usize = 0,
+    pending_c_continuation: bool = false,
     resume_parent: ?*Thread = null,
     entry: Value = .nil,
     marked: bool = false,
@@ -787,6 +830,7 @@ pub const State = struct {
     api_callback_dispatch: ?ApiCallbackDispatchFn = null,
     api_callback_user_data: ?*anyopaque = null,
     c_closure_dispatch: ?CClosureDispatchFn = null,
+    c_closure_resume_dispatch: ?CClosureResumeDispatchFn = null,
     c_closure_user_data: ?*anyopaque = null,
     coroutine_close_depth: usize = 0,
     string_metatable: ?*Table = null,
@@ -1312,6 +1356,10 @@ pub const State = struct {
         self.c_closure_user_data = user_data;
     }
 
+    pub fn setCClosureResumeDispatch(self: *State, dispatch: CClosureResumeDispatchFn) void {
+        self.c_closure_resume_dispatch = dispatch;
+    }
+
     pub fn newCClosure(self: *State, function_id: usize, upvalue_values: []const Value) !*CClosure {
         var upvalues: []*CUpvalue = if (upvalue_values.len == 0)
             &.{}
@@ -1334,6 +1382,26 @@ pub const State = struct {
         return closure;
     }
 
+    pub fn newCoroutine(self: *State, entry: Value) !*Thread {
+        return self.newCoroutineThread(entry);
+    }
+
+    pub fn resumeThread(self: *State, target: *Thread, args: []const Value) !ProtectedCallResult {
+        const result = try self.resumeCoroutine(target, args);
+        return switch (result) {
+            .success => |values| .{ .success = values },
+            .failure => |value| .{ .failure = value },
+        };
+    }
+
+    pub fn closeThread(self: *State, target: *Thread) !?Value {
+        return self.closeCoroutine(target, null);
+    }
+
+    pub fn threadWasYielded(_: *State, target: *Thread) bool {
+        return target.status == .suspended and target.started;
+    }
+
     pub fn callCClosureDispatch(self: *State, thread: *Thread, op: bytecode.Call, closure: *CClosure) !void {
         const dispatch = self.c_closure_dispatch orelse return self.fail("C closure dispatcher unavailable");
         var context = CClosureContext{
@@ -1347,12 +1415,40 @@ pub const State = struct {
 
         dispatch(&context) catch |err| switch (err) {
             error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => return err,
+            error.CoroutineYield, error.CoroutineClose => return err,
             error.LuaError => return self.failValue(context.error_value orelse .{ .string = try self.intern("C callback raised an error") }),
             error.OutOfMemory => return err,
             else => return self.fail(@errorName(err)),
         };
 
         try self.returnValues(thread, op.base, op.return_count, context.returns.items);
+    }
+
+    fn resumeCClosureDispatch(self: *State, thread: *Thread, args: []const Value) !void {
+        const dispatch = self.c_closure_resume_dispatch orelse return;
+        var context = CClosureResumeContext{
+            .state = self,
+            .thread = thread,
+            .args = args,
+            .user_data = self.c_closure_user_data,
+        };
+        defer context.deinit();
+
+        dispatch(&context) catch |err| switch (err) {
+            error.RuntimeError, error.StackOverflow, error.UnsupportedOpcode => return err,
+            error.CoroutineYield, error.CoroutineClose => return err,
+            error.LuaError => return self.failValue(context.error_value orelse .{ .string = try self.intern("C callback raised an error") }),
+            error.OutOfMemory => return err,
+            else => return self.fail(@errorName(err)),
+        };
+
+        const actual_count = try self.resolveReturnCount(thread.yield_result_count, context.returns.items.len);
+        try thread.ensureStack(self.allocator, thread.yield_result_base + actual_count, self.stackValueLimit());
+        for (0..actual_count) |index| {
+            thread.stack.items[thread.yield_result_base + index] = if (index < context.returns.items.len) context.returns.items[index] else .nil;
+        }
+        thread.last_result_base = thread.yield_result_base;
+        thread.last_result_count = actual_count;
     }
 
     pub fn callApiCallbackDispatch(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -3638,6 +3734,9 @@ pub const State = struct {
 
         if (!target.started) {
             try self.startCoroutine(target, args);
+        } else if (target.pending_c_continuation) {
+            target.pending_c_continuation = false;
+            try self.resumeCClosureDispatch(target, args);
         } else {
             try self.setCoroutineResumeValues(target, args);
         }

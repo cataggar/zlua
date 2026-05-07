@@ -1,12 +1,12 @@
 # Public Lua 5.5 C API symbol status for the zlua C API compatibility layer.
-# Phases 1-3 cover state/stack/data exchange plus non-continuation load/call/error paths.
+# Phases 1-6 cover state/stack/data exchange, userdata, closure, and coroutine paths.
 
 [symbols]
 lua_ident = "implemented"
 lua_newstate = "tested-clua-diff"
 lua_close = "tested-clua-diff"
-lua_newthread = "stubbed"
-lua_closethread = "stubbed"
+lua_newthread = "tested-clua-diff"
+lua_closethread = "tested-clua-diff"
 lua_atpanic = "tested-clua-diff"
 lua_version = "implemented"
 lua_absindex = "tested-clua-diff"
@@ -72,10 +72,10 @@ lua_callk = "tested-clua-diff"
 lua_pcallk = "tested-clua-diff"
 lua_load = "tested-clua-diff"
 lua_dump = "stubbed"
-lua_yieldk = "stubbed"
-lua_resume = "stubbed"
-lua_status = "stubbed"
-lua_isyieldable = "stubbed"
+lua_yieldk = "tested-clua-diff"
+lua_resume = "tested-clua-diff"
+lua_status = "tested-clua-diff"
+lua_isyieldable = "tested-clua-diff"
 lua_setwarnf = "stubbed"
 lua_warning = "stubbed"
 lua_gc = "implemented"
