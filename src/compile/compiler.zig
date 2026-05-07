@@ -658,11 +658,8 @@ const FunctionCompiler = struct {
                         try self.compileExprCount(value, value_reg, bytecode.multret_count);
                         _ = try self.emit(.{ .set_list = .{ .table = dest, .first = value_reg, .count = bytecode.multret_count, .start_index = array_index } });
                     } else {
-                        const key = try self.allocReg();
-                        const key_const = try self.proto.addConstant(.{ .integer = try std.fmt.allocPrint(self.proto.arena.allocator(), "{d}", .{array_index}) });
-                        _ = try self.emit(.{ .load_const = .{ .dest = key, .constant = key_const } });
                         try self.compileExpr(value, value_reg);
-                        _ = try self.emit(.{ .set_table = .{ .table = dest, .key = key, .value = value_reg } });
+                        _ = try self.emit(.{ .set_array = .{ .table = dest, .index = array_index, .value = value_reg } });
                         array_index += 1;
                     }
                 },

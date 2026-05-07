@@ -63,6 +63,7 @@ fn writeInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instr
         .set_upvalue => |op| try appendFmt(allocator, out, "SET_UPVALUE r{d} U{d}", .{ op.register, op.upvalue }),
         .get_table => |op| try appendFmt(allocator, out, "GET_TABLE r{d} r{d} r{d}", .{ op.dest, op.table, op.key }),
         .set_table => |op| try appendFmt(allocator, out, "SET_TABLE r{d} r{d} r{d}", .{ op.table, op.key, op.value }),
+        .set_array => |op| try appendFmt(allocator, out, "SET_ARRAY r{d} [{d}] r{d}", .{ op.table, op.index, op.value }),
         .get_field => |op| try appendFmt(allocator, out, "GET_FIELD r{d} r{d} K{d}", .{ op.dest, op.table, op.name }),
         .set_field => |op| try appendFmt(allocator, out, "SET_FIELD r{d} K{d} r{d}", .{ op.table, op.name, op.value }),
         .new_table => |op| try appendFmt(allocator, out, "NEW_TABLE r{d} array={d} hash={d}", .{ op.dest, op.array_hint, op.hash_hint }),

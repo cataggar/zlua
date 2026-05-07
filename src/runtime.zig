@@ -423,6 +423,11 @@ fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8)
             try appendBinaryU16(allocator, out, op.key);
             try appendBinaryU16(allocator, out, op.value);
         },
+        .set_array => |op| {
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU32(allocator, out, op.index);
+            try appendBinaryU16(allocator, out, op.value);
+        },
         .get_field => |op| {
             try appendBinaryU16(allocator, out, op.dest);
             try appendBinaryU16(allocator, out, op.table);
@@ -677,6 +682,7 @@ const BinaryChunkReader = struct {
             .set_upvalue => .{ .set_upvalue = .{ .register = try self.readU16(), .upvalue = try self.readU16() } },
             .get_table => .{ .get_table = .{ .dest = try self.readU16(), .table = try self.readU16(), .key = try self.readU16() } },
             .set_table => .{ .set_table = .{ .table = try self.readU16(), .key = try self.readU16(), .value = try self.readU16() } },
+            .set_array => .{ .set_array = .{ .table = try self.readU16(), .index = try self.readU32(), .value = try self.readU16() } },
             .get_field => .{ .get_field = .{ .dest = try self.readU16(), .table = try self.readU16(), .name = try self.readU32() } },
             .set_field => .{ .set_field = .{ .table = try self.readU16(), .name = try self.readU32(), .value = try self.readU16() } },
             .new_table => .{ .new_table = .{ .dest = try self.readU16(), .array_hint = try self.readU32(), .hash_hint = try self.readU32() } },
@@ -1401,7 +1407,6 @@ pub const State = struct {
     gc_params: GcParams = .{},
     gc_next_total: usize = 0,
     gc_known_total: usize = 0,
-    gc_allocation_dirty: bool = true,
     mark_all_stack_registers: bool = false,
     conservative_gc_depth: usize = 0,
     random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
@@ -1693,11 +1698,29 @@ pub const State = struct {
                     const key_value = stack[base + op.key];
                     const value = stack[base + op.value];
                     if (!try self.fastTableArraySet(table_value, key_value, value)) {
-                        try self.setTableFromThreadContinuable(thread, table_value, key_value, value);
+                        if (key_value != .string or !try self.fastTableKnownKeySet(table_value, key_value, value)) {
+                            try self.setTableFromThreadContinuable(thread, table_value, key_value, value);
+                        }
+                    }
+                },
+                .set_array => |op| {
+                    const table_value = stack[base + op.table];
+                    const value = stack[base + op.value];
+                    if (table_value == .table and op.index != 0) {
+                        try self.setTableArrayRawIndex(table_value.table, op.index, value);
+                    } else {
+                        try self.setTableFromThreadContinuable(thread, table_value, .{ .integer = @intCast(op.index) }, value);
                     }
                 },
                 .get_field => |op| try self.getTableToRegister(thread, op.dest, stack[base + op.table], .{ .string = constantString(proto, op.name) }),
-                .set_field => |op| try self.setTableFromThreadContinuable(thread, stack[base + op.table], .{ .string = constantString(proto, op.name) }, stack[base + op.value]),
+                .set_field => |op| {
+                    const table_value = stack[base + op.table];
+                    const key = Value{ .string = constantString(proto, op.name) };
+                    const value = stack[base + op.value];
+                    if (!try self.fastTableKnownKeySet(table_value, key, value)) {
+                        try self.setTableFromThreadContinuable(thread, table_value, key, value);
+                    }
+                },
                 .jmp => |offset| try self.jumpThreadMaybeFast(thread, offset, true),
                 .compare_branch => |op| try self.compareBranch(thread, op),
                 .test_op => |op| if (truthy(stack[base + op.register]) == op.jump_if_truthy) {
@@ -1749,34 +1772,56 @@ pub const State = struct {
         }
     }
 
-    fn noteAllocationChanged(self: *State) void {
-        self.gc_allocation_dirty = true;
+    fn noteAllocation(self: *State, bytes: usize) void {
+        self.gc_known_total = self.gc_known_total +| bytes;
+    }
+
+    fn noteAllocationFreed(self: *State, bytes: usize) void {
+        self.gc_known_total = if (bytes > self.gc_known_total) 0 else self.gc_known_total - bytes;
     }
 
     fn refreshAllocationTotal(self: *State) usize {
         const total = self.allocationStats().total();
         self.gc_known_total = total;
-        self.gc_allocation_dirty = false;
         return total;
     }
 
     fn currentAllocationTotal(self: *State) usize {
-        return if (self.gc_allocation_dirty) self.refreshAllocationTotal() else self.gc_known_total;
+        return self.gc_known_total;
     }
 
     fn tableCapacityBytes(table: *const Table) usize {
         return table.array.capacity * @sizeOf(Value) + table.entries.capacity * @sizeOf(TableEntry);
     }
 
+    fn tableGcBytes(table: *const Table) usize {
+        if (!table.counts_for_gc_count) return 0;
+        return @sizeOf(Table) + tableCapacityBytes(table);
+    }
+
+    fn noteTableCapacityDelta(self: *State, table: *const Table, old_capacity_bytes: usize) void {
+        if (!table.counts_for_gc_count) return;
+        const new_capacity_bytes = tableCapacityBytes(table);
+        if (new_capacity_bytes > old_capacity_bytes) self.noteAllocation(new_capacity_bytes - old_capacity_bytes);
+    }
+
     fn setTableRaw(self: *State, table: *Table, key: Value, value: Value) !void {
         const old_capacity_bytes = tableCapacityBytes(table);
         try table.set(self.allocator, key, value);
-        if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+        self.noteTableCapacityDelta(table, old_capacity_bytes);
     }
 
     fn fastTableArraySet(self: *State, table_value: Value, key_value: Value, value: Value) !bool {
         if (table_value != .table) return false;
         const index = arrayIndex(key_value) orelse return false;
+        if (index > std.math.maxInt(u32)) return false;
+        return self.fastTableArraySetIndex(table_value, @intCast(index), value);
+    }
+
+    fn fastTableArraySetIndex(self: *State, table_value: Value, index_u32: u32, value: Value) !bool {
+        if (table_value != .table or index_u32 == 0) return false;
+        const index: usize = index_u32;
+        const key_value = Value{ .integer = @intCast(index_u32) };
         const table = table_value.table;
         if (index <= table.array.items.len) {
             const slot = &table.array.items[index - 1];
@@ -1792,7 +1837,7 @@ pub const State = struct {
             const old_capacity_bytes = tableCapacityBytes(table);
             try table.array.append(self.allocator, value);
             table.removeHashKey(key_value);
-            if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+            self.noteTableCapacityDelta(table, old_capacity_bytes);
             self.writeTableBarrier(table, key_value, value);
             return true;
         }
@@ -1804,8 +1849,52 @@ pub const State = struct {
         @memset(table.array.items[old_len..], .nil);
         table.array.items[index - 1] = value;
         table.removeHashKey(key_value);
-        if (tableCapacityBytes(table) != old_capacity_bytes) self.noteAllocationChanged();
+        self.noteTableCapacityDelta(table, old_capacity_bytes);
         self.writeTableBarrier(table, key_value, value);
+        return true;
+    }
+
+    fn setTableArrayRawIndex(self: *State, table: *Table, index_u32: u32, value: Value) !void {
+        const index: usize = index_u32;
+        const key = Value{ .integer = @intCast(index_u32) };
+        if (index <= table.array.items.len) {
+            table.array.items[index - 1] = value;
+            self.writeTableBarrier(table, key, value);
+            return;
+        }
+        if (value == .nil) return;
+        if (index == table.array.items.len + 1) {
+            const old_capacity_bytes = tableCapacityBytes(table);
+            try table.array.append(self.allocator, value);
+            self.noteTableCapacityDelta(table, old_capacity_bytes);
+            self.writeTableBarrier(table, key, value);
+            return;
+        }
+        if (index <= table.array.capacity) {
+            const old_capacity_bytes = tableCapacityBytes(table);
+            const old_len = table.array.items.len;
+            try table.array.resize(self.allocator, index);
+            @memset(table.array.items[old_len..], .nil);
+            table.array.items[index - 1] = value;
+            self.noteTableCapacityDelta(table, old_capacity_bytes);
+            self.writeTableBarrier(table, key, value);
+            return;
+        }
+        try self.setTableRaw(table, key, value);
+        self.writeTableBarrier(table, key, value);
+    }
+
+    fn fastTableKnownKeySet(self: *State, table_value: Value, key: Value, value: Value) !bool {
+        if (table_value != .table) return false;
+        const table = table_value.table;
+        if (table.setExistingNonNil(key, value)) {
+            self.writeTableBarrier(table, key, value);
+            return true;
+        }
+        if (table.metatable != null) return false;
+        if (value == .nil) return true;
+        try self.setTableRaw(table, key, value);
+        self.writeTableBarrier(table, key, value);
         return true;
     }
 
@@ -2088,7 +2177,7 @@ pub const State = struct {
             errdefer self.allocator.destroy(upvalue);
             upvalue.* = .{ .value = value };
             try self.c_upvalue_allocations.append(self.allocator, upvalue);
-            self.noteAllocationChanged();
+            self.noteAllocation(@sizeOf(CUpvalue));
             upvalues[index] = upvalue;
         }
 
@@ -2096,7 +2185,7 @@ pub const State = struct {
         closure.* = .{ .function_id = function_id, .upvalues = upvalues };
         errdefer self.destroyCClosure(closure);
         try self.c_closure_allocations.append(self.allocator, closure);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(CClosure));
         return closure;
     }
 
@@ -2410,7 +2499,7 @@ pub const State = struct {
         const constants = try self.allocator.alloc(?Value, proto.constants.items.len);
         errdefer self.allocator.free(constants);
         @memset(constants, null);
-        self.noteAllocationChanged();
+        self.noteAllocation(constants.len * @sizeOf(?Value));
         return constants;
     }
 
@@ -2427,7 +2516,7 @@ pub const State = struct {
         try self.string_allocations.append(self.allocator, .{ .bytes = allocated });
         errdefer _ = self.string_allocations.pop();
         if (allocated.len != 0) try self.string_allocation_index.put(@intFromPtr(allocated.ptr), self.string_allocations.items.len - 1);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(StringAllocation) + allocated.len);
         return allocated;
     }
 
@@ -2557,7 +2646,7 @@ pub const State = struct {
         try self.table_allocations.append(self.allocator, table);
         errdefer _ = self.table_allocations.pop();
         try self.table_allocation_index.put(@intFromPtr(table), self.table_allocations.items.len - 1);
-        self.noteAllocationChanged();
+        self.noteAllocation(tableGcBytes(table));
         return .{ .table = table };
     }
 
@@ -2573,7 +2662,7 @@ pub const State = struct {
             .deinit_fn = deinit_fn,
         };
         try self.userdata_allocations.append(self.allocator, userdata);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Userdata));
         return .{ .userdata = userdata };
     }
 
@@ -2598,7 +2687,7 @@ pub const State = struct {
                 .is_open = false,
             };
             try self.upvalue_allocations.append(self.allocator, upvalue);
-            self.noteAllocationChanged();
+            self.noteAllocation(@sizeOf(Upvalue));
             upvalues[index] = upvalue;
         }
 
@@ -2606,7 +2695,7 @@ pub const State = struct {
         errdefer self.allocator.destroy(closure);
         closure.* = .{ .proto = proto, .upvalues = upvalues };
         try self.closure_allocations.append(self.allocator, closure);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Closure));
         return closure;
     }
 
@@ -2631,7 +2720,7 @@ pub const State = struct {
                 .is_open = false,
             };
             try self.upvalue_allocations.append(self.allocator, upvalue);
-            self.noteAllocationChanged();
+            self.noteAllocation(@sizeOf(Upvalue));
             upvalues[index] = upvalue;
         }
 
@@ -2639,7 +2728,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Closure));
         return .{ .closure = closure };
     }
 
@@ -2658,7 +2747,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues, .stripped_debug = parent.closure.stripped_debug };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Closure));
         return .{ .closure = closure };
     }
 
@@ -2672,7 +2761,7 @@ pub const State = struct {
         errdefer self.allocator.destroy(upvalue);
         upvalue.* = .{ .owner = thread, .stack_index = stack_index, .next = thread.open_upvalues };
         try self.upvalue_allocations.append(self.allocator, upvalue);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Upvalue));
         thread.open_upvalues = upvalue;
         return upvalue;
     }
@@ -4104,6 +4193,7 @@ pub const State = struct {
     fn namedVarargTable(self: *State, varargs: []const Value) !Value {
         const table_value = try self.newTableWithHints(@intCast(varargs.len), 1);
         const table = table_value.table;
+        self.noteAllocationFreed(tableGcBytes(table));
         table.counts_for_gc_count = false;
         try self.setTableRaw(table, .{ .string = try self.intern("n") }, .{ .integer = @intCast(varargs.len) });
         for (varargs, 0..) |value, index| {
@@ -4172,11 +4262,48 @@ pub const State = struct {
     fn setList(self: *State, thread: *Thread, op: bytecode.SetList) !void {
         const frame = thread.frames.items[thread.frames.items.len - 1];
         const source_start = frame.base + op.first;
-        const count = if (op.count == bytecode.multret_count) try self.resolveResultCount(thread, source_start, bytecode.multret_count) else op.count;
+        const count: usize = if (op.count == bytecode.multret_count) try self.resolveResultCount(thread, source_start, bytecode.multret_count) else op.count;
         const table_value = self.get(thread, op.table);
+        if (try self.fastSetListRaw(thread, table_value, source_start, count, op.start_index)) return;
         for (0..count) |index| {
-            try self.setTable(table_value, .{ .integer = @intCast(op.start_index + index) }, thread.stack.items[source_start + index]);
+            const array_index = @as(usize, op.start_index) + index;
+            try self.setTable(table_value, .{ .integer = @intCast(array_index) }, thread.stack.items[source_start + index]);
         }
+    }
+
+    fn fastSetListRaw(self: *State, thread: *Thread, table_value: Value, source_start: usize, count: usize, start_index_u32: u32) !bool {
+        if (table_value != .table or start_index_u32 == 0) return false;
+        const table = table_value.table;
+        if (table.metatable != null) return false;
+
+        const start_index: usize = start_index_u32;
+        var grow_to = table.array.items.len;
+        for (0..count) |offset| {
+            if (offset > std.math.maxInt(usize) - start_index) return self.fail("table overflow");
+            const array_index = start_index + offset;
+            if (array_index > std.math.maxInt(i64)) return false;
+            if (thread.stack.items[source_start + offset] != .nil and array_index > grow_to) grow_to = array_index;
+        }
+
+        if (grow_to > table.array.items.len and start_index > table.array.items.len + 1 and grow_to > table.array.capacity) return false;
+        if (grow_to > table.array.items.len) {
+            const old_capacity_bytes = tableCapacityBytes(table);
+            const old_len = table.array.items.len;
+            try table.array.resize(self.allocator, grow_to);
+            @memset(table.array.items[old_len..], .nil);
+            self.noteTableCapacityDelta(table, old_capacity_bytes);
+        }
+
+        for (0..count) |offset| {
+            const array_index = start_index + offset;
+            if (array_index > table.array.items.len) continue;
+            const value = thread.stack.items[source_start + offset];
+            table.array.items[array_index - 1] = value;
+            const key = Value{ .integer = @intCast(array_index) };
+            if (value != .nil) table.removeHashKey(key);
+            self.writeTableBarrier(table, key, value);
+        }
+        return true;
     }
 
     fn selectValues(self: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -4537,7 +4664,7 @@ pub const State = struct {
         thread.* = Thread.initCoroutine(entry);
         errdefer thread.deinit(self.allocator);
         try self.thread_allocations.append(self.allocator, thread);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Thread));
         return thread;
     }
 
@@ -4684,7 +4811,7 @@ pub const State = struct {
         closure.* = .{ .proto = proto, .upvalues = upvalues };
         errdefer self.destroyClosure(closure);
         try self.closure_allocations.append(self.allocator, closure);
-        self.noteAllocationChanged();
+        self.noteAllocation(@sizeOf(Closure));
         return closure;
     }
 

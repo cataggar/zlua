@@ -40,6 +40,7 @@ pub const Instruction = union(enum) {
     set_upvalue: UpvalueAccess,
     get_table: TableAccess,
     set_table: TableSet,
+    set_array: ArraySet,
     get_field: FieldAccess,
     set_field: FieldSet,
 
@@ -131,6 +132,12 @@ pub const TableAccess = struct {
 pub const TableSet = struct {
     table: Register,
     key: Register,
+    value: Register,
+};
+
+pub const ArraySet = struct {
+    table: Register,
+    index: u32,
     value: Register,
 };
 
