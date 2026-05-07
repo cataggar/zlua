@@ -1,6 +1,6 @@
 # Contributing
 
-zlua is compatibility-driven. When Lua-visible behavior is in question, use the vendored Lua 5.5 implementation as the oracle and add a regression test.
+zlua is compatibility-driven. When Lua-visible behavior is in question, use the official Lua 5.5 implementation as the oracle and add a regression test.
 
 ## Toolchain
 
@@ -10,7 +10,11 @@ Use Zig `0.16.0`.
 zig version
 ```
 
-The build creates the vendored CLua oracle from `vendor/lua-5.5.0/src`, so a system Lua install is not required for normal development.
+The build downloads Lua 5.5 source and official tests into `.zlua-deps/` and builds the CLua oracle from there, so a system Lua install is not required for normal development.
+
+```sh
+zig build fetch-lua
+```
 
 ## Development Loop
 
@@ -67,7 +71,7 @@ Expected failures should be rare, documented with a reason, and removed as soon 
 
 ## Official Tests
 
-The official Lua 5.5 dashboard runs each vendored official file individually, excluding `all.lua`.
+The official Lua 5.5 dashboard runs each downloaded official file individually, excluding `all.lua`.
 
 ```sh
 zig build test-official

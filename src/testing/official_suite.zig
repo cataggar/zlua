@@ -3,10 +3,10 @@ const clua = @import("clua.zig");
 const process = @import("process.zig");
 
 const expected_archive_sha256 = "5e47bbfad7db2965d69580e918ee64edeb8d8d32de404b8dae9ce5c6d76a1472";
-const archive_path = "vendor/lua-5.5.0-tests.tar.gz";
+const archive_path = ".zlua-deps/lua-5.5.0-tests.tar.gz";
 
 const Options = struct {
-    suite_path: []const u8 = "tests/official/lua-5.5.0-tests",
+    suite_path: []const u8 = ".zlua-deps/lua-5.5.0-tests",
     file_args: []const []const u8 = &.{},
     clua: ?[]const u8 = null,
     zlua: ?[]const u8 = null,

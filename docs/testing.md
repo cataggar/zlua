@@ -1,6 +1,6 @@
 # Testing
 
-zlua treats the vendored Lua 5.5 C implementation as the behavioral oracle. The main rule is simple: when Lua-visible behavior is in question, compare against CLua and keep the fixture.
+zlua treats the official Lua 5.5 C implementation as the behavioral oracle. The build downloads that implementation into `.zlua-deps/` and builds it locally. The main rule is simple: when Lua-visible behavior is in question, compare against CLua and keep the fixture.
 
 ## Test Layers
 
@@ -17,7 +17,7 @@ CI currently runs `zig build ci` on code changes. Markdown-only changes are igno
 
 ## CLua Oracle
 
-The build creates `zig-out/bin/lua5.5` from `vendor/lua-5.5.0/src`. Test harnesses discover CLua in this order:
+The build creates `zig-out/bin/lua5.5` from `.zlua-deps/lua-5.5.0/src`. Test harnesses discover CLua in this order:
 
 ```text
 explicit --clua option
@@ -28,7 +28,7 @@ lua5.5.0
 lua
 ```
 
-Normal `zig build` and `just` workflows use the vendored binary, so a system Lua installation is not required.
+Normal `zig build` and `just` workflows use the downloaded binary, so a system Lua installation is not required.
 
 ## Differential Fixtures
 
@@ -99,13 +99,13 @@ At the time this documentation was written, `tests/fixtures/expected_failures.to
 
 ## Official Lua 5.5 Suite
 
-The official tests are vendored as `vendor/lua-5.5.0-tests.tar.gz` and extracted under `tests/official/lua-5.5.0-tests`. `src/testing/official_suite.zig` verifies the archive SHA-256 before running the dashboard.
+The official tests are downloaded as `.zlua-deps/lua-5.5.0-tests.tar.gz` and extracted under `.zlua-deps/lua-5.5.0-tests`. `src/testing/official_suite.zig` verifies the archive SHA-256 before running the dashboard.
 
 Default behavior:
 
 | Setting | Value |
 | --- | --- |
-| Suite path | `tests/official/lua-5.5.0-tests` |
+| Suite path | `.zlua-deps/lua-5.5.0-tests` |
 | Files | Every top-level `.lua` file except `all.lua` |
 | Mode | `basic` |
 | Basic prelude | `_U=true; _soft=true; _port=true; _nomsg=true; T=nil; ARG=arg` |
@@ -126,7 +126,7 @@ The harness parses `--mode=internal`, but internal `testC`-enabled CLua/zlua bui
 
 ## C API Fixtures
 
-The C API layer builds `zlua-c` from `src/c_api.zig` and installs the vendored Lua 5.5 headers. The fixture harness compiles each C file under `tests/c-api` twice: once against CLua and once against zlua. A fixture passes when both variants build, run, and produce compatible behavior.
+The C API layer builds `zlua-c` from `src/c_api.zig` and installs the downloaded Lua 5.5 headers. The fixture harness compiles each C file under `tests/c-api` twice: once against CLua and once against zlua. A fixture passes when both variants build, run, and produce compatible behavior.
 
 Run all C API fixtures:
 

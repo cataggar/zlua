@@ -1,6 +1,6 @@
 # Architecture
 
-zlua is a source-compatible Lua 5.5 implementation written in Zig. It has a conventional frontend/compiler/runtime split, but the most important architectural choice is that compatibility is oracle-driven: the vendored Lua 5.5 C implementation is the behavioral source of truth for parser acceptance, runtime semantics, standard-library behavior, error paths, and C API behavior.
+zlua is a source-compatible Lua 5.5 implementation written in Zig. It has a conventional frontend/compiler/runtime split, but the most important architectural choice is that compatibility is oracle-driven: the official Lua 5.5 C implementation is the behavioral source of truth for parser acceptance, runtime semantics, standard-library behavior, error paths, and C API behavior.
 
 This document describes how the implementation fits together. It intentionally focuses on ownership, data flow, subsystem boundaries, and invariants instead of just listing files.
 
@@ -16,7 +16,7 @@ The project has five major runtime-facing surfaces:
 | Standard libraries | `src/stdlib.zig` and `src/stdlib/` | Lua-visible library functions implemented as runtime-native functions. |
 | C API layer | `src/c_api.zig` | Lua 5.5 C API compatibility shim backed by zlua runtime objects where practical and separate C-facing stack/value wrappers where required. |
 
-The testing and benchmark harnesses are first-class build artifacts, not external scripts. They live under `src/testing/` and use the same vendored CLua oracle as the rest of the project.
+The testing and benchmark harnesses are first-class build artifacts, not external scripts. They live under `src/testing/` and use the same downloaded CLua oracle as the rest of the project.
 
 ## Build Graph
 
@@ -25,7 +25,7 @@ The testing and benchmark harnesses are first-class build artifacts, not externa
 | Artifact | Source | Purpose |
 | --- | --- | --- |
 | `zlua` | `src/main.zig` | CLI executable. |
-| `lua5.5` | `vendor/lua-5.5.0/src` | Vendored CLua oracle. |
+| `lua5.5` | `.zlua-deps/lua-5.5.0/src` | Downloaded CLua oracle. |
 | `zlua-test-diff` | `src/test_diff_main.zig` | Differential fixture runner. |
 | `zlua-test-official` | `src/test_official_main.zig` | Official Lua 5.5 dashboard runner. |
 | `zlua-test-bench` | `src/test_bench_main.zig` | Process-level benchmark runner. |
@@ -309,7 +309,7 @@ The core embedding rule is that host-owned references should be explicit and sho
 
 ## C API Layer
 
-`src/c_api.zig` exposes Lua 5.5 C symbols and installs the vendored Lua headers. It is not a simple direct export of `runtime.State`; it has C-facing wrapper types for stack values, strings, tables, userdata, threads, light userdata, Lua closures, C closures, and runtime-native functions.
+`src/c_api.zig` exposes Lua 5.5 C symbols and installs the downloaded Lua headers. It is not a simple direct export of `runtime.State`; it has C-facing wrapper types for stack values, strings, tables, userdata, threads, light userdata, Lua closures, C closures, and runtime-native functions.
 
 The C API layer must satisfy different constraints from the Zig API:
 

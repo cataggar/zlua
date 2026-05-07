@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const lua_deps_root = ".zlua-deps";
+const lua_source_root = lua_deps_root ++ "/lua-5.5.0/src";
+
 const EmbeddingExample = struct {
     key: []const u8,
     name: []const u8,
@@ -12,9 +15,11 @@ pub fn build(b: *std.Build) void {
     const official_memory_limit_mb = b.option(u64, "official-memory-limit-mb", "Memory cap per official-suite child process in MiB (0 disables)") orelse 256;
     const example_filter = b.option([]const u8, "example", "Embedding example to run by file name or basename") orelse null;
 
+    const lua_deps_step = addFetchLuaStep(b);
+
     const clua_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
-    const clua_exe = addVendoredClua(b, target, clua_optimize);
-    const clua_lib = addVendoredCluaLib(b, target, clua_optimize);
+    const clua_exe = addClua(b, target, clua_optimize, lua_deps_step);
+    const clua_lib = addCluaLib(b, target, clua_optimize, lua_deps_step);
     b.installArtifact(clua_exe);
 
     const mod = b.addModule("zlua", .{
@@ -38,10 +43,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lua.h"), "lua.h");
-    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lauxlib.h"), "lauxlib.h");
-    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/lualib.h"), "lualib.h");
-    zlua_c_lib.installHeader(b.path("vendor/lua-5.5.0/src/luaconf.h"), "luaconf.h");
+    zlua_c_lib.step.dependOn(lua_deps_step);
+    zlua_c_lib.installHeader(b.path(lua_source_root ++ "/lua.h"), "lua.h");
+    zlua_c_lib.installHeader(b.path(lua_source_root ++ "/lauxlib.h"), "lauxlib.h");
+    zlua_c_lib.installHeader(b.path(lua_source_root ++ "/lualib.h"), "lualib.h");
+    zlua_c_lib.installHeader(b.path(lua_source_root ++ "/luaconf.h"), "luaconf.h");
 
     const exe = b.addExecutable(.{
         .name = "zlua",
@@ -187,11 +193,11 @@ pub fn build(b: *std.Build) void {
     c_api_test_cmd.addArg("--zig");
     c_api_test_cmd.addArg(b.graph.zig_exe);
     c_api_test_cmd.addArg("--clua-include");
-    c_api_test_cmd.addDirectoryArg(b.path("vendor/lua-5.5.0/src"));
+    c_api_test_cmd.addDirectoryArg(b.path(lua_source_root));
     c_api_test_cmd.addArg("--clua-lib");
     c_api_test_cmd.addArtifactArg(clua_lib);
     c_api_test_cmd.addArg("--zlua-include");
-    c_api_test_cmd.addDirectoryArg(b.path("vendor/lua-5.5.0/src"));
+    c_api_test_cmd.addDirectoryArg(b.path(lua_source_root));
     c_api_test_cmd.addArg("--zlua-lib");
     c_api_test_cmd.addArtifactArg(zlua_c_lib);
     if (b.args) |args| c_api_test_cmd.addArgs(args);
@@ -237,10 +243,18 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(official_step);
 }
 
-fn addVendoredClua(
+fn addFetchLuaStep(b: *std.Build) *std.Build.Step {
+    const fetch_cmd = b.addSystemCommand(&.{ "sh", "tools/fetch-lua.sh", lua_deps_root });
+    const fetch_step = b.step("fetch-lua", "Download and extract Lua 5.5 source and official tests");
+    fetch_step.dependOn(&fetch_cmd.step);
+    return fetch_step;
+}
+
+fn addClua(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    lua_deps_step: *std.Build.Step,
 ) *std.Build.Step.Compile {
     const lua_sources = [_][]const u8{
         "lapi.c",
@@ -283,10 +297,10 @@ fn addVendoredClua(
         .optimize = optimize,
         .link_libc = true,
     });
-    const clua_cflags = vendoredCluaCFlags(target);
+    const clua_cflags = cluaCFlags(target);
 
     clua_mod.addCSourceFiles(.{
-        .root = b.path("vendor/lua-5.5.0/src"),
+        .root = b.path(lua_source_root),
         .files = &lua_sources,
         .flags = clua_cflags,
     });
@@ -297,16 +311,19 @@ fn addVendoredClua(
         clua_mod.linkSystemLibrary("dl", .{});
     }
 
-    return b.addExecutable(.{
+    const exe = b.addExecutable(.{
         .name = "lua5.5",
         .root_module = clua_mod,
     });
+    exe.step.dependOn(lua_deps_step);
+    return exe;
 }
 
-fn addVendoredCluaLib(
+fn addCluaLib(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    lua_deps_step: *std.Build.Step,
 ) *std.Build.Step.Compile {
     const lua_sources = [_][]const u8{
         "lapi.c",
@@ -349,9 +366,9 @@ fn addVendoredCluaLib(
         .link_libc = true,
     });
     clua_mod.addCSourceFiles(.{
-        .root = b.path("vendor/lua-5.5.0/src"),
+        .root = b.path(lua_source_root),
         .files = &lua_sources,
-        .flags = vendoredCluaCFlags(target),
+        .flags = cluaCFlags(target),
     });
     if (target.result.os.tag != .windows) {
         clua_mod.linkSystemLibrary("m", .{});
@@ -360,14 +377,16 @@ fn addVendoredCluaLib(
         clua_mod.linkSystemLibrary("dl", .{});
     }
 
-    return b.addLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "lua5.5-core",
         .linkage = .static,
         .root_module = clua_mod,
     });
+    lib.step.dependOn(lua_deps_step);
+    return lib;
 }
 
-fn vendoredCluaCFlags(target: std.Build.ResolvedTarget) []const []const u8 {
+fn cluaCFlags(target: std.Build.ResolvedTarget) []const []const u8 {
     return switch (target.result.os.tag) {
         .linux => &.{ "-std=gnu99", "-DLUA_USE_LINUX" },
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ "-std=gnu99", "-DLUA_USE_POSIX" },

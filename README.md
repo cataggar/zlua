@@ -1,21 +1,27 @@
 # zlua
 
-zlua is a Zig implementation of Lua 5.5. It includes a CLI, a Zig-native embedding API, a Lua C API compatibility layer, standard libraries, differential tests against the vendored Lua 5.5 implementation, and the official Lua 5.5 test dashboard.
+zlua is a Zig implementation of Lua 5.5. It includes a CLI, a Zig-native embedding API, a Lua C API compatibility layer, standard libraries, differential tests against the Lua 5.5 implementation, and the official Lua 5.5 test dashboard.
 
 The project targets Zig `0.16.0`.
 
 ## Status
 
-zlua is compatibility-driven and uses the vendored Lua 5.5 C implementation as its behavioral oracle. The default CI-equivalent check runs unit tests, embedding examples, CLua differential fixtures, and the official Lua 5.5 dashboard.
+zlua is compatibility-driven and uses the official Lua 5.5 C implementation as its behavioral oracle. The build downloads the source and official tests into `.zlua-deps/` when needed. The default CI-equivalent check runs unit tests, embedding examples, CLua differential fixtures, and the official Lua 5.5 dashboard.
 
 The C API layer has its own build and differential fixture harness and is tracked separately from the default CI aggregate.
 
 ## Quick Start
 
-Build the CLI and vendored CLua oracle:
+Build the CLI and downloaded CLua oracle:
 
 ```sh
 zig build
+```
+
+Download the Lua source and official tests explicitly:
+
+```sh
+zig build fetch-lua
 ```
 
 Run zlua:
@@ -90,10 +96,9 @@ Historical planning documents live under `docs/old/` and are not authoritative.
 src/              implementation
 examples/embed/   Zig embedding examples
 tests/diff/       Lua differential fixtures
-tests/official/   vendored official Lua 5.5 tests
 tests/c-api/      Lua C API differential fixtures
 tests/bench/      benchmark fixtures
-vendor/           vendored Lua 5.5 sources and tests
+.zlua-deps/       ignored downloaded Lua source and official tests
 docs/             current documentation
 ```
 

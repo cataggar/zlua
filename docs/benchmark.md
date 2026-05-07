@@ -1,6 +1,6 @@
 # Benchmarking
 
-zlua benchmarks are comparison tools, not correctness gates. The benchmark harness runs Lua benchmark files with the vendored CLua oracle and a ReleaseFast zlua binary, records process-level timings, and reports zlua/CLua ratios.
+zlua benchmarks are comparison tools, not correctness gates. The benchmark harness runs Lua benchmark files with the downloaded CLua oracle and a ReleaseFast zlua binary, records process-level timings, and reports zlua/CLua ratios.
 
 ## Commands
 

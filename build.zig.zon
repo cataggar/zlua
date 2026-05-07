@@ -71,14 +71,16 @@
     // the build root itself.
     // A directory listed here means that all files within, recursively, are included.
     .paths = .{
+        "README.md",
+        "LICENSE",
+        "CONTRIBUTING.md",
         "build.zig",
         "build.zig.zon",
+        "justfile",
         "src",
         "tests",
-        "vendor",
+        "tools",
+        "docs",
         ".github",
-        // For example...
-        //"LICENSE",
-        //"README.md",
     },
 }

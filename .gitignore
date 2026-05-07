@@ -3,3 +3,8 @@
 zig-cache/
 zig-out/
 *.tmp
+
+# Downloaded Lua oracle sources and official tests
+.zlua-deps/
+vendor/
+tests/official/lua-5.5.0-tests/

@@ -8,9 +8,13 @@ clua := "zig-out/bin/lua5.5"
 default:
     @just --list
 
-# Build zlua and the vendored Lua 5.5 oracle.
+# Build zlua and the downloaded Lua 5.5 oracle.
 build:
     {{zig}} build
+
+# Download and extract Lua 5.5 source and official tests.
+fetch-lua:
+    {{zig}} build fetch-lua
 
 # Build with ReleaseSafe optimization.
 release:
@@ -40,11 +44,11 @@ run *args:
 version:
     {{zig}} build run -- --version
 
-# Print vendored CLua version.
+# Print downloaded CLua version.
 clua-version: build
     {{clua}} -v
 
-# Run the differential harness with the vendored CLua oracle.
+# Run the differential harness with the downloaded CLua oracle.
 diff *args:
     {{zig}} build --summary all run-test-diff -- --debug-errors {{args}}
 

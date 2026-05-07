@@ -18,6 +18,7 @@ Historical planning and status documents live in [old](old/). They can be useful
 
 ```sh
 zig build ci
+zig build fetch-lua
 zig build test
 zig build test-diff
 zig build test-official
@@ -25,4 +26,4 @@ zig build examples
 just bench
 ```
 
-The build uses Zig `0.16.0` and builds the vendored Lua 5.5 implementation as the behavioral oracle. A system Lua installation is not required for normal build, test, or benchmark workflows.
+The build uses Zig `0.16.0`, downloads Lua 5.5 source and official tests into `.zlua-deps/`, and builds CLua as the behavioral oracle. A system Lua installation is not required for normal build, test, or benchmark workflows.
