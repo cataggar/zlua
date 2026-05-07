@@ -484,7 +484,7 @@ fn newFile(state: *State, path: []const u8, mode: []const u8, contents: []const 
     try file.set(state.allocator, .{ .string = try state.intern("flush") }, .{ .native = .io_file_flush });
     try file.set(state.allocator, .{ .string = try state.intern("lines") }, .{ .native = .io_file_lines });
     try file.set(state.allocator, .{ .string = try state.intern("setvbuf") }, .{ .native = .io_file_setvbuf });
-    file.metatable = try state.fileMetatable();
+    state.setTableMetatableRaw(file, try state.fileMetatable());
     return value;
 }
 

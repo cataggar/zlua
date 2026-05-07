@@ -823,6 +823,7 @@ const CoroutineResumeResult = union(enum) {
 pub const Closure = struct {
     proto: *const proto_mod.Proto,
     upvalues: []*Upvalue,
+    constants: ?[]?Value = null,
     stripped_debug: bool = false,
     marked: bool = false,
 };
@@ -869,6 +870,8 @@ pub const Table = struct {
     entries: std.ArrayList(TableEntry) = .empty,
     entry_index: TableEntryIndex,
     metatable: ?*Table = null,
+    metatable_prev: ?*Table = null,
+    metatable_next: ?*Table = null,
     counts_for_gc_count: bool = true,
     marked: bool = false,
     finalized: bool = false,
@@ -1135,6 +1138,7 @@ const StringAllocation = struct {
     bytes: []const u8,
     marked: bool = false,
 };
+const PointerAllocationIndex = std.AutoHashMap(usize, usize);
 
 pub const GcMode = enum {
     incremental,
@@ -1331,6 +1335,9 @@ pub const State = struct {
     strings: std.StringHashMap([]const u8),
     string_allocations: std.ArrayList(StringAllocation) = .empty,
     table_allocations: std.ArrayList(*Table) = .empty,
+    table_allocation_index: PointerAllocationIndex,
+    table_metatable_head: ?*Table = null,
+    table_metatable_count: usize = 0,
     userdata_allocations: std.ArrayList(*Userdata) = .empty,
     closure_allocations: std.ArrayList(*Closure) = .empty,
     c_closure_allocations: std.ArrayList(*CClosure) = .empty,
@@ -1381,6 +1388,7 @@ pub const State = struct {
             .allocator = allocator,
             .globals = std.StringHashMap(Value).init(allocator),
             .strings = std.StringHashMap([]const u8).init(allocator),
+            .table_allocation_index = PointerAllocationIndex.init(allocator),
             .options = options,
         };
         errdefer state.deinit();
@@ -1411,6 +1419,7 @@ pub const State = struct {
         self.stderr.deinit(self.allocator);
         self.globals.deinit();
         self.strings.deinit();
+        self.table_allocation_index.deinit();
         for (self.thread_allocations.items) |thread| self.destroyThread(thread);
         for (self.closure_allocations.items) |closure| self.destroyClosure(closure);
         for (self.c_closure_allocations.items) |closure| self.destroyCClosure(closure);
@@ -1561,7 +1570,7 @@ pub const State = struct {
             switch (instruction) {
                 .load_nil => |dest| self.set(thread, dest, .nil),
                 .load_bool => |op| self.set(thread, op.dest, .{ .boolean = op.value }),
-                .load_const => |op| self.set(thread, op.dest, try self.loadConstant(proto.constants.items[op.constant])),
+                .load_const => |op| self.set(thread, op.dest, try self.closureConstant(frame.closure, op.constant)),
                 .move => |op| self.set(thread, op.dest, self.get(thread, op.source)),
                 .get_global => |op| self.set(thread, op.register, self.getGlobalValue(constantString(proto, op.name))),
                 .set_global => |op| try self.setGlobal(constantString(proto, op.name), self.get(thread, op.register)),
@@ -2248,6 +2257,21 @@ pub const State = struct {
         };
     }
 
+    fn closureConstant(self: *State, closure: *Closure, index: bytecode.ConstantIndex) !Value {
+        if (closure.constants == null) closure.constants = try self.allocateConstantCache(closure.proto);
+        const constants = closure.constants.?;
+        if (constants[index] == null) constants[index] = try self.loadConstant(closure.proto.constants.items[index]);
+        return constants[index].?;
+    }
+
+    fn allocateConstantCache(self: *State, proto: *const proto_mod.Proto) ![]?Value {
+        const constants = try self.allocator.alloc(?Value, proto.constants.items.len);
+        errdefer self.allocator.free(constants);
+        @memset(constants, null);
+        self.noteAllocationChanged();
+        return constants;
+    }
+
     pub fn intern(self: *State, bytes: []const u8) ![]const u8 {
         if (self.strings.get(bytes)) |interned| return interned;
         const interned = try self.allocateString(bytes);
@@ -2387,6 +2411,8 @@ pub const State = struct {
         table.* = try Table.init(self.allocator, array_hint, hash_hint);
         errdefer table.deinit(self.allocator);
         try self.table_allocations.append(self.allocator, table);
+        errdefer _ = self.table_allocations.pop();
+        try self.table_allocation_index.put(@intFromPtr(table), self.table_allocations.items.len - 1);
         self.noteAllocationChanged();
         return .{ .table = table };
     }
@@ -3413,12 +3439,13 @@ pub const State = struct {
         if (table.metatable) |metatable| {
             if (metatable.get(.{ .string = "__metatable" }) != .nil) return self.fail("cannot change a protected metatable");
         }
-        table.metatable = switch (metatable_value) {
+        const metatable = switch (metatable_value) {
             .nil => null,
             .table => |metatable| metatable,
             else => return self.fail("nil or table expected"),
         };
-        if (table.metatable) |metatable| self.writeBarrier(table.marked, .{ .table = metatable });
+        self.setTableMetatableRaw(table, metatable);
+        if (table.metatable) |active_metatable| self.writeBarrier(table.marked, .{ .table = active_metatable });
     }
 
     pub fn setDebugMetatableValue(self: *State, value: Value, metatable_value: Value) !void {
@@ -3429,7 +3456,7 @@ pub const State = struct {
         };
         switch (value) {
             .table => |table| {
-                table.metatable = metatable;
+                self.setTableMetatableRaw(table, metatable);
                 if (metatable) |mt| self.writeBarrier(table.marked, .{ .table = mt });
             },
             .userdata => |userdata| {
@@ -3456,6 +3483,39 @@ pub const State = struct {
         };
         const metamethod = metatable.get(.{ .string = name });
         return if (metamethod == .nil) null else metamethod;
+    }
+
+    pub fn setTableMetatableRaw(self: *State, table: *Table, metatable: ?*Table) void {
+        const old_has_metatable = table.metatable != null;
+        table.metatable = metatable;
+        self.noteTableMetatableChanged(table, old_has_metatable);
+    }
+
+    fn noteTableMetatableChanged(self: *State, table: *Table, old_has_metatable: bool) void {
+        if (!self.isTrackedTable(table)) return;
+        const new_has_metatable = table.metatable != null;
+        if (old_has_metatable == new_has_metatable) return;
+        if (new_has_metatable) {
+            table.metatable_prev = null;
+            table.metatable_next = self.table_metatable_head;
+            if (self.table_metatable_head) |head| head.metatable_prev = table;
+            self.table_metatable_head = table;
+            self.table_metatable_count += 1;
+        } else {
+            self.unlinkTableMetatable(table);
+            self.table_metatable_count -= 1;
+        }
+    }
+
+    fn unlinkTableMetatable(self: *State, table: *Table) void {
+        if (table.metatable_prev) |prev| {
+            prev.metatable_next = table.metatable_next;
+        } else if (self.table_metatable_head == table) {
+            self.table_metatable_head = table.metatable_next;
+        }
+        if (table.metatable_next) |next| next.metatable_prev = table.metatable_prev;
+        table.metatable_prev = null;
+        table.metatable_next = null;
     }
 
     pub fn luaTypeNameForError(self: *State, value: Value) []const u8 {
@@ -4790,11 +4850,15 @@ pub const State = struct {
 
         self.resetMarks();
         self.markRoots();
-        self.convergeEphemerons();
-        self.clearWeakValues();
-        try self.runPendingFinalizers(thread);
+        if (self.hasWeakTables()) {
+            self.convergeEphemerons();
+            self.clearWeakValues();
+        }
+        if (self.table_metatable_count != 0) {
+            try self.runPendingFinalizers(thread);
+        }
         self.runPendingUserdataFinalizers();
-        self.clearWeakTables();
+        if (self.hasWeakTables()) self.clearWeakTables();
         self.clearDeadHashKeys();
         self.sweepThreads();
         self.sweepClosures();
@@ -4932,6 +4996,9 @@ pub const State = struct {
     fn markClosure(self: *State, closure: *Closure) void {
         if (closure.marked) return;
         closure.marked = true;
+        if (closure.constants) |constants| for (constants) |constant| {
+            if (constant) |value| self.markValue(value);
+        };
         for (closure.upvalues) |upvalue| self.markUpvalue(upvalue);
     }
 
@@ -5018,6 +5085,15 @@ pub const State = struct {
         };
     }
 
+    fn hasWeakTables(self: *State) bool {
+        var current = self.table_metatable_head;
+        while (current) |table| : (current = table.metatable_next) {
+            const weak = self.weakMode(table);
+            if (weak.keys or weak.values) return true;
+        }
+        return false;
+    }
+
     fn markEphemeronValues(self: *State, table: *Table) bool {
         var changed = false;
         for (table.entries.items) |entry| {
@@ -5033,7 +5109,8 @@ pub const State = struct {
         var changed = true;
         while (changed) {
             changed = false;
-            for (self.table_allocations.items) |table| {
+            var current = self.table_metatable_head;
+            while (current) |table| : (current = table.metatable_next) {
                 if (!table.marked) continue;
                 const weak = self.weakMode(table);
                 if (!weak.keys or weak.values) continue;
@@ -5081,7 +5158,8 @@ pub const State = struct {
     }
 
     fn clearWeakValues(self: *State) void {
-        for (self.table_allocations.items) |table| {
+        var current = self.table_metatable_head;
+        while (current) |table| : (current = table.metatable_next) {
             if (!table.marked) continue;
             if (!self.weakMode(table).values) continue;
             self.clearWeakTableValues(table);
@@ -5089,7 +5167,8 @@ pub const State = struct {
     }
 
     fn clearWeakTables(self: *State) void {
-        for (self.table_allocations.items) |table| {
+        var current = self.table_metatable_head;
+        while (current) |table| : (current = table.metatable_next) {
             if (!table.marked) continue;
             const weak = self.weakMode(table);
             if (weak.values) self.clearWeakTableValues(table);
@@ -5156,7 +5235,9 @@ pub const State = struct {
     fn runPendingFinalizers(self: *State, thread: ?*Thread) !void {
         const active_thread = thread orelse return;
         var ran_finalizer = false;
-        for (self.table_allocations.items) |table| {
+        var current = self.table_metatable_head;
+        while (current) |table| {
+            current = table.metatable_next;
             if (table.marked or table.finalized) continue;
             const metatable = table.metatable orelse continue;
             const finalizer = metatable.get(.{ .string = "__gc" });
@@ -5256,8 +5337,14 @@ pub const State = struct {
                 index += 1;
                 continue;
             }
+            _ = self.table_allocation_index.remove(@intFromPtr(table));
             self.destroyTable(table);
+            const moved_index = self.table_allocations.items.len - 1;
             _ = self.table_allocations.swapRemove(index);
+            if (index < moved_index) {
+                const moved = self.table_allocations.items[index];
+                self.table_allocation_index.getPtr(@intFromPtr(moved)).?.* = index;
+            }
         }
     }
 
@@ -5342,10 +5429,7 @@ pub const State = struct {
     }
 
     fn isTrackedTable(self: *State, table: *Table) bool {
-        for (self.table_allocations.items) |allocation| {
-            if (allocation == table) return true;
-        }
-        return false;
+        return self.table_allocation_index.contains(@intFromPtr(table));
     }
 
     fn isTrackedUserdata(self: *State, userdata: *Userdata) bool {
@@ -5384,6 +5468,10 @@ pub const State = struct {
     }
 
     fn destroyTable(self: *State, table: *Table) void {
+        if (table.metatable != null) {
+            self.unlinkTableMetatable(table);
+            self.table_metatable_count -= 1;
+        }
         table.deinit(self.allocator);
         self.allocator.destroy(table);
     }
@@ -5398,6 +5486,7 @@ pub const State = struct {
     }
 
     fn destroyClosure(self: *State, closure: *Closure) void {
+        if (closure.constants) |constants| self.allocator.free(constants);
         if (closure.upvalues.len != 0) self.allocator.free(closure.upvalues);
         self.allocator.destroy(closure);
     }
@@ -5420,6 +5509,9 @@ pub const State = struct {
         }
         bytes += self.userdata_allocations.items.len * @sizeOf(Userdata);
         bytes += self.closure_allocations.items.len * @sizeOf(Closure);
+        for (self.closure_allocations.items) |closure| {
+            if (closure.constants) |constants| bytes += constants.len * @sizeOf(?Value);
+        }
         bytes += self.c_closure_allocations.items.len * @sizeOf(CClosure);
         bytes += self.upvalue_allocations.items.len * @sizeOf(Upvalue);
         bytes += self.c_upvalue_allocations.items.len * @sizeOf(CUpvalue);
@@ -5946,6 +6038,16 @@ fn runtimeSourceName(name: []const u8) []const u8 {
 fn rawBinaryOp(lhs: Value, rhs: Value, op: BinaryOp) !?Value {
     switch (op) {
         .add, .sub, .mul, .idiv, .mod => {
+            if (lhs == .integer and rhs == .integer) {
+                return switch (op) {
+                    .add => .{ .integer = lhs.integer +% rhs.integer },
+                    .sub => .{ .integer = lhs.integer -% rhs.integer },
+                    .mul => .{ .integer = lhs.integer *% rhs.integer },
+                    .idiv => if (rhs.integer == 0) error.RuntimeError else .{ .integer = floorDiv(lhs.integer, rhs.integer) },
+                    .mod => if (rhs.integer == 0) error.RuntimeError else .{ .integer = floorMod(lhs.integer, rhs.integer) },
+                    else => unreachable,
+                };
+            }
             if (toInteger(lhs)) |left| {
                 if (toInteger(rhs)) |right| {
                     return switch (op) {
