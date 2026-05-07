@@ -15,9 +15,8 @@ unit tests
 embedding examples
 CLua differential fixtures
 official Lua 5.5 dashboard
+C API fixtures
 ```
-
-The C API harness is available separately through `zig build ci-c-api`.
 
 Build artifacts installed or produced by `build.zig` include:
 

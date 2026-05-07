@@ -29,7 +29,7 @@ Default CI-equivalent check:
 zig build ci
 ```
 
-The C API aggregate is separate:
+The C API portion can also be run on its own:
 
 ```sh
 zig build ci-c-api

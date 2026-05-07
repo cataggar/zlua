@@ -33,7 +33,7 @@ The testing and benchmark harnesses are first-class build artifacts, not externa
 | `zlua-test-c-api` | `src/test_c_api_main.zig` | C API differential fixture runner. |
 | `zlua-embed-*` | `examples/embed/*.zig` | Zig embedding examples. |
 
-`zig build ci` runs unit tests, compiles embedding examples, runs differential fixtures, and runs the official dashboard. `ci-c-api` is separate so the C API harness can evolve without making the default CI aggregate heavier.
+`zig build ci` runs unit tests, compiles embedding examples, runs differential fixtures, runs the official dashboard, and builds/tests the C API compatibility harness.
 
 ## Public Facade
 

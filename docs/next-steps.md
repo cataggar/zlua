@@ -79,9 +79,8 @@ The C API layer has broad public symbol inventory coverage and many CLua-differe
 
 1. Move more `implemented` symbols in `tests/fixtures/c_api_status.toml` to `tested-clua-diff` with targeted fixtures.
 2. Expand fixture coverage for auxiliary library formatting, traceback, warning, package opening, and stdlib open functions.
-3. Decide whether `zig build ci` should include `ci-c-api` once runtime and build costs are acceptable.
-4. Document supported C API scope, known deviations, and build/link instructions in a future `docs/c-api.md` if the layer becomes user-facing.
-5. Decide whether internal `testC` official mode is worth wiring for deeper compatibility checks.
+3. Document supported C API scope, known deviations, and build/link instructions in a future `docs/c-api.md` if the layer becomes user-facing.
+4. Decide whether internal `testC` official mode is worth wiring for deeper compatibility checks.
 
 ## Official And Differential Testing
 

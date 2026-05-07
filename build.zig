@@ -241,6 +241,7 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(examples_step);
     ci_step.dependOn(diff_step);
     ci_step.dependOn(official_step);
+    ci_step.dependOn(ci_c_api_step);
 }
 
 fn addFetchLuaStep(b: *std.Build) *std.Build.Step {

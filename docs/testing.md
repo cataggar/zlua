@@ -11,7 +11,7 @@ zlua treats the official Lua 5.5 C implementation as the behavioral oracle. The 
 | CLua differential fixtures | `zig build test-diff` or `just diff` | Runs `tests/diff/**/*.lua` against CLua and zlua. |
 | Official Lua 5.5 dashboard | `zig build test-official` or `just official` | Runs each official Lua 5.5 test file, excluding `all.lua`, under CLua and zlua. |
 | C API fixtures | `zig build test-c-api` or `just c-api` | Compiles C fixtures against CLua and zlua and compares behavior. |
-| Full CI aggregate | `zig build ci` or `just ci` | Unit tests, embedding examples, differential fixtures, and official dashboard. |
+| Full CI aggregate | `zig build ci` or `just ci` | Unit tests, embedding examples, differential fixtures, official dashboard, and C API fixtures. |
 
 CI currently runs `zig build ci` on code changes. Markdown-only changes are ignored by the GitHub workflow, so documentation edits should be checked locally when they mention commands, examples, or behavior.
 
@@ -133,6 +133,7 @@ Run all C API fixtures:
 ```sh
 zig build c-api
 zig build test-c-api
+zig build ci-c-api
 just c-api
 ```
 
@@ -197,8 +198,9 @@ just c-api --show-build tests/c-api/values/roundtrip.c
 ```text
 test
 examples
+test-diff
+test-official
+ci-c-api
 ```
-
-The C API harness is available through `zig build ci-c-api`, but it is not part of the default `ci` aggregate in `build.zig` at the time this document was written.
 
 The compatibility gate is correctness, not speed. Benchmarks are intentionally manual diagnostics; see [benchmark.md](benchmark.md).

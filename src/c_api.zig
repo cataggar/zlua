@@ -1258,6 +1258,10 @@ fn loadBuffer(thread: *CThread, source: []const u8, source_name: ?[]const u8, mo
             pushRuntimeError(thread);
             return LUA_ERRSYNTAX;
         },
+        else => {
+            pushRuntimeError(thread);
+            return LUA_ERRSYNTAX;
+        },
     };
     const c_value = runtimeToCValue(thread.owner, value, 0) catch {
         _ = pushStringBytes(thread, "not enough memory");
@@ -2921,11 +2925,11 @@ pub export fn lua_setmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const target = valueAt(thread, idx) orelse return 0;
     const metatable_value = thread.stack.pop().?;
     switch (target) {
-        .table => |table| thread.owner.runtime_state.setTableMetatableRaw(table, switch (metatable_value) {
+        .table => |table| table.metatable = switch (metatable_value) {
             .nil => null,
             .table => |metatable| metatable,
             else => table.metatable,
-        }),
+        },
         .userdata => |userdata| userdata.metatable = switch (metatable_value) {
             .nil => null,
             .table => |metatable| metatable,
