@@ -83,6 +83,7 @@ Start with [docs/README.md](docs/README.md).
 | Document | Scope |
 | --- | --- |
 | [Architecture](docs/architecture.md) | How the implementation fits together. |
+| [Development](docs/development.md) | Project shape, commands, source conventions, and local workflow. |
 | [Testing](docs/testing.md) | Test layers, CLua differential fixtures, official dashboard, and C API fixtures. |
 | [Benchmarking](docs/benchmark.md) | Benchmark harness and current performance methodology. |
 | [Embedding](docs/embedding.md) | Zig-native embedding API. |

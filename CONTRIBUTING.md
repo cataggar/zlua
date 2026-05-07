@@ -2,6 +2,8 @@
 
 zlua is compatibility-driven. When Lua-visible behavior is in question, use the official Lua 5.5 implementation as the oracle and add a regression test.
 
+Detailed development conventions are in [docs/development.md](docs/development.md). Test methodology is in [docs/testing.md](docs/testing.md).
+
 ## Toolchain
 
 Use Zig `0.16.0`.
@@ -47,6 +49,8 @@ The C API aggregate is separate:
 ```sh
 zig build ci-c-api
 ```
+
+Useful just recipes are documented in [docs/development.md](docs/development.md).
 
 ## Differential Tests
 
@@ -101,6 +105,8 @@ just fmt
 ```
 
 If you touch nested Zig files not covered by `just fmt`, run `zig fmt` on those paths explicitly.
+
+Follow the source conventions in [docs/development.md](docs/development.md): use explicit `std.Io` patterns already present in CLI/testing code, prefer top-level imports, and keep public embedding API work in `src/api.zig` unless there is a deliberate API decision.
 
 ## Documentation
 
