@@ -3,6 +3,12 @@ pub const state = @import("state.zig");
 pub const types = @import("types.zig");
 pub const value = @import("value.zig");
 pub const chunk = @import("chunk.zig");
+pub const execute_mod = @import("execute.zig");
+pub const gc = @import("gc.zig");
+pub const call = @import("call.zig");
+pub const coroutine_mod = @import("coroutine.zig");
+pub const debug_mod = @import("debug.zig");
+pub const vm = @import("vm.zig");
 
 pub const State = state.State;
 pub const StateOptions = state.StateOptions;
@@ -62,6 +68,10 @@ pub const binary_chunk_signature = chunk.binary_chunk_signature;
 pub const binary_chunk_payload_magic = chunk.binary_chunk_payload_magic;
 pub const appendBinaryChunkHeader = chunk.appendBinaryChunkHeader;
 pub const dumpClosureBinary = chunk.dumpClosureBinary;
+
+pub const ExecuteOptions = execute_mod.ExecuteOptions;
+pub const executeSource = execute_mod.executeSource;
+pub const executeSourceWithOptions = execute_mod.executeSourceWithOptions;
 
 pub const valuesEqual = value.valuesEqual;
 pub const truthy = value.truthy;
