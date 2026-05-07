@@ -898,6 +898,14 @@ fn findImpl(state: *State, thread: *Thread, op: bytecode.Call, positions: bool) 
     const found = if (plain) plainFind(source, pattern, start) else try simplePatternFind(state, source, pattern, start);
     if (found) |range| {
         if (positions) {
+            if (range.captures.count == 0) {
+                const values = [_]Value{
+                    .{ .integer = @intCast(range.range.start + 1) },
+                    .{ .integer = @intCast(range.range.end) },
+                };
+                try state.returnValues(thread, op.base, op.return_count, values[0..]);
+                return;
+            }
             var values = std.ArrayList(Value).empty;
             defer values.deinit(state.allocator);
             try values.append(state.allocator, .{ .integer = @intCast(range.range.start + 1) });
@@ -905,6 +913,10 @@ fn findImpl(state: *State, thread: *Thread, op: bytecode.Call, positions: bool) 
             try appendCaptureValues(state, &values, source, range.captures);
             try state.returnValues(thread, op.base, op.return_count, values.items);
         } else {
+            if (range.captures.count == 0) {
+                try state.returnValues(thread, op.base, op.return_count, &.{.{ .string = try state.intern(source[range.range.start..range.range.end]) }});
+                return;
+            }
             var values = std.ArrayList(Value).empty;
             defer values.deinit(state.allocator);
             try appendMatchValues(state, &values, source, range);
@@ -967,7 +979,13 @@ fn plainFind(source: []const u8, pattern: []const u8, start: usize) ?Match {
 
 fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, start: usize) !?Match {
     if (pattern.len == 0) return .{ .range = .{ .start = @min(start, source.len), .end = @min(start, source.len) }, .captures = .{} };
+    if (repeatedEscapePattern(pattern)) |repeated| return findRepeatedEscape(source, repeated, start);
     if (simpleOneOrMoreEscape(pattern)) |code| return findOneOrMoreEscape(source, code, start);
+    switch (findFixedWidthPattern(source, pattern, start)) {
+        .found => |matched| return matched,
+        .not_found => return null,
+        .unsupported => {},
+    }
     if (pattern[0] == '^') {
         const anchored_start = @min(start, source.len);
         const matched = (try matchSimplePatternAt(state, source, pattern[1..], anchored_start)) orelse return null;
@@ -978,6 +996,161 @@ fn simplePatternFind(state: *State, source: []const u8, pattern: []const u8, sta
         if (try matchSimplePatternAt(state, source, pattern, candidate)) |matched| return .{ .range = .{ .start = candidate, .end = matched.end }, .captures = matched.captures };
     }
     return null;
+}
+
+const FixedPatternFind = union(enum) {
+    unsupported,
+    not_found,
+    found: Match,
+};
+
+fn findFixedWidthPattern(source: []const u8, pattern: []const u8, start: usize) FixedPatternFind {
+    const width = fixedWidthPatternLength(pattern) orelse return .unsupported;
+    if (width == 0) return .unsupported;
+    const first_atom_end = fixedPatternAtomEnd(pattern, 0).?;
+    const first_atom = pattern[0..first_atom_end];
+    const bounded_start = @min(start, source.len);
+    if (width > source.len - bounded_start) return .not_found;
+
+    const last_start = source.len - width;
+    var candidate = bounded_start;
+    while (candidate <= last_start) {
+        candidate = findFixedAtom(source, first_atom, candidate, last_start) orelse return .not_found;
+        const end = matchFixedWidthPatternAt(source, pattern, candidate).?;
+        if (end != 0) return .{ .found = .{ .range = .{ .start = candidate, .end = end }, .captures = .{} } };
+        candidate += 1;
+    }
+    return .not_found;
+}
+
+const RepeatedEscapePattern = struct {
+    code: u8,
+    count: usize,
+};
+
+fn repeatedEscapePattern(pattern: []const u8) ?RepeatedEscapePattern {
+    if (pattern.len < 2 or pattern.len % 2 != 0) return null;
+    var index: usize = 0;
+    var code: ?u8 = null;
+    var count: usize = 0;
+    while (index < pattern.len) : (index += 2) {
+        if (pattern[index] != '%') return null;
+        const current = pattern[index + 1];
+        switch (current) {
+            'b', 'f', '0'...'9' => return null,
+            else => {},
+        }
+        if (code) |expected| {
+            if (current != expected) return null;
+        } else {
+            code = current;
+        }
+        count += 1;
+    }
+    return .{ .code = code.?, .count = count };
+}
+
+fn findRepeatedEscape(source: []const u8, repeated: RepeatedEscapePattern, start: usize) ?Match {
+    const bounded_start = @min(start, source.len);
+    if (repeated.count > source.len - bounded_start) return null;
+    const last_start = source.len - repeated.count;
+    var candidate = bounded_start;
+    while (candidate <= last_start) {
+        candidate = findEscapeMatch(source, repeated.code, candidate, last_start) orelse return null;
+        var offset: usize = 1;
+        while (offset < repeated.count and patternEscapeMatches(repeated.code, source[candidate + offset])) : (offset += 1) {}
+        if (offset == repeated.count) return .{ .range = .{ .start = candidate, .end = candidate + repeated.count }, .captures = .{} };
+        candidate += 1;
+    }
+    return null;
+}
+
+fn fixedWidthPatternLength(pattern: []const u8) ?usize {
+    var index: usize = 0;
+    var width: usize = 0;
+    while (index < pattern.len) {
+        const atom_end = fixedPatternAtomEnd(pattern, index) orelse return null;
+        if (atom_end < pattern.len and isPatternQuantifier(pattern[atom_end])) return null;
+        width += 1;
+        index = atom_end;
+    }
+    return width;
+}
+
+fn fixedPatternAtomEnd(pattern: []const u8, index: usize) ?usize {
+    return switch (pattern[index]) {
+        '.' => index + 1,
+        '%' => blk: {
+            if (index + 1 >= pattern.len) break :blk null;
+            break :blk switch (pattern[index + 1]) {
+                'b', 'f', '0'...'9' => null,
+                else => index + 2,
+            };
+        },
+        '[' => blk: {
+            const end = classAtomEnd(pattern, index);
+            break :blk if (end > index) end else null;
+        },
+        '^', '$', '(', ')', ']', '*', '+', '-', '?' => null,
+        else => index + 1,
+    };
+}
+
+fn isPatternQuantifier(code: u8) bool {
+    return code == '*' or code == '+' or code == '-' or code == '?';
+}
+
+fn findFixedAtom(source: []const u8, atom: []const u8, start: usize, last_start: usize) ?usize {
+    if (atom.len == 1 and atom[0] != '.') {
+        const relative = std.mem.indexOfScalar(u8, source[start .. last_start + 1], atom[0]) orelse return null;
+        return start + relative;
+    }
+    if (atom.len == 2 and atom[0] == '%' and atom[1] == 'd') return findAsciiDigit(source, start, last_start);
+    var candidate = start;
+    while (candidate <= last_start) : (candidate += 1) {
+        if (patternAtomMatches(atom, source[candidate])) return candidate;
+    }
+    return null;
+}
+
+fn findEscapeMatch(source: []const u8, code: u8, start: usize, last_start: usize) ?usize {
+    if (code == 'd') return findAsciiDigit(source, start, last_start);
+    var candidate = start;
+    while (candidate <= last_start) : (candidate += 1) {
+        if (patternEscapeMatches(code, source[candidate])) return candidate;
+    }
+    return null;
+}
+
+fn findAsciiDigit(source: []const u8, start: usize, last_start: usize) ?usize {
+    var index = start;
+    const end = last_start + 1;
+    const vector_len = std.simd.suggestVectorLength(u8) orelse 16;
+    const Block = @Vector(vector_len, u8);
+    const zero: Block = @splat('0');
+    const nine: Block = @splat('9');
+    while (index + vector_len <= end) : (index += vector_len) {
+        const block: Block = source[index..][0..vector_len].*;
+        const matches = (block >= zero) & (block <= nine);
+        if (@reduce(.Or, matches)) return index + std.simd.firstTrue(matches).?;
+    }
+    while (index <= last_start) : (index += 1) {
+        if (std.ascii.isDigit(source[index])) return index;
+    }
+    return null;
+}
+
+fn matchFixedWidthPatternAt(source: []const u8, pattern: []const u8, start: usize) ?usize {
+    var source_index = start;
+    var pattern_index: usize = 0;
+    while (pattern_index < pattern.len) {
+        if (source_index >= source.len) return 0;
+        const atom_end = fixedPatternAtomEnd(pattern, pattern_index) orelse return null;
+        if (!patternAtomMatches(pattern[pattern_index..atom_end], source[source_index])) return 0;
+        source_index += 1;
+        pattern_index = atom_end;
+    }
+    return source_index;
 }
 
 fn simpleOneOrMoreEscape(pattern: []const u8) ?u8 {
