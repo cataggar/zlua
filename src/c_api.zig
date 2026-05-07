@@ -65,6 +65,14 @@ const LUA_OPEQ: c_int = 0;
 const LUA_OPLT: c_int = 1;
 const LUA_OPLE: c_int = 2;
 
+const LUA_GCSTOP: c_int = 0;
+const LUA_GCRESTART: c_int = 1;
+const LUA_GCCOLLECT: c_int = 2;
+const LUA_GCCOUNT: c_int = 3;
+const LUA_GCCOUNTB: c_int = 4;
+const LUA_GCSTEP: c_int = 5;
+const LUA_GCISRUNNING: c_int = 6;
+
 const Value = union(enum) {
     nil,
     boolean: bool,
@@ -72,6 +80,7 @@ const Value = union(enum) {
     number: lua_Number,
     string: *CString,
     table: *CTable,
+    userdata: *CUserdata,
     thread: *CThread,
     light_userdata: ?*anyopaque,
     lua_closure: *runtime.Closure,
@@ -84,6 +93,7 @@ const Value = union(enum) {
             .integer, .number => LUA_TNUMBER,
             .string => LUA_TSTRING,
             .table => LUA_TTABLE,
+            .userdata => LUA_TUSERDATA,
             .thread => LUA_TTHREAD,
             .light_userdata => LUA_TLIGHTUSERDATA,
             .lua_closure, .c_closure => LUA_TFUNCTION,
@@ -108,6 +118,7 @@ const TableEntry = struct {
 const CTable = struct {
     entries: std.ArrayList(TableEntry) = .empty,
     metatable: ?*CTable = null,
+    marked: bool = false,
 
     fn create(allocator: std.mem.Allocator, array_hint: c_int, record_hint: c_int) !*CTable {
         const table = try allocator.create(CTable);
@@ -173,6 +184,37 @@ const CTable = struct {
     }
 };
 
+const CUserdata = struct {
+    bytes: []u8,
+    size: usize,
+    uservalues: []Value,
+    metatable: ?*CTable = null,
+    finalized: bool = false,
+    marked: bool = false,
+
+    fn create(allocator: std.mem.Allocator, size: usize, uservalue_count: usize) !*CUserdata {
+        const userdata = try allocator.create(CUserdata);
+        errdefer allocator.destroy(userdata);
+        const bytes = try allocator.alloc(u8, @max(size, 1));
+        errdefer allocator.free(bytes);
+        const uservalues = try allocator.alloc(Value, uservalue_count);
+        errdefer allocator.free(uservalues);
+        for (uservalues) |*value| value.* = .nil;
+        userdata.* = .{
+            .bytes = bytes,
+            .size = size,
+            .uservalues = uservalues,
+        };
+        return userdata;
+    }
+
+    fn deinit(self: *CUserdata, allocator: std.mem.Allocator) void {
+        allocator.free(self.uservalues);
+        allocator.free(self.bytes);
+        allocator.destroy(self);
+    }
+};
+
 const LuaStateHeader = extern struct {
     thread: *CThread,
 };
@@ -181,12 +223,14 @@ const CThread = struct {
     owner: *CState,
     public_state: *LuaStateHeader,
     stack: std.ArrayList(Value) = .empty,
+    to_close_slots: std.ArrayList(usize) = .empty,
     status: c_int = 0,
     pending_error: ?Value = null,
     current_c_closure: ?*runtime.CClosure = null,
     c_call_depth: usize = 0,
 
     fn deinit(self: *CThread) void {
+        self.to_close_slots.deinit(self.owner.allocator());
         self.stack.deinit(self.owner.allocator());
     }
 };
@@ -210,6 +254,7 @@ const CState = struct {
     global_table: *CTable,
     strings: std.ArrayList(*CString) = .empty,
     tables: std.ArrayList(*CTable) = .empty,
+    userdata: std.ArrayList(*CUserdata) = .empty,
     panicf: lua_CFunction = null,
 
     fn allocator(self: *CState) std.mem.Allocator {
@@ -219,8 +264,10 @@ const CState = struct {
     fn deinitOwnedObjects(self: *CState) void {
         const alloc = self.allocator();
         for (self.tables.items) |table| table.deinit(alloc);
+        for (self.userdata.items) |userdata| userdata.deinit(alloc);
         for (self.strings.items) |string| string.deinit(alloc);
         self.tables.deinit(alloc);
+        self.userdata.deinit(alloc);
         self.strings.deinit(alloc);
     }
 };
@@ -334,6 +381,7 @@ fn setTop(thread: *CThread, idx: c_int) void {
     };
 
     if (new_top <= current) {
+        closeToCloseSlots(thread, new_top, current);
         thread.stack.items.len = new_top;
         return;
     }
@@ -375,6 +423,23 @@ fn createTable(state: *CState, array_hint: c_int, record_hint: c_int) ?*CTable {
     return table;
 }
 
+fn createUserdata(state: *CState, size: usize, uservalue_count: usize) ?*CUserdata {
+    const allocator = state.allocator();
+    const userdata = CUserdata.create(allocator, size, uservalue_count) catch return null;
+    state.userdata.append(allocator, userdata) catch {
+        userdata.deinit(allocator);
+        return null;
+    };
+    return userdata;
+}
+
+fn findUserdataByPtr(state: *CState, ptr: *anyopaque) ?*CUserdata {
+    for (state.userdata.items) |userdata| {
+        if (userdata.bytes.ptr == @as([*]u8, @ptrCast(ptr))) return userdata;
+    }
+    return null;
+}
+
 fn normalizeKey(value: Value) ?Value {
     return switch (value) {
         .nil => null,
@@ -399,6 +464,7 @@ fn valuesEqual(lhs: Value, rhs: Value) bool {
         },
         .string => |value| rhs == .string and std.mem.eql(u8, value.bytes, rhs.string.bytes),
         .table => |value| rhs == .table and value == rhs.table,
+        .userdata => |value| rhs == .userdata and value == rhs.userdata,
         .thread => |value| rhs == .thread and value == rhs.thread,
         .light_userdata => |value| rhs == .light_userdata and value == rhs.light_userdata,
         .lua_closure => |value| rhs == .lua_closure and value == rhs.lua_closure,
@@ -463,6 +529,7 @@ fn appendValueString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), valu
         .nil => try out.appendSlice(allocator, "nil"),
         .boolean => |boolean| try out.appendSlice(allocator, if (boolean) "true" else "false"),
         .table => |table| try appendFmt(out, allocator, "table: 0x{x}", .{@intFromPtr(table)}),
+        .userdata => |userdata| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(userdata.bytes.ptr)}),
         .thread => |target| try appendFmt(out, allocator, "thread: 0x{x}", .{@intFromPtr(target)}),
         .light_userdata => |ptr| try appendFmt(out, allocator, "userdata: 0x{x}", .{@intFromPtr(ptr)}),
         .lua_closure, .c_closure => try out.appendSlice(allocator, "function"),
@@ -513,6 +580,18 @@ fn tableMetafield(table: *CTable, name: []const u8) Value {
     return .nil;
 }
 
+fn metatableField(value: Value, name: []const u8) Value {
+    const metatable = switch (value) {
+        .table => |table| table.metatable,
+        .userdata => |userdata| userdata.metatable,
+        else => null,
+    } orelse return .nil;
+    for (metatable.entries.items) |entry| {
+        if (entry.key == .string and std.mem.eql(u8, entry.key.string.bytes, name)) return entry.value;
+    }
+    return .nil;
+}
+
 fn getTable(thread: *CThread, table: *CTable, key: Value, depth: usize) Value {
     const value = table.get(key);
     if (value != .nil) return value;
@@ -553,6 +632,10 @@ fn cToRuntimeValue(state: *CState, value: Value, depth: usize) !runtime.Value {
             }
             break :blk .{ .table = runtime_table };
         },
+        .userdata => |userdata| blk: {
+            const runtime_value = try state.runtime_state.newUserdata(@ptrCast(userdata.bytes.ptr), 0, "userdata", null, null, null);
+            break :blk runtime_value;
+        },
         .c_closure => |closure| .{ .c_closure = closure },
         .thread, .light_userdata => .nil,
     };
@@ -585,7 +668,7 @@ fn runtimeToCValue(state: *CState, value: runtime.Value, depth: usize) !Value {
             break :blk .{ .table = c_table };
         },
         .thread => .nil,
-        .userdata => .nil,
+        .userdata => |userdata| if (findUserdataByPtr(state, userdata.ptr)) |c_userdata| .{ .userdata = c_userdata } else .nil,
         .coroutine_wrapper => .nil,
         .gmatch_iterator => .nil,
         else => .nil,
@@ -833,6 +916,126 @@ fn applyMessageHandler(thread: *CThread, handler: Value, error_value: Value) ?Va
     return thread.stack.pop();
 }
 
+fn callMetamethod(thread: *CThread, function: Value, args: []const Value) bool {
+    switch (function) {
+        .c_closure => |closure| {
+            switch (runCClosure(thread, closure, args, true)) {
+                .success => |results| {
+                    thread.owner.allocator().free(results);
+                    return true;
+                },
+                .failure => return false,
+                .memory_error => return false,
+            }
+        },
+        .lua_closure => {
+            const saved_top = thread.stack.items.len;
+            _ = pushValue(thread, function);
+            for (args) |arg| _ = pushValue(thread, arg);
+            const status = callStackFunction(thread, @intCast(args.len), 0, true);
+            if (status != LUA_OK) {
+                thread.stack.items.len = saved_top;
+                return false;
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn resetCMarks(state: *CState) void {
+    for (state.tables.items) |table| table.marked = false;
+    for (state.userdata.items) |userdata| userdata.marked = false;
+}
+
+fn markCValue(state: *CState, value: Value) void {
+    switch (value) {
+        .table => |table| markCTable(state, table),
+        .userdata => |userdata| markCUserdata(state, userdata),
+        else => {},
+    }
+}
+
+fn markCTable(state: *CState, table: *CTable) void {
+    if (table.marked) return;
+    table.marked = true;
+    if (table.metatable) |metatable| markCTable(state, metatable);
+    for (table.entries.items) |entry| {
+        if (entry.value == .nil) continue;
+        markCValue(state, entry.key);
+        markCValue(state, entry.value);
+    }
+}
+
+fn markCUserdata(state: *CState, userdata: *CUserdata) void {
+    if (userdata.marked) return;
+    userdata.marked = true;
+    if (userdata.metatable) |metatable| markCTable(state, metatable);
+    for (userdata.uservalues) |value| markCValue(state, value);
+}
+
+fn markCRoots(thread: *CThread) void {
+    const state = thread.owner;
+    for (thread.stack.items) |value| markCValue(state, value);
+    markCTable(state, state.registry_table);
+    markCTable(state, state.global_table);
+}
+
+fn finalizeCUserdata(thread: *CThread, userdata: *CUserdata) void {
+    if (userdata.finalized) return;
+    const finalizer = metatableField(.{ .userdata = userdata }, "__gc");
+    if (finalizer != .nil) {
+        const args = [_]Value{.{ .userdata = userdata }};
+        _ = callMetamethod(thread, finalizer, &args);
+    }
+    userdata.finalized = true;
+}
+
+fn collectCUserdata(thread: *CThread) void {
+    const state = thread.owner;
+    resetCMarks(state);
+    markCRoots(thread);
+    for (state.userdata.items) |userdata| {
+        if (!userdata.marked) finalizeCUserdata(thread, userdata);
+    }
+}
+
+fn closeSlotAt(thread: *CThread, index: usize) void {
+    if (index >= thread.stack.items.len) return;
+    const value = thread.stack.items[index];
+    const close_method = metatableField(value, "__close");
+    if (close_method != .nil) {
+        const args = [_]Value{value};
+        _ = callMetamethod(thread, close_method, &args);
+    }
+    if (index < thread.stack.items.len) thread.stack.items[index] = .nil;
+}
+
+fn removeToCloseSlot(thread: *CThread, slot: usize) void {
+    var index: usize = 0;
+    while (index < thread.to_close_slots.items.len) {
+        if (thread.to_close_slots.items[index] == slot) {
+            _ = thread.to_close_slots.orderedRemove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn closeToCloseSlots(thread: *CThread, new_top: usize, current_top: usize) void {
+    var index = thread.to_close_slots.items.len;
+    while (index > 0) {
+        index -= 1;
+        const slot = thread.to_close_slots.items[index];
+        if (slot >= new_top and slot < current_top) {
+            closeSlotAt(thread, slot);
+            _ = thread.to_close_slots.orderedRemove(index);
+        } else if (slot >= current_top) {
+            _ = thread.to_close_slots.orderedRemove(index);
+        }
+    }
+}
+
 fn raiseUnprotected(thread: *CThread) noreturn {
     if (thread.owner.panicf) |panicf| {
         _ = panicf(@ptrCast(thread.public_state));
@@ -923,6 +1126,7 @@ pub export fn lua_close(L: ?*lua_State) callconv(.c) void {
     const alloc_ud = state.alloc_ud;
     const block = state.block;
 
+    for (state.userdata.items) |userdata| finalizeCUserdata(thread, userdata);
     thread.deinit();
     state.deinitOwnedObjects();
     state.runtime_state.deinit();
@@ -1056,7 +1260,7 @@ pub export fn lua_isuserdata(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const thread = threadFromState(L) orelse return 0;
     const value = valueAt(thread, idx) orelse return 0;
     return switch (value) {
-        .light_userdata => 1,
+        .light_userdata, .userdata => 1,
         else => 0,
     };
 }
@@ -1196,6 +1400,7 @@ pub export fn lua_rawlen(L: ?*lua_State, idx: c_int) callconv(.c) lua_Unsigned {
     return switch (value) {
         .string => |string| @intCast(string.bytes.len),
         .table => |table| @intCast(table.len()),
+        .userdata => |userdata| @intCast(userdata.size),
         else => 0,
     };
 }
@@ -1214,6 +1419,7 @@ pub export fn lua_touserdata(L: ?*lua_State, idx: c_int) callconv(.c) ?*anyopaqu
     const value = valueAt(thread, idx) orelse return null;
     return switch (value) {
         .light_userdata => |ptr| ptr,
+        .userdata => |userdata| userdata.bytes.ptr,
         else => null,
     };
 }
@@ -1233,6 +1439,7 @@ pub export fn lua_topointer(L: ?*lua_State, idx: c_int) callconv(.c) ?*const any
     return switch (value) {
         .string => |string| string.bytes.ptr,
         .table => |table| table,
+        .userdata => |userdata| userdata.bytes.ptr,
         .thread => |target| target.public_state,
         .light_userdata => |ptr| ptr,
         .lua_closure => |closure| closure,
@@ -1586,8 +1793,12 @@ pub export fn lua_createtable(L: ?*lua_State, narr: c_int, nrec: c_int) callconv
     _ = pushValue(thread, .{ .table = table });
 }
 
-pub export fn lua_newuserdatauv(_: ?*lua_State, _: usize, _: c_int) callconv(.c) ?*anyopaque {
-    return null;
+pub export fn lua_newuserdatauv(L: ?*lua_State, size: usize, nuvalue: c_int) callconv(.c) ?*anyopaque {
+    const thread = threadFromState(L) orelse return null;
+    if (nuvalue < 0) return null;
+    const userdata = createUserdata(thread.owner, size, @intCast(nuvalue)) orelse return null;
+    if (!pushValue(thread, .{ .userdata = userdata })) return null;
+    return userdata.bytes.ptr;
 }
 
 pub export fn lua_getmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
@@ -1595,14 +1806,28 @@ pub export fn lua_getmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
     const value = valueAt(thread, idx) orelse return 0;
     const metatable = switch (value) {
         .table => |table| table.metatable,
+        .userdata => |userdata| userdata.metatable,
         else => null,
     } orelse return 0;
     _ = pushValue(thread, .{ .table = metatable });
     return 1;
 }
 
-pub export fn lua_getiuservalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_getiuservalue(L: ?*lua_State, idx: c_int, n: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return LUA_TNONE;
+    const value = valueAt(thread, idx) orelse .nil;
+    if (value != .userdata or n <= 0) {
+        _ = pushValue(thread, .nil);
+        return LUA_TNONE;
+    }
+    const index: usize = @intCast(n - 1);
+    if (index >= value.userdata.uservalues.len) {
+        _ = pushValue(thread, .nil);
+        return LUA_TNONE;
+    }
+    const uservalue = value.userdata.uservalues[index];
+    _ = pushValue(thread, uservalue);
+    return uservalue.typeTag();
 }
 
 pub export fn lua_setglobal(L: ?*lua_State, name: ?[*:0]const u8) callconv(.c) void {
@@ -1677,13 +1902,26 @@ pub export fn lua_setmetatable(L: ?*lua_State, idx: c_int) callconv(.c) c_int {
             .table => |metatable| metatable,
             else => table.metatable,
         },
+        .userdata => |userdata| userdata.metatable = switch (metatable_value) {
+            .nil => null,
+            .table => |metatable| metatable,
+            else => userdata.metatable,
+        },
         else => {},
     }
     return 1;
 }
 
-pub export fn lua_setiuservalue(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) c_int {
-    return 0;
+pub export fn lua_setiuservalue(L: ?*lua_State, idx: c_int, n: c_int) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    if (thread.stack.items.len == 0) return 0;
+    const value = valueAt(thread, idx) orelse .nil;
+    const new_value = thread.stack.pop().?;
+    if (value != .userdata or n <= 0) return 0;
+    const index: usize = @intCast(n - 1);
+    if (index >= value.userdata.uservalues.len) return 0;
+    value.userdata.uservalues[index] = new_value;
+    return 1;
 }
 
 pub export fn lua_callk(L: ?*lua_State, nargs: c_int, nresults: c_int, _: lua_KContext, _: lua_KFunction) callconv(.c) void {
@@ -1752,8 +1990,19 @@ pub export fn lua_isyieldable(_: ?*lua_State) callconv(.c) c_int {
 pub export fn lua_setwarnf(_: ?*lua_State, _: lua_WarnFunction, _: ?*anyopaque) callconv(.c) void {}
 pub export fn lua_warning(_: ?*lua_State, _: ?[*:0]const u8, _: c_int) callconv(.c) void {}
 
-pub export fn lua_gc(_: ?*lua_State, _: c_int, ...) callconv(.c) c_int {
-    return 0;
+pub export fn lua_gc(L: ?*lua_State, what: c_int, ...) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    switch (what) {
+        LUA_GCCOLLECT => {
+            collectCUserdata(thread);
+            thread.owner.runtime_state.collectGarbage() catch {};
+            return 0;
+        },
+        LUA_GCSTOP, LUA_GCRESTART, LUA_GCSTEP => return 0,
+        LUA_GCCOUNT, LUA_GCCOUNTB => return 0,
+        LUA_GCISRUNNING => return 1,
+        else => return 0,
+    }
 }
 
 pub export fn lua_error(L: ?*lua_State) callconv(.c) c_int {
@@ -1851,8 +2100,19 @@ pub export fn lua_setallocf(L: ?*lua_State, alloc_f: lua_Alloc, ud: ?*anyopaque)
     state.alloc_f = alloc_f;
     state.alloc_ud = ud;
 }
-pub export fn lua_toclose(_: ?*lua_State, _: c_int) callconv(.c) void {}
-pub export fn lua_closeslot(_: ?*lua_State, _: c_int) callconv(.c) void {}
+pub export fn lua_toclose(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const slot = stackAbsIndex(thread, idx) orelse return;
+    for (thread.to_close_slots.items) |existing| if (existing == slot) return;
+    thread.to_close_slots.append(thread.owner.allocator(), slot) catch return;
+}
+
+pub export fn lua_closeslot(L: ?*lua_State, idx: c_int) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const slot = stackAbsIndex(thread, idx) orelse return;
+    closeSlotAt(thread, slot);
+    removeToCloseSlot(thread, slot);
+}
 
 pub export fn lua_getstack(_: ?*lua_State, _: c_int, _: ?*lua_Debug) callconv(.c) c_int {
     return 0;
@@ -2011,18 +2271,43 @@ pub export fn luaL_checkstack(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callc
 pub export fn luaL_checktype(_: ?*lua_State, _: c_int, _: c_int) callconv(.c) void {}
 pub export fn luaL_checkany(_: ?*lua_State, _: c_int) callconv(.c) void {}
 
-pub export fn luaL_newmetatable(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) c_int {
-    return 0;
+pub export fn luaL_newmetatable(L: ?*lua_State, tname: ?[*:0]const u8) callconv(.c) c_int {
+    const thread = threadFromState(L) orelse return 0;
+    const name = cStringSlice(tname);
+    const key = createString(thread.owner, name) orelse return 0;
+    const existing = thread.owner.registry_table.get(.{ .string = key });
+    if (existing != .nil) {
+        _ = pushValue(thread, existing);
+        return 0;
+    }
+    const metatable = createTable(thread.owner, 0, 2) orelse return 0;
+    const name_string = createString(thread.owner, name) orelse return 0;
+    metatable.set(thread.owner.allocator(), .{ .string = createString(thread.owner, "__name") orelse return 0 }, .{ .string = name_string }) catch return 0;
+    thread.owner.registry_table.set(thread.owner.allocator(), .{ .string = key }, .{ .table = metatable }) catch return 0;
+    _ = pushValue(thread, .{ .table = metatable });
+    return 1;
 }
 
-pub export fn luaL_setmetatable(_: ?*lua_State, _: ?[*:0]const u8) callconv(.c) void {}
-
-pub export fn luaL_testudata(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    return null;
+pub export fn luaL_setmetatable(L: ?*lua_State, tname: ?[*:0]const u8) callconv(.c) void {
+    const thread = threadFromState(L) orelse return;
+    const key = createString(thread.owner, cStringSlice(tname)) orelse return;
+    _ = pushValue(thread, thread.owner.registry_table.get(.{ .string = key }));
+    _ = lua_setmetatable(L, -2);
 }
 
-pub export fn luaL_checkudata(_: ?*lua_State, _: c_int, _: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    return null;
+pub export fn luaL_testudata(L: ?*lua_State, ud: c_int, tname: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    const thread = threadFromState(L) orelse return null;
+    const value = valueAt(thread, ud) orelse return null;
+    if (value != .userdata) return null;
+    const actual = value.userdata.metatable orelse return null;
+    const key = createString(thread.owner, cStringSlice(tname)) orelse return null;
+    const expected = thread.owner.registry_table.get(.{ .string = key });
+    if (expected != .table or expected.table != actual) return null;
+    return value.userdata.bytes.ptr;
+}
+
+pub export fn luaL_checkudata(L: ?*lua_State, ud: c_int, tname: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    return luaL_testudata(L, ud, tname);
 }
 
 pub export fn luaL_where(L: ?*lua_State, _: c_int) callconv(.c) void {
