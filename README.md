@@ -41,9 +41,18 @@ The default state opens safe standard libraries with sandboxed host capabilities
 
 ## Project Goals
 
-zlua is compatibility-driven. The official Lua 5.5 C implementation is the behavioral oracle for parser acceptance, runtime semantics, standard-library behavior, diagnostics, and C API behavior.
+zlua is compatibility-driven. Its main goal is to match the official Lua 5.5 C implementation for parser acceptance, runtime semantics, standard-library behavior, diagnostics, and C API behavior.
 
-The implementation is organized as a conventional frontend/compiler/runtime pipeline, with public APIs layered on top:
+The project is designed to be useful in four related ways:
+
+- Provide a standalone Lua 5.5 command-line interpreter.
+- Provide a Zig-native embedding API where hosts control capabilities, resource limits, callbacks, and userdata.
+- Provide standard-library behavior that follows Lua 5.5 while still allowing sandboxed embedding defaults.
+- Provide a Lua C API compatibility layer where it can be backed by zlua semantics in a practical, testable way.
+
+Those goals are kept honest by building and testing against downloaded Lua 5.5 sources and tests. A system Lua install is not required; the build downloads the oracle into `.zlua-deps/` when needed.
+
+The implementation is organized as a conventional frontend/compiler/runtime pipeline, with these public and testing surfaces layered on top:
 
 | Surface | Purpose |
 | --- | --- |
@@ -52,8 +61,6 @@ The implementation is organized as a conventional frontend/compiler/runtime pipe
 | Standard libraries | Provide Lua-visible library behavior implemented against the zlua runtime. |
 | C API layer | Offer a Lua C API compatibility library backed by zlua where practical. |
 | Test harnesses | Compare zlua against CLua through differential fixtures and the official Lua 5.5 test suite. |
-
-The build downloads the Lua 5.5 source and official tests into `.zlua-deps/` when needed; a system Lua install is not required.
 
 ## Quick Start
 
