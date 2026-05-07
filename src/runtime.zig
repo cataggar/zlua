@@ -3243,6 +3243,15 @@ pub const State = struct {
 
     fn callValue(self: *State, thread: *Thread, op: bytecode.Call) !void {
         const resolved = try self.resolveCall(thread, op);
+        const callee = self.get(thread, resolved.base);
+        if (callee == .closure) {
+            const call_name = thread.next_call_name;
+            const call_namewhat = thread.next_call_namewhat;
+            thread.next_call_name = null;
+            thread.next_call_namewhat = null;
+            try self.callClosure(thread, resolved, callee.closure, call_name, call_namewhat);
+            return;
+        }
         try self.invokeValue(thread, resolved, 0);
     }
 
@@ -4085,6 +4094,32 @@ pub const State = struct {
     fn returnFromFrame(self: *State, thread: *Thread, first: bytecode.Register, count: u16) !void {
         const frame_index = thread.frames.items.len - 1;
         var frame = &thread.frames.items[frame_index];
+        if (frame.pending_returns == null and !frame.proto.has_to_close_locals and (!thread.hook_return or thread.hook_running)) {
+            const source_start = frame.base + first;
+            const source_count = try self.resolveResultCount(thread, source_start, count);
+            self.closeUpvalues(thread, frame.base);
+            if (thread.frames.items.len == 1) {
+                thread.last_result_base = source_start;
+                thread.last_result_count = source_count;
+                frame.deinit(self.allocator);
+                thread.frames.items.len = 0;
+                return;
+            }
+
+            const return_start = frame.return_start;
+            const return_count = try self.resolveReturnCount(frame.return_count, source_count);
+            frame.deinit(self.allocator);
+            thread.frames.items.len -= 1;
+
+            try thread.ensureStack(self.allocator, return_start + return_count, self.stackValueLimit());
+            const copied = @min(return_count, source_count);
+            for (0..copied) |index| thread.stack.items[return_start + index] = thread.stack.items[source_start + index];
+            for (copied..return_count) |index| thread.stack.items[return_start + index] = .nil;
+            thread.last_result_base = return_start;
+            thread.last_result_count = return_count;
+            return;
+        }
+
         const preserved = frame.pending_returns orelse blk: {
             const source_start = frame.base + first;
             const source_count = try self.resolveResultCount(thread, source_start, count);
