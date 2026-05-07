@@ -1,8 +1,6 @@
-# zlua Documentation
+# Documentation Index
 
-zlua is a Zig implementation of Lua 5.5. The current project documentation is organized around the implementation as it exists today, not the original milestone plan.
-
-## Start Here
+Use this index to jump to the document that owns each topic.
 
 | Document | Scope |
 | --- | --- |
@@ -12,4 +10,3 @@ zlua is a Zig implementation of Lua 5.5. The current project documentation is or
 | [Benchmarking](benchmark.md) | Benchmark harness, current baseline, result interpretation, and performance workflow. |
 | [Embedding](embedding.md) | Zig-native host API for creating states, loading code, exposing callbacks, sandboxing, bytecode, and userdata. |
 | [Next Steps](next-steps.md) | Remaining hardening, performance, API, and release-documentation work. |
-
