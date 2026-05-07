@@ -135,18 +135,63 @@ The compiler lowers a resolved AST into `compile.proto.Proto`. A proto is the im
 
 The bytecode is register-oriented. Instructions operate on `u16` register indexes and refer to constants, child protos, upvalues, and jump offsets by compact indexes.
 
-Important instruction families:
+Instruction set:
 
-| Family | Examples |
-| --- | --- |
-| Loads and moves | `load_nil`, `load_bool`, `load_const`, `move` |
-| Globals/upvalues/tables | `get_global`, `set_global`, `declare_global`, `get_upvalue`, `set_upvalue`, `get_table`, `set_table`, `get_field`, `set_field` |
-| Table constructors | `new_table`, `set_array`, `set_list` |
-| Arithmetic and bitwise | `add`, `sub`, `mul`, `div`, `idiv`, `mod`, `pow`, `band`, `bor`, `bxor`, shifts, unary operations |
-| Branching | `jmp`, `compare_branch`, `test_op`, `test_set` |
-| Calls and returns | `call`, `tail_call`, `ret`, `vararg` |
-| Closures and cleanup | `closure`, `close`, `check_close`, `close_tbc` |
-| Loops | `for_prep`, `for_loop`, `tfor_prep`, `tfor_call`, `tfor_loop` |
+| Instruction | Payload | Meaning |
+| --- | --- | --- |
+| `load_nil` | `Register` | Writes `nil` to the destination register. |
+| `load_bool` | `dest`, `value` | Writes a boolean constant to a register. |
+| `load_const` | `dest`, `constant` | Writes a `Proto.constants` entry to a register. |
+| `move` | `dest`, `source` | Copies one register to another. |
+| `get_global` | `register`, `name` | Reads a named global into a register. |
+| `set_global` | `register`, `name` | Writes a register value to a named global. |
+| `declare_global` | `table`, `value`, `name` | Declares a global in the target global table. |
+| `get_upvalue` | `register`, `upvalue` | Reads a captured upvalue into a register. |
+| `set_upvalue` | `register`, `upvalue` | Writes a register value to a captured upvalue. |
+| `get_table` | `dest`, `table`, `key` | Reads `table[key]` using register operands. |
+| `set_table` | `table`, `key`, `value` | Writes `table[key] = value` using register operands. |
+| `set_array` | `table`, `index`, `value` | Writes one array element during table construction. |
+| `get_field` | `dest`, `table`, `name` | Reads `table[name]` where `name` is a string constant. |
+| `set_field` | `table`, `name`, `value` | Writes `table[name] = value` where `name` is a string constant. |
+| `new_table` | `dest`, `array_hint`, `hash_hint` | Allocates a table with constructor size hints. |
+| `set_list` | `table`, `first`, `count`, `start_index` | Bulk-writes sequential constructor values. |
+| `add` | `dest`, `left`, `right` | Computes `left + right`. |
+| `sub` | `dest`, `left`, `right` | Computes `left - right`. |
+| `mul` | `dest`, `left`, `right` | Computes `left * right`. |
+| `div` | `dest`, `left`, `right` | Computes `left / right`. |
+| `idiv` | `dest`, `left`, `right` | Computes floor division. |
+| `mod` | `dest`, `left`, `right` | Computes modulo. |
+| `pow` | `dest`, `left`, `right` | Computes exponentiation. |
+| `unm` | `dest`, `source` | Computes unary minus. |
+| `band` | `dest`, `left`, `right` | Computes bitwise and. |
+| `bor` | `dest`, `left`, `right` | Computes bitwise or. |
+| `bxor` | `dest`, `left`, `right` | Computes bitwise exclusive or. |
+| `bnot` | `dest`, `source` | Computes bitwise not. |
+| `shl` | `dest`, `left`, `right` | Computes left shift. |
+| `shr` | `dest`, `left`, `right` | Computes right shift. |
+| `eq` | `dest`, `left`, `right` | Writes the equality comparison result. |
+| `lt` | `dest`, `left`, `right` | Writes the less-than comparison result. |
+| `le` | `dest`, `left`, `right` | Writes the less-or-equal comparison result. |
+| `not` | `dest`, `source` | Computes Lua logical not. |
+| `len` | `dest`, `source` | Computes Lua length. |
+| `concat` | `dest`, `left`, `right` | Concatenates values. |
+| `jmp` | `JumpOffset` | Moves the program counter by a relative offset. |
+| `compare_branch` | `left`, `right`, `op`, `jump_if_truthy`, `offset` | Branches on `eq`, `lt`, or `le`. |
+| `test_op` | `register`, `jump_if_truthy`, `offset` | Branches on register truthiness. |
+| `test_set` | `dest`, `source`, `jump_if_truthy`, `offset` | Copies `source` to `dest`, then branches on truthiness. |
+| `call` | `base`, `arg_count`, `return_count` | Calls a value with fixed or multret arity. |
+| `tail_call` | `base`, `arg_count`, `return_count` | Performs a tail call. |
+| `ret` | `first`, `count` | Returns fixed or multret values from a function. |
+| `vararg` | `dest`, `count` | Loads fixed or multret varargs. |
+| `closure` | `dest`, `proto` | Instantiates a child proto as a closure. |
+| `close` | `Register` | Closes open upvalues at or above a register. |
+| `check_close` | `Register` | Validates a to-be-closed value. |
+| `close_tbc` | `Register` | Runs to-be-closed cleanup for a register. |
+| `for_prep` | `base`, `offset` | Prepares a numeric `for` loop. |
+| `for_loop` | `base`, `offset` | Advances and branches a numeric `for` loop. |
+| `tfor_prep` | `base`, `variable_count`, `offset` | Advances a generic `for` iterator and exits on `nil`. |
+| `tfor_call` | `base`, `variable_count`, `offset` | Advances a generic `for` iterator and stores loop variables. |
+| `tfor_loop` | `base`, `variable_count`, `offset` | Jumps to continue a generic `for` loop. |
 
 The compiler preserves enough debug and operand-origin data to make runtime errors look like Lua errors instead of generic VM errors.
 
