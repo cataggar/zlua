@@ -139,7 +139,7 @@ defer chunk.deinit();
 const answer = try chunk.call(.{}, i64);
 ```
 
-`LoadOptions.mode` accepts `source_only`, `binary_only`, and `source_or_binary`. Binary loading supports zlua binary chunks produced in the same state lifetime, such as data from Lua `string.dump`; it does not promise PUC Lua binary chunk compatibility.
+`LoadOptions.mode` accepts `source_only`, `binary_only`, and `source_or_binary`. Binary loading supports zlua binary chunks produced by zlua, such as data from Lua `string.dump`; PUC Lua `luac` chunks are rejected.
 
 Use `loadString` or `loadFile` when you want a reusable, rooted function handle:
 

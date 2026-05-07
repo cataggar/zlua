@@ -712,7 +712,7 @@ test fixture
 | Header source | Derive from vendored public headers and preserve copyright |
 | Library name | Install as zlua-owned artifact first, not `liblua` |
 | Dynamic module loading | Defer full dynamic loading unless package C searchers become a Milestone 22 acceptance gate |
-| Binary chunks | Implement `lua_dump`/`lua_load` with zlua binary chunks until Milestone 23 decides PUC compatibility |
+| Binary chunks | Implement `lua_dump`/`lua_load` with zlua binary chunks; reject PUC Lua `luac` chunks |
 | Panic implementation | Use a contained C trampoline if Zig-only non-local exit is not practical |
 | C API default capabilities | Match CLua behavior for `luaL_openlibs`; add zlua-specific capability configuration only after public compatibility is working |
 

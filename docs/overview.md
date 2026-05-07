@@ -1838,29 +1838,32 @@ Decide whether zlua supports binary bytecode.
 
 | Option             | Meaning                    |
 | ------------------ | -------------------------- |
-| Source only        | Load Lua source only       |
-| zlua bytecode only | Internal dump/load format  |
-| PUC reader         | Load Lua 5.5 binary chunks |
-| PUC writer         | Emit Lua 5.5 binary chunks |
+| Source only        | Load Lua source only              |
+| zlua bytecode only | zlua-owned dump/load format       |
+| PUC reader         | Load Lua 5.5 `luac` binary chunks |
+| PUC writer         | Emit Lua 5.5 `luac` binary chunks |
 
 ### Recommendation
 
-For v1.0:
+Final decision for v1.0:
 
 ```text
 support source loading
-support internal bytecode dump for debugging
-do not promise PUC binary chunk compatibility
+support zlua bytecode export/import through string.dump, lua_dump, load, and lua_load
+reject PUC Lua binary chunks cleanly
+do not emit PUC Lua binary chunks
 ```
+
+zlua binary chunks are a project-owned serialization of zlua prototypes. They are not a stable PUC Lua `luac` format and are only intended for zlua-to-zlua interchange.
 
 ### CLua-integrated tests
 
-If binary chunks are attempted:
+Binary chunk tests:
 
 ```text
-CLua string.dump -> zlua load
 zlua dump -> zlua load
-zlua dump -> CLua load only if PUC compatibility is promised
+zlua dump -> zlua load in a fresh State/process
+PUC/foreign binary chunk -> clean rejection
 ```
 
 ### Acceptance criteria
@@ -1868,6 +1871,7 @@ zlua dump -> CLua load only if PUC compatibility is promised
 ```text
 binary chunk support status is explicit
 unsupported binary chunks fail cleanly
+zlua bytecode round-trips without source recompilation
 ```
 
 ---

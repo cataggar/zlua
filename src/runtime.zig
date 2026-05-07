@@ -19,7 +19,7 @@ const default_max_call_frames: usize = 256;
 const max_error_handler_depth: usize = 200;
 const max_metamethod_depth: usize = 15;
 pub const binary_chunk_signature = "\x1bLua";
-pub const binary_chunk_payload_magic = "zlua\x00dump";
+pub const binary_chunk_payload_magic = "zlua\x00bc1";
 
 pub const Value = union(enum) {
     nil,
@@ -311,29 +311,489 @@ pub fn appendBinaryChunkHeader(allocator: std.mem.Allocator, out: *std.ArrayList
 
 pub fn dumpClosureBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), closure: *const Closure, strip_debug: bool) !void {
     const strip = strip_debug or closure.stripped_debug;
-    var debug_payload = std.ArrayList(u8).empty;
-    defer debug_payload.deinit(allocator);
-    if (!strip) {
-        try debug_payload.appendSlice(allocator, closure.proto.source_name);
-        try appendProtoDebugStrings(allocator, &debug_payload, closure.proto);
-    }
-
     try appendBinaryChunkHeader(allocator, out);
     try out.appendSlice(allocator, binary_chunk_payload_magic);
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, bytes[0..8], @intFromPtr(closure.proto), .little);
-    try out.appendSlice(allocator, bytes[0..8]);
-    std.mem.writeInt(u32, bytes[0..4], @intCast(debug_payload.items.len), .little);
-    try out.appendSlice(allocator, bytes[0..4]);
-    try out.appendSlice(allocator, debug_payload.items);
+    try appendBinaryBool(allocator, out, strip);
+    try appendBinaryProto(allocator, out, closure.proto, null, strip);
 }
 
-fn appendProtoDebugStrings(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const proto_mod.Proto) !void {
-    for (proto.constants.items) |constant| {
-        if (constant == .string) try out.appendSlice(allocator, constant.string);
+fn appendBinaryProto(allocator: std.mem.Allocator, out: *std.ArrayList(u8), proto: *const proto_mod.Proto, parent_source_name: ?[]const u8, strip_debug: bool) !void {
+    const source_name = if (strip_debug) "?" else proto.source_name;
+    const source_matches_parent = if (parent_source_name) |parent| std.mem.eql(u8, source_name, parent) else false;
+    try appendBinaryBool(allocator, out, !source_matches_parent);
+    if (!source_matches_parent) try appendBinaryString(allocator, out, source_name);
+
+    const debug_name = if (strip_debug) null else proto.debug_name;
+    try appendBinaryBool(allocator, out, debug_name != null);
+    if (debug_name) |name| try appendBinaryString(allocator, out, name);
+    try appendBinaryU64(allocator, out, proto.defined_line);
+    try appendBinaryU64(allocator, out, proto.last_defined_line);
+    try appendBinaryU16(allocator, out, proto.max_registers);
+    try appendBinaryU16(allocator, out, proto.param_count);
+    try appendBinaryBool(allocator, out, proto.is_vararg);
+    try appendBinaryBool(allocator, out, proto.named_vararg);
+
+    try appendBinaryU32(allocator, out, proto.constants.items.len);
+    for (proto.constants.items) |constant| try appendBinaryConstant(allocator, out, constant);
+
+    try appendBinaryU32(allocator, out, proto.instructions.items.len);
+    for (proto.instructions.items, 0..) |instruction, index| {
+        try appendBinaryInstruction(allocator, out, instruction);
+        const line = if (index < proto.line_info.items.len) proto.line_info.items[index].line else 0;
+        try appendBinaryU64(allocator, out, line);
     }
-    for (proto.children.items) |child| try appendProtoDebugStrings(allocator, out, child);
+
+    try appendBinaryU32(allocator, out, proto.locals.items.len);
+    for (proto.locals.items) |local| {
+        try appendBinaryString(allocator, out, local.name);
+        try appendBinaryU16(allocator, out, local.register);
+        try appendBinaryU64(allocator, out, local.start_pc);
+        try appendBinaryU64(allocator, out, local.end_pc);
+        try appendBinaryBool(allocator, out, local.to_close);
+    }
+
+    try appendBinaryU32(allocator, out, proto.upvalues.items.len);
+    for (proto.upvalues.items) |upvalue| {
+        try appendBinaryString(allocator, out, upvalue.name);
+        try appendBinaryBool(allocator, out, upvalue.in_stack);
+        try appendBinaryU16(allocator, out, upvalue.index);
+    }
+
+    try appendBinaryU32(allocator, out, proto.error_sites.items.len);
+    for (proto.error_sites.items) |entry| {
+        try appendBinaryU64(allocator, out, entry.pc);
+        try appendBinaryErrorSite(allocator, out, entry.site);
+    }
+
+    try appendBinaryU32(allocator, out, proto.children.items.len);
+    for (proto.children.items) |child| try appendBinaryProto(allocator, out, child, source_name, strip_debug);
 }
+
+fn appendBinaryConstant(allocator: std.mem.Allocator, out: *std.ArrayList(u8), constant: bytecode.Constant) !void {
+    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(constant))));
+    switch (constant) {
+        .nil => {},
+        .boolean => |value| try appendBinaryBool(allocator, out, value),
+        .integer => |value| try appendBinaryString(allocator, out, value),
+        .number => |value| try appendBinaryString(allocator, out, value),
+        .string => |value| try appendBinaryString(allocator, out, value),
+    }
+}
+
+fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instruction: bytecode.Instruction) !void {
+    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(instruction))));
+    switch (instruction) {
+        .load_nil => |dest| try appendBinaryU16(allocator, out, dest),
+        .load_bool => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryBool(allocator, out, op.value);
+        },
+        .load_const => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU32(allocator, out, op.constant);
+        },
+        .move => |op| try appendBinaryMove(allocator, out, op),
+        .get_global, .set_global => |op| {
+            try appendBinaryU16(allocator, out, op.register);
+            try appendBinaryU32(allocator, out, op.name);
+        },
+        .declare_global => |op| {
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU16(allocator, out, op.value);
+            try appendBinaryU32(allocator, out, op.name);
+        },
+        .get_upvalue, .set_upvalue => |op| {
+            try appendBinaryU16(allocator, out, op.register);
+            try appendBinaryU16(allocator, out, op.upvalue);
+        },
+        .get_table => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU16(allocator, out, op.key);
+        },
+        .set_table => |op| {
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU16(allocator, out, op.key);
+            try appendBinaryU16(allocator, out, op.value);
+        },
+        .get_field => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU32(allocator, out, op.name);
+        },
+        .set_field => |op| {
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU32(allocator, out, op.name);
+            try appendBinaryU16(allocator, out, op.value);
+        },
+        .new_table => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU32(allocator, out, op.array_hint);
+            try appendBinaryU32(allocator, out, op.hash_hint);
+        },
+        .set_list => |op| {
+            try appendBinaryU16(allocator, out, op.table);
+            try appendBinaryU16(allocator, out, op.first);
+            try appendBinaryU32(allocator, out, op.count);
+            try appendBinaryU32(allocator, out, op.start_index);
+        },
+        .add, .sub, .mul, .div, .idiv, .mod, .pow, .band, .bor, .bxor, .shl, .shr, .eq, .lt, .le, .concat => |op| try appendBinaryBinary(allocator, out, op),
+        .unm, .bnot, .not, .len => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU16(allocator, out, op.source);
+        },
+        .jmp => |offset| try appendBinaryI32(allocator, out, offset),
+        .test_op => |op| {
+            try appendBinaryU16(allocator, out, op.register);
+            try appendBinaryBool(allocator, out, op.jump_if_truthy);
+            try appendBinaryI32(allocator, out, op.offset);
+        },
+        .test_set => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU16(allocator, out, op.source);
+            try appendBinaryBool(allocator, out, op.jump_if_truthy);
+            try appendBinaryI32(allocator, out, op.offset);
+        },
+        .call, .tail_call => |op| {
+            try appendBinaryU16(allocator, out, op.base);
+            try appendBinaryU16(allocator, out, op.arg_count);
+            try appendBinaryU16(allocator, out, op.return_count);
+        },
+        .ret => |op| {
+            try appendBinaryU16(allocator, out, op.first);
+            try appendBinaryU16(allocator, out, op.count);
+        },
+        .vararg => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU16(allocator, out, op.count);
+        },
+        .closure => |op| {
+            try appendBinaryU16(allocator, out, op.dest);
+            try appendBinaryU32(allocator, out, op.proto);
+        },
+        .close, .check_close, .close_tbc => |register| try appendBinaryU16(allocator, out, register),
+        .for_prep, .for_loop => |op| {
+            try appendBinaryU16(allocator, out, op.base);
+            try appendBinaryI32(allocator, out, op.offset);
+        },
+        .tfor_prep, .tfor_call, .tfor_loop => |op| {
+            try appendBinaryU16(allocator, out, op.base);
+            try appendBinaryU16(allocator, out, op.variable_count);
+            try appendBinaryI32(allocator, out, op.offset);
+        },
+    }
+}
+
+fn appendBinaryMove(allocator: std.mem.Allocator, out: *std.ArrayList(u8), op: bytecode.Move) !void {
+    try appendBinaryU16(allocator, out, op.dest);
+    try appendBinaryU16(allocator, out, op.source);
+}
+
+fn appendBinaryBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), op: bytecode.Binary) !void {
+    try appendBinaryU16(allocator, out, op.dest);
+    try appendBinaryU16(allocator, out, op.left);
+    try appendBinaryU16(allocator, out, op.right);
+}
+
+fn appendBinaryErrorSite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), site: proto_mod.ErrorSite) !void {
+    try appendBinaryU64(allocator, out, site.line);
+    try out.append(allocator, @intCast(@intFromEnum(site.op)));
+    try appendBinaryU32(allocator, out, site.operands.len);
+    for (site.operands) |origin| try appendBinaryOrigin(allocator, out, origin);
+    try appendBinaryBool(allocator, out, site.call_name != null);
+    if (site.call_name) |origin| try appendBinaryOrigin(allocator, out, origin);
+}
+
+fn appendBinaryOrigin(allocator: std.mem.Allocator, out: *std.ArrayList(u8), origin: proto_mod.OperandOrigin) !void {
+    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(origin))));
+    switch (origin) {
+        .temporary => {},
+        .local, .upvalue, .global, .field, .method, .metamethod, .constant => |name| try appendBinaryString(allocator, out, name),
+    }
+}
+
+fn appendBinaryString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
+    try appendBinaryU32(allocator, out, value.len);
+    try out.appendSlice(allocator, value);
+}
+
+fn appendBinaryBool(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: bool) !void {
+    try out.append(allocator, if (value) 1 else 0);
+}
+
+fn appendBinaryU16(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16) !void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, bytes[0..], value, .little);
+    try out.appendSlice(allocator, bytes[0..]);
+}
+
+fn appendBinaryU32(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: anytype) !void {
+    const int_value = std.math.cast(u32, value) orelse return error.OutOfMemory;
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, bytes[0..], int_value, .little);
+    try out.appendSlice(allocator, bytes[0..]);
+}
+
+fn appendBinaryI32(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i32) !void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(i32, bytes[0..], value, .little);
+    try out.appendSlice(allocator, bytes[0..]);
+}
+
+fn appendBinaryU64(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: anytype) !void {
+    const int_value = std.math.cast(u64, value) orelse return error.OutOfMemory;
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..], int_value, .little);
+    try out.appendSlice(allocator, bytes[0..]);
+}
+
+const BinaryChunkReader = struct {
+    state: *State,
+    source: []const u8,
+    pos: usize,
+
+    fn readProto(self: *BinaryChunkReader, parent_source_name: ?[]const u8) anyerror!*proto_mod.Proto {
+        const proto = try self.state.allocator.create(proto_mod.Proto);
+        errdefer self.state.allocator.destroy(proto);
+        proto.* = proto_mod.Proto.init(self.state.allocator);
+        errdefer proto.deinit();
+        try self.readProtoBody(proto, parent_source_name);
+        return proto;
+    }
+
+    fn readProtoBody(self: *BinaryChunkReader, proto: *proto_mod.Proto, parent_source_name: ?[]const u8) anyerror!void {
+        proto.source_name = if (try self.readBool())
+            try self.readProtoString(proto)
+        else if (parent_source_name) |source_name|
+            try proto.arena.allocator().dupe(u8, source_name)
+        else
+            return self.state.fail("bad binary chunk");
+        if (try self.readBool()) proto.debug_name = try self.readProtoString(proto);
+        proto.defined_line = try self.readUsize();
+        proto.last_defined_line = try self.readUsize();
+        proto.max_registers = try self.readU16();
+        proto.param_count = try self.readU16();
+        proto.is_vararg = try self.readBool();
+        proto.named_vararg = try self.readBool();
+
+        const constant_count = try self.readCount();
+        try proto.constants.ensureTotalCapacity(proto.allocator, constant_count);
+        for (0..constant_count) |_| try proto.constants.append(proto.allocator, try self.readConstant(proto));
+
+        const instruction_count = try self.readCount();
+        try proto.instructions.ensureTotalCapacity(proto.allocator, instruction_count);
+        try proto.line_info.ensureTotalCapacity(proto.allocator, instruction_count);
+        for (0..instruction_count) |_| {
+            try proto.instructions.append(proto.allocator, try self.readInstruction());
+            try proto.line_info.append(proto.allocator, .{ .line = try self.readUsize() });
+        }
+
+        const local_count = try self.readCount();
+        try proto.locals.ensureTotalCapacity(proto.allocator, local_count);
+        for (0..local_count) |_| {
+            try proto.locals.append(proto.allocator, .{
+                .name = try self.readProtoString(proto),
+                .register = try self.readU16(),
+                .start_pc = try self.readUsize(),
+                .end_pc = try self.readUsize(),
+                .to_close = try self.readBool(),
+            });
+        }
+
+        const upvalue_count = try self.readCount();
+        try proto.upvalues.ensureTotalCapacity(proto.allocator, upvalue_count);
+        for (0..upvalue_count) |_| {
+            try proto.upvalues.append(proto.allocator, .{
+                .name = try self.readProtoString(proto),
+                .in_stack = try self.readBool(),
+                .index = try self.readU16(),
+            });
+        }
+
+        const error_site_count = try self.readCount();
+        try proto.error_sites.ensureTotalCapacity(proto.allocator, error_site_count);
+        for (0..error_site_count) |_| {
+            const pc = try self.readUsize();
+            const site = try self.readErrorSite(proto);
+            try proto.error_sites.append(proto.allocator, .{ .pc = pc, .site = site });
+        }
+
+        const child_count = try self.readCount();
+        try proto.children.ensureTotalCapacity(proto.allocator, child_count);
+        for (0..child_count) |_| {
+            const child = try self.readProto(proto.source_name);
+            errdefer {
+                child.deinit();
+                self.state.allocator.destroy(child);
+            }
+            try proto.children.append(proto.allocator, child);
+        }
+    }
+
+    fn readConstant(self: *BinaryChunkReader, proto: *proto_mod.Proto) !bytecode.Constant {
+        const ConstantTag = std.meta.Tag(bytecode.Constant);
+        const tag = try self.readEnum(ConstantTag);
+        return switch (tag) {
+            .nil => .nil,
+            .boolean => .{ .boolean = try self.readBool() },
+            .integer => .{ .integer = try self.readProtoString(proto) },
+            .number => .{ .number = try self.readProtoString(proto) },
+            .string => .{ .string = try self.readProtoString(proto) },
+        };
+    }
+
+    fn readInstruction(self: *BinaryChunkReader) !bytecode.Instruction {
+        const InstructionTag = std.meta.Tag(bytecode.Instruction);
+        const tag = try self.readEnum(InstructionTag);
+        return switch (tag) {
+            .load_nil => .{ .load_nil = try self.readU16() },
+            .load_bool => .{ .load_bool = .{ .dest = try self.readU16(), .value = try self.readBool() } },
+            .load_const => .{ .load_const = .{ .dest = try self.readU16(), .constant = try self.readU32() } },
+            .move => .{ .move = .{ .dest = try self.readU16(), .source = try self.readU16() } },
+            .get_global => .{ .get_global = .{ .register = try self.readU16(), .name = try self.readU32() } },
+            .set_global => .{ .set_global = .{ .register = try self.readU16(), .name = try self.readU32() } },
+            .declare_global => .{ .declare_global = .{ .table = try self.readU16(), .value = try self.readU16(), .name = try self.readU32() } },
+            .get_upvalue => .{ .get_upvalue = .{ .register = try self.readU16(), .upvalue = try self.readU16() } },
+            .set_upvalue => .{ .set_upvalue = .{ .register = try self.readU16(), .upvalue = try self.readU16() } },
+            .get_table => .{ .get_table = .{ .dest = try self.readU16(), .table = try self.readU16(), .key = try self.readU16() } },
+            .set_table => .{ .set_table = .{ .table = try self.readU16(), .key = try self.readU16(), .value = try self.readU16() } },
+            .get_field => .{ .get_field = .{ .dest = try self.readU16(), .table = try self.readU16(), .name = try self.readU32() } },
+            .set_field => .{ .set_field = .{ .table = try self.readU16(), .name = try self.readU32(), .value = try self.readU16() } },
+            .new_table => .{ .new_table = .{ .dest = try self.readU16(), .array_hint = try self.readU32(), .hash_hint = try self.readU32() } },
+            .set_list => .{ .set_list = .{ .table = try self.readU16(), .first = try self.readU16(), .count = try self.readU32(), .start_index = try self.readU32() } },
+            .add => .{ .add = try self.readBinary() },
+            .sub => .{ .sub = try self.readBinary() },
+            .mul => .{ .mul = try self.readBinary() },
+            .div => .{ .div = try self.readBinary() },
+            .idiv => .{ .idiv = try self.readBinary() },
+            .mod => .{ .mod = try self.readBinary() },
+            .pow => .{ .pow = try self.readBinary() },
+            .unm => .{ .unm = try self.readUnary() },
+            .band => .{ .band = try self.readBinary() },
+            .bor => .{ .bor = try self.readBinary() },
+            .bxor => .{ .bxor = try self.readBinary() },
+            .bnot => .{ .bnot = try self.readUnary() },
+            .shl => .{ .shl = try self.readBinary() },
+            .shr => .{ .shr = try self.readBinary() },
+            .eq => .{ .eq = try self.readBinary() },
+            .lt => .{ .lt = try self.readBinary() },
+            .le => .{ .le = try self.readBinary() },
+            .not => .{ .not = try self.readUnary() },
+            .len => .{ .len = try self.readUnary() },
+            .concat => .{ .concat = try self.readBinary() },
+            .jmp => .{ .jmp = try self.readI32() },
+            .test_op => .{ .test_op = .{ .register = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
+            .test_set => .{ .test_set = .{ .dest = try self.readU16(), .source = try self.readU16(), .jump_if_truthy = try self.readBool(), .offset = try self.readI32() } },
+            .call => .{ .call = .{ .base = try self.readU16(), .arg_count = try self.readU16(), .return_count = try self.readU16() } },
+            .tail_call => .{ .tail_call = .{ .base = try self.readU16(), .arg_count = try self.readU16(), .return_count = try self.readU16() } },
+            .ret => .{ .ret = .{ .first = try self.readU16(), .count = try self.readU16() } },
+            .vararg => .{ .vararg = .{ .dest = try self.readU16(), .count = try self.readU16() } },
+            .closure => .{ .closure = .{ .dest = try self.readU16(), .proto = try self.readU32() } },
+            .close => .{ .close = try self.readU16() },
+            .check_close => .{ .check_close = try self.readU16() },
+            .close_tbc => .{ .close_tbc = try self.readU16() },
+            .for_prep => .{ .for_prep = .{ .base = try self.readU16(), .offset = try self.readI32() } },
+            .for_loop => .{ .for_loop = .{ .base = try self.readU16(), .offset = try self.readI32() } },
+            .tfor_prep => .{ .tfor_prep = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
+            .tfor_call => .{ .tfor_call = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
+            .tfor_loop => .{ .tfor_loop = .{ .base = try self.readU16(), .variable_count = try self.readU16(), .offset = try self.readI32() } },
+        };
+    }
+
+    fn readUnary(self: *BinaryChunkReader) !bytecode.Unary {
+        return .{ .dest = try self.readU16(), .source = try self.readU16() };
+    }
+
+    fn readBinary(self: *BinaryChunkReader) !bytecode.Binary {
+        return .{ .dest = try self.readU16(), .left = try self.readU16(), .right = try self.readU16() };
+    }
+
+    fn readErrorSite(self: *BinaryChunkReader, proto: *proto_mod.Proto) !proto_mod.ErrorSite {
+        const line = try self.readUsize();
+        const op = try self.readEnum(proto_mod.ErrorOp);
+        const operand_count = try self.readCount();
+        const operands = try proto.arena.allocator().alloc(proto_mod.OperandOrigin, operand_count);
+        for (operands) |*operand| operand.* = try self.readOrigin(proto);
+        const call_name = if (try self.readBool()) try self.readOrigin(proto) else null;
+        return .{ .line = line, .op = op, .operands = operands, .call_name = call_name };
+    }
+
+    fn readOrigin(self: *BinaryChunkReader, proto: *proto_mod.Proto) !proto_mod.OperandOrigin {
+        const OriginTag = std.meta.Tag(proto_mod.OperandOrigin);
+        const tag = try self.readEnum(OriginTag);
+        return switch (tag) {
+            .temporary => .temporary,
+            .local => .{ .local = try self.readProtoString(proto) },
+            .upvalue => .{ .upvalue = try self.readProtoString(proto) },
+            .global => .{ .global = try self.readProtoString(proto) },
+            .field => .{ .field = try self.readProtoString(proto) },
+            .method => .{ .method = try self.readProtoString(proto) },
+            .metamethod => .{ .metamethod = try self.readProtoString(proto) },
+            .constant => .{ .constant = try self.readProtoString(proto) },
+        };
+    }
+
+    fn readProtoString(self: *BinaryChunkReader, proto: *proto_mod.Proto) ![]const u8 {
+        const bytes = try self.readStringBytes();
+        return proto.arena.allocator().dupe(u8, bytes);
+    }
+
+    fn readStringBytes(self: *BinaryChunkReader) ![]const u8 {
+        return self.readBytes(try self.readCount());
+    }
+
+    fn readBool(self: *BinaryChunkReader) !bool {
+        return switch (try self.readByte()) {
+            0 => false,
+            1 => true,
+            else => self.state.fail("bad binary chunk"),
+        };
+    }
+
+    fn readEnum(self: *BinaryChunkReader, comptime T: type) !T {
+        const tag = try self.readByte();
+        if (tag >= std.meta.fields(T).len) return self.state.fail("bad binary chunk");
+        return @enumFromInt(tag);
+    }
+
+    fn readCount(self: *BinaryChunkReader) !usize {
+        return std.math.cast(usize, try self.readU32()) orelse self.state.fail("bad binary chunk");
+    }
+
+    fn readUsize(self: *BinaryChunkReader) !usize {
+        return std.math.cast(usize, try self.readU64()) orelse self.state.fail("bad binary chunk");
+    }
+
+    fn readByte(self: *BinaryChunkReader) !u8 {
+        if (self.pos >= self.source.len) return self.state.fail("truncated binary chunk");
+        const byte = self.source[self.pos];
+        self.pos += 1;
+        return byte;
+    }
+
+    fn readBytes(self: *BinaryChunkReader, len: usize) ![]const u8 {
+        if (self.source.len - self.pos < len) return self.state.fail("truncated binary chunk");
+        const bytes = self.source[self.pos .. self.pos + len];
+        self.pos += len;
+        return bytes;
+    }
+
+    fn readU16(self: *BinaryChunkReader) !u16 {
+        return std.mem.readInt(u16, (try self.readBytes(2))[0..2], .little);
+    }
+
+    fn readU32(self: *BinaryChunkReader) !u32 {
+        return std.mem.readInt(u32, (try self.readBytes(4))[0..4], .little);
+    }
+
+    fn readI32(self: *BinaryChunkReader) !i32 {
+        return std.mem.readInt(i32, (try self.readBytes(4))[0..4], .little);
+    }
+
+    fn readU64(self: *BinaryChunkReader) !u64 {
+        return std.mem.readInt(u64, (try self.readBytes(8))[0..8], .little);
+    }
+};
 
 fn appendHeaderInt(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64, size: usize) !void {
     var bytes: [8]u8 = undefined;
@@ -1678,19 +2138,20 @@ pub const State = struct {
         if (!std.mem.eql(u8, source[0..header.items.len], header.items)) return self.fail("bad binary chunk");
 
         var pos = header.items.len;
-        const payload_len = binary_chunk_payload_magic.len + @sizeOf(u64) + @sizeOf(u32);
-        if (source.len < pos + payload_len) return self.fail("truncated binary chunk");
-        if (!std.mem.eql(u8, source[pos .. pos + binary_chunk_payload_magic.len], binary_chunk_payload_magic)) return self.fail("bad binary chunk");
+        if (source.len < pos + binary_chunk_payload_magic.len) return self.fail("truncated binary chunk");
+        if (!std.mem.eql(u8, source[pos .. pos + binary_chunk_payload_magic.len], binary_chunk_payload_magic)) return self.fail("unsupported PUC Lua binary chunk");
         pos += binary_chunk_payload_magic.len;
 
-        const proto_addr = std.mem.readInt(u64, source[pos..][0..@sizeOf(u64)], .little);
-        pos += @sizeOf(u64);
-        const debug_len = std.mem.readInt(u32, source[pos..][0..@sizeOf(u32)], .little);
-        pos += @sizeOf(u32);
-        if (source.len < pos + debug_len) return self.fail("truncated binary chunk");
-
-        const proto: *const proto_mod.Proto = @ptrFromInt(@as(usize, @intCast(proto_addr)));
-        return self.newDumpedClosure(proto, environment, debug_len == 0);
+        var reader = BinaryChunkReader{ .state = self, .source = source, .pos = pos };
+        const stripped_debug = try reader.readBool();
+        const proto = try reader.readProto(null);
+        errdefer {
+            proto.deinit();
+            self.allocator.destroy(proto);
+        }
+        if (reader.pos != source.len) return self.fail("bad binary chunk");
+        try self.proto_allocations.append(self.allocator, proto);
+        return self.newDumpedClosure(proto, environment, stripped_debug);
     }
 
     pub fn loadFileAsClosure(self: *State, path: []const u8) !Value {
@@ -6683,6 +7144,105 @@ test "string.dump reloads Lua closures" {
 
     try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
     try std.testing.expect(std.mem.eql(u8, result.stdout, "42\tfalse\ttrue\n"));
+}
+
+test "zlua binary chunks are portable across states" {
+    var dump = std.ArrayList(u8).empty;
+    defer dump.deinit(std.testing.allocator);
+
+    {
+        var source_state = try State.init(std.testing.allocator);
+        defer source_state.deinit();
+        const loaded = try source_state.loadSourceAsClosure("return 42, 'ok'");
+        try dumpClosureBinary(std.testing.allocator, &dump, loaded.closure, false);
+    }
+
+    var target_state = try State.init(std.testing.allocator);
+    defer target_state.deinit();
+    const loaded = try target_state.loadBinaryDump(dump.items, .nil);
+    const values = try target_state.callLoadedClosure(loaded.closure, &.{});
+    defer target_state.allocator.free(values);
+
+    try std.testing.expectEqual(@as(usize, 2), values.len);
+    try std.testing.expect(valuesEqual(values[0], .{ .integer = 42 }));
+    try std.testing.expect(valuesEqual(values[1], .{ .string = "ok" }));
+}
+
+test "zlua binary chunks preserve nested protos and upvalue descriptors" {
+    var result = try executeSource(std.testing.allocator,
+        \\local source = [[
+        \\  return function(seed)
+        \\    local total = seed
+        \\    local function add(value)
+        \\      total = total + value
+        \\      return total
+        \\    end
+        \\    return add
+        \\  end
+        \\]]
+        \\local factory = assert(load(string.dump(assert(load(source)))))()
+        \\local add = factory(10)
+        \\print(add(2), add(3))
+        \\local debug = require "debug"
+        \\local closure = factory(1)
+        \\print(debug.getupvalue(closure, 1))
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "12\t15\ntotal\t1\n"));
+}
+
+test "zlua binary chunks honor supplied load environment" {
+    var dump = std.ArrayList(u8).empty;
+    defer dump.deinit(std.testing.allocator);
+
+    {
+        var source_state = try State.init(std.testing.allocator);
+        defer source_state.deinit();
+        const loaded = try source_state.loadSourceAsClosure("return answer + ...");
+        try dumpClosureBinary(std.testing.allocator, &dump, loaded.closure, false);
+    }
+
+    var target_state = try State.init(std.testing.allocator);
+    defer target_state.deinit();
+    const environment = try target_state.newTableWithHints(0, 1);
+    try target_state.setTable(environment, .{ .string = try target_state.intern("answer") }, .{ .integer = 40 });
+
+    const loaded = try target_state.loadBinaryDump(dump.items, environment);
+    const values = try target_state.callLoadedClosure(loaded.closure, &.{.{ .integer = 2 }});
+    defer target_state.allocator.free(values);
+
+    try std.testing.expectEqual(@as(usize, 1), values.len);
+    try std.testing.expect(valuesEqual(values[0], .{ .integer = 42 }));
+}
+
+test "zlua binary chunks preserve stripped debug state" {
+    var result = try executeSource(std.testing.allocator,
+        \\local debug = require "debug"
+        \\local secret = 12
+        \\local f = assert(load(string.dump(function() return secret end, true)))
+        \\print(debug.getupvalue(f, 1))
+        \\print(debug.getinfo(f).currentline)
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "(no name)\tnil\n-1\n"));
+}
+
+test "PUC binary chunks are rejected explicitly" {
+    var chunk = std.ArrayList(u8).empty;
+    defer chunk.deinit(std.testing.allocator);
+    try appendBinaryChunkHeader(std.testing.allocator, &chunk);
+    try chunk.appendNTimes(std.testing.allocator, 0, binary_chunk_payload_magic.len);
+
+    var state = try State.init(std.testing.allocator);
+    defer state.deinit();
+    try std.testing.expectError(error.RuntimeError, state.loadBinaryDump(chunk.items, .nil));
+    const detail = try state.errorDetailAlloc(std.testing.allocator, error.RuntimeError);
+    defer std.testing.allocator.free(detail);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "unsupported PUC Lua binary chunk") != null);
 }
 
 test "official closure upvalue edge cases" {
