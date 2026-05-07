@@ -172,6 +172,7 @@ const Options = struct {
     zlua_lib: ?[]const u8 = null,
     status: []const u8 = "tests/fixtures/c_api_status.toml",
     timeout_ms: u64 = 5000,
+    compile_timeout_ms: u64 = 60000,
     show_build: bool = false,
 };
 
@@ -271,6 +272,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.status = args[index];
         } else if (std.mem.startsWith(u8, arg, "--timeout-ms=")) {
             options.timeout_ms = try std.fmt.parseInt(u64, arg[13..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--compile-timeout-ms=")) {
+            options.compile_timeout_ms = try std.fmt.parseInt(u64, arg[21..], 10);
         } else if (std.mem.eql(u8, arg, "--show-build")) {
             options.show_build = true;
         } else if (std.mem.startsWith(u8, arg, "--")) {
@@ -436,7 +439,7 @@ fn compileFixture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, op
         try out.flush();
     }
 
-    return process.runProcess(allocator, io, argv.items, .{ .timeout_ms = options.timeout_ms });
+    return process.runProcess(allocator, io, argv.items, .{ .timeout_ms = options.compile_timeout_ms });
 }
 
 fn outputPath(allocator: std.mem.Allocator, path: []const u8, variant: Variant) ![]u8 {
