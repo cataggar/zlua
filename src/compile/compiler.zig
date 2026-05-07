@@ -719,21 +719,24 @@ const FunctionCompiler = struct {
         }
 
         const mark = self.registerMark();
+        const direct_left = self.sourceRegister(binary.left);
         const direct_right = self.sourceRegister(binary.right);
+        const use_direct_left = direct_left != null and (direct_right != null or exprIsLiteral(binary.right));
         const use_direct_right = direct_right != null and direct_right.? != dest;
         const right = if (use_direct_right) direct_right.? else try self.allocReg();
         var left_origin = try self.exprOrigin(binary.left);
         var right_origin = try self.exprOrigin(binary.right);
-        try self.compileExprForcedLine(binary.left, dest, binary.op_line);
+        const left = if (use_direct_left) direct_left.? else dest;
+        if (!use_direct_left) try self.compileExprForcedLine(binary.left, dest, binary.op_line);
         if (!use_direct_right) try self.compileExpr(binary.right, right);
         const right_line = exprLine(binary.right.*);
         self.current_line = binary.op_line;
         if (binary.op == .ne) {
-            _ = try self.emitWithErrorSite(.{ .eq = .{ .dest = dest, .left = dest, .right = right } }, .compare, &.{ left_origin, right_origin }, null);
+            _ = try self.emitWithErrorSite(.{ .eq = .{ .dest = dest, .left = left, .right = right } }, .compare, &.{ left_origin, right_origin }, null);
             _ = try self.emit(.{ .not = .{ .dest = dest, .source = dest } });
         } else {
             if (binary.op == .gt or binary.op == .ge) std.mem.swap(proto_mod.OperandOrigin, &left_origin, &right_origin);
-            _ = try self.emitWithErrorSite(binaryInstruction(binary.op, dest, dest, right), binaryErrorOp(binary.op), &.{ left_origin, right_origin }, null);
+            _ = try self.emitWithErrorSite(binaryInstruction(binary.op, dest, left, right), binaryErrorOp(binary.op), &.{ left_origin, right_origin }, null);
         }
         self.current_line = right_line;
         self.release(mark);
@@ -814,6 +817,7 @@ const FunctionCompiler = struct {
 
     fn sourceRegister(self: *FunctionCompiler, expr: *const ast.Expr) ?bytecode.Register {
         return switch (expr.*) {
+            .grouped => |inner| self.sourceRegister(inner),
             .identifier => |identifier| switch (self.lookupName(identifier.name)) {
                 .local => |local| local.register,
                 else => null,
@@ -1404,6 +1408,14 @@ fn binaryInstruction(op: ast.BinaryOp, dest: bytecode.Register, left: bytecode.R
         .idiv => .{ .idiv = binary },
         .mod => .{ .mod = binary },
         .pow => .{ .pow = binary },
+    };
+}
+
+fn exprIsLiteral(expr: *const ast.Expr) bool {
+    return switch (expr.*) {
+        .nil, .boolean, .integer, .float, .string => true,
+        .grouped => |inner| exprIsLiteral(inner),
+        else => false,
     };
 }
 
