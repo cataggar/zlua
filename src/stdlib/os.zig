@@ -101,7 +101,7 @@ pub fn setlocale(state: *State, thread: *Thread, op: bytecode.Call) !void {
 pub fn execute(state: *State, thread: *Thread, op: bytecode.Call) !void {
     if (!state.processEnabled()) return state.fail("process access disabled");
     const command = try state.expectArgumentString(thread, op, "os.execute", 0);
-    const io = state.options.io orelse return state.fail("process I/O unavailable");
+    const io = try state.requireIo("process I/O unavailable");
     const argv = [_][]const u8{ "/bin/sh", "-c", command };
     const result = std.process.run(state.allocator, io, .{
         .argv = &argv,

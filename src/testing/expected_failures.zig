@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Dir = std.Io.Dir;
+
 pub const Registry = struct {
     failures: std.StringHashMap([]u8),
 
@@ -29,7 +31,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Registr
     var registry = Registry.init(allocator);
     errdefer registry.deinit();
 
-    const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+    const content = Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return registry,
         else => return err,
     };

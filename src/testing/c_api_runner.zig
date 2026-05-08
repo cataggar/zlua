@@ -3,6 +3,9 @@ const builtin = @import("builtin");
 
 const process = @import("process.zig");
 
+const Dir = std.Io.Dir;
+const File = std.Io.File;
+
 const public_symbols = [_][]const u8{
     "lua_ident",
     "lua_newstate",
@@ -201,7 +204,7 @@ pub fn runCli(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
     };
 
     var writer_buffer: [8192]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &writer_buffer);
+    var writer = File.stdout().writer(io, &writer_buffer);
     const out = &writer.interface;
 
     const status_ok = try checkStatusInventory(allocator, io, out, options.status);
@@ -230,7 +233,7 @@ pub fn runCli(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8
     std.mem.sort([]u8, tests.items, {}, lessThanString);
 
     var counts: Counts = .{};
-    try std.Io.Dir.cwd().createDirPath(io, ".zig-cache/c-api-fixtures");
+    try Dir.cwd().createDirPath(io, ".zig-cache/c-api-fixtures");
 
     for (tests.items) |path| {
         try runOne(allocator, io, out, path, options, &counts);
@@ -286,7 +289,7 @@ fn parseArgs(args: []const []const u8) !Options {
 }
 
 fn checkStatusInventory(allocator: std.mem.Allocator, io: std.Io, out: anytype, path: []const u8) !bool {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+    const source = try Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(source);
 
     var names = std.StringHashMap(void).init(allocator);
@@ -343,7 +346,7 @@ fn knownSymbol(name: []const u8) bool {
 }
 
 fn discoverTests(allocator: std.mem.Allocator, io: std.Io, root: []const u8, tests: *std.ArrayList([]u8)) !void {
-    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir => {
             if (std.mem.endsWith(u8, root, ".c")) try tests.append(allocator, try allocator.dupe(u8, root));
             return;
@@ -431,7 +434,7 @@ fn compileFixture(allocator: std.mem.Allocator, io: std.Io, path: []const u8, op
 
     if (options.show_build) {
         var buffer: [8192]u8 = undefined;
-        var writer = std.Io.File.stdout().writer(io, &buffer);
+        var writer = File.stdout().writer(io, &buffer);
         const out = &writer.interface;
         try out.print("build {s}:", .{variant.name()});
         for (argv.items) |arg| try out.print(" {s}", .{arg});
@@ -474,7 +477,7 @@ fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
 
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [1024]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }

@@ -2,6 +2,9 @@ const std = @import("std");
 const clua = @import("clua.zig");
 const process = @import("process.zig");
 
+const Dir = std.Io.Dir;
+const File = std.Io.File;
+
 const Options = struct {
     suite_path: []const u8 = ".zlua-deps/lua-5.5.0-tests",
     file_args: []const []const u8 = &.{},
@@ -45,7 +48,7 @@ pub fn runCli(
     defer allocator.free(options.file_args);
 
     var buffer: [8192]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     const out = &writer.interface;
 
     const discovery = try clua.detect(allocator, io, environ_map, options.clua);
@@ -218,7 +221,7 @@ fn appendOfficialFile(allocator: std.mem.Allocator, suite_path: []const u8, file
 }
 
 fn discoverOfficialFiles(allocator: std.mem.Allocator, io: std.Io, suite_path: []const u8, files: *std.ArrayList([]u8)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(io, suite_path, .{ .iterate = true });
+    var dir = try Dir.cwd().openDir(io, suite_path, .{ .iterate = true });
     defer dir.close(io);
 
     var iterator = dir.iterate();
@@ -311,7 +314,7 @@ fn printSummary(out: anytype, counts: Counts) !void {
 
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }

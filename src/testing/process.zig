@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const Dir = std.Io.Dir;
+const Timeout = std.Io.Timeout;
+
 pub const ProcessResult = struct {
     stdout: []u8,
     stderr: []u8,
@@ -58,7 +61,7 @@ pub fn runProcess(
         limit_kb_arg = try std.fmt.allocPrint(allocator, "{d}", .{limit_kb});
 
         if (std.mem.indexOfScalar(u8, argv[0], '/') != null) {
-            owned_arg0 = try std.Io.Dir.cwd().realPathFileAlloc(io, argv[0], allocator);
+            owned_arg0 = try Dir.cwd().realPathFileAlloc(io, argv[0], allocator);
         }
 
         try wrapped_argv.appendSlice(allocator, &.{
@@ -74,7 +77,7 @@ pub fn runProcess(
         expand_arg0 = false;
     }
 
-    const timeout: std.Io.Timeout = if (options.timeout_ms == 0)
+    const timeout: Timeout = if (options.timeout_ms == 0)
         .none
     else
         .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(@intCast(options.timeout_ms)) } };
