@@ -1416,6 +1416,20 @@ fn expectLastErrorContains(lua: *State, needle: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, message, needle) != null);
 }
 
+fn expectProtectedErrorContains(lua: *State, function: Function, needle: []const u8) !void {
+    const result = try function.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, needle) != null);
+        },
+    }
+}
+
 test "api state initializes with safe defaults" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
@@ -2307,6 +2321,24 @@ test "api stack value limit returns a protected Lua error" {
     }
 }
 
+test "api stack value limit catches recursive calls" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_stack_values = 64 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local function recurse(a, b, c, d, e, f, g, h)
+        \\  local value = recurse(a, b, c, d, e, f, g, h)
+        \\  return value
+        \\end
+        \\recurse(1, 2, 3, 4, 5, 6, 7, 8)
+    , .{ .name = "=api-stack-limit-recursion" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "stack overflow");
+}
+
 test "api call frame limit returns a protected Lua error" {
     var lua = try State.init(std.testing.allocator, .{
         .limits = .{ .max_call_frames = 8 },
@@ -2333,6 +2365,181 @@ test "api call frame limit returns a protected Lua error" {
             try std.testing.expect(std.mem.indexOf(u8, message, "stack overflow") != null);
         },
     }
+}
+
+test "api stack value limit catches metamethod recursion" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_stack_values = 64 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local target
+        \\target = setmetatable({}, {
+        \\  __index = function(self, key)
+        \\    local value = self[key]
+        \\    return value
+        \\  end,
+        \\})
+        \\return target.missing
+    , .{ .name = "=api-stack-limit-metamethod-recursion" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "stack overflow");
+}
+
+test "api call frame limit catches metamethod recursion" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_call_frames = 8 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local target
+        \\target = setmetatable({}, {
+        \\  __index = function(self, key)
+        \\    local value = self[key]
+        \\    return value
+        \\  end,
+        \\})
+        \\return target.missing
+    , .{ .name = "=api-call-frame-limit-metamethod-recursion" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "stack overflow");
+}
+
+test "api stack value limit catches coroutine recursion" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_stack_values = 64 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local co = coroutine.create(function(a, b, c, d, e, f, g, h)
+        \\  local function recurse(x1, x2, x3, x4, x5, x6, x7, x8)
+        \\    local value = recurse(x1, x2, x3, x4, x5, x6, x7, x8)
+        \\    return value
+        \\  end
+        \\  recurse(a, b, c, d, e, f, g, h)
+        \\end)
+        \\local ok, err = coroutine.resume(co, 1, 2, 3, 4, 5, 6, 7, 8)
+        \\return ok, tostring(err), coroutine.status(co)
+    , .{ .name = "=api-stack-limit-coroutine-recursion" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ bool, []const u8, []const u8 });
+    var result = try chunk.call(.{}, Result);
+    defer result.deinit();
+    try std.testing.expectEqual(false, result.get(0));
+    try std.testing.expectEqualStrings("dead", result.get(2));
+}
+
+test "api call frame limit catches coroutine recursion" {
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_call_frames = 8 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local co = coroutine.create(function()
+        \\  local function recurse()
+        \\    local value = recurse()
+        \\    return value
+        \\  end
+        \\  recurse()
+        \\end)
+        \\local ok, err = coroutine.resume(co)
+        \\return ok, tostring(err), coroutine.status(co)
+    , .{ .name = "=api-call-frame-limit-coroutine-recursion" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ bool, []const u8, []const u8 });
+    var result = try chunk.call(.{}, Result);
+    defer result.deinit();
+    try std.testing.expectEqual(false, result.get(0));
+    try std.testing.expect(std.mem.indexOf(u8, result.get(1), "stack overflow") != null);
+    try std.testing.expectEqualStrings("dead", result.get(2));
+}
+
+test "api stack value limit catches host callback reentry" {
+    const Callbacks = struct {
+        fn enter(ctx: *Context) !void {
+            var callback = try ctx.arg(0, Function);
+            defer callback.deinit();
+            callback.call(.{}, void) catch |err| switch (err) {
+                error.LuaError => {
+                    const message = try ctx.state().errorMessage();
+                    defer ctx.state().allocator().free(message);
+                    return ctx.raise(message);
+                },
+                else => return err,
+            };
+            try ctx.returnValues(.{});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_stack_values = 96 },
+    });
+    defer lua.deinit();
+
+    var enter = try lua.register("enter", Callbacks.enter);
+    defer enter.deinit();
+    try lua.setGlobal("enter", enter);
+
+    var chunk = try lua.loadString(
+        \\enter(function()
+        \\  local function recurse(a, b, c, d, e, f, g, h)
+        \\    local value = recurse(a, b, c, d, e, f, g, h)
+        \\    return value
+        \\  end
+        \\  recurse(1, 2, 3, 4, 5, 6, 7, 8)
+        \\end)
+    , .{ .name = "=api-stack-limit-host-reentry" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "stack overflow");
+}
+
+test "api call frame limit catches host callback reentry" {
+    const Callbacks = struct {
+        fn enter(ctx: *Context) !void {
+            var callback = try ctx.arg(0, Function);
+            defer callback.deinit();
+            callback.call(.{}, void) catch |err| switch (err) {
+                error.LuaError => {
+                    const message = try ctx.state().errorMessage();
+                    defer ctx.state().allocator().free(message);
+                    return ctx.raise(message);
+                },
+                else => return err,
+            };
+            try ctx.returnValues(.{});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{
+        .limits = .{ .max_call_frames = 8 },
+    });
+    defer lua.deinit();
+
+    var enter = try lua.register("enter", Callbacks.enter);
+    defer enter.deinit();
+    try lua.setGlobal("enter", enter);
+
+    var chunk = try lua.loadString(
+        \\enter(function()
+        \\  local function recurse()
+        \\    local value = recurse()
+        \\    return value
+        \\  end
+        \\  recurse()
+        \\end)
+    , .{ .name = "=api-call-frame-limit-host-reentry" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "stack overflow");
 }
 
 test "api memory limit returns a protected Lua error" {
@@ -2431,4 +2638,60 @@ test "api memory limit applies to captured output buffers" {
             try std.testing.expect(std.mem.indexOf(u8, message, memory_limit_error_message) != null);
         },
     }
+}
+
+test "api memory limit applies to stdlib temporaries" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .safe,
+        .limits = .{ .max_memory = 160 * 1024 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString("return string.rep('x', 256 * 1024)", .{ .name = "=api-memory-stdlib-temporary-limit" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, memory_limit_error_message);
+}
+
+test "api memory limit applies to memory filesystem read copies" {
+    const BigFile = struct {
+        const contents = [_]u8{'x'} ** (256 * 1024);
+    };
+    const files = [_]MemoryFile{
+        .{ .path = "large.lua", .contents = BigFile.contents[0..] },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .safe,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+        .limits = .{ .max_memory = 160 * 1024 },
+    });
+    defer lua.deinit();
+
+    try std.testing.expectError(error.LuaError, lua.loadFile("large.lua", .{}));
+    try expectLastErrorContains(&lua, memory_limit_error_message);
+}
+
+test "api memory limit recovery preserves nested protected calls" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .safe,
+        .limits = .{ .max_memory = 160 * 1024 },
+    });
+    defer lua.deinit();
+
+    var failing = try lua.loadString("return string.rep('x', 256 * 1024)", .{ .name = "=api-memory-recovery-fail" });
+    defer failing.deinit();
+    try expectProtectedErrorContains(&lua, failing, memory_limit_error_message);
+
+    var recovered = try lua.loadString(
+        \\local ok, value = pcall(function()
+        \\  local inner_ok, inner_value = pcall(function()
+        \\    return 21
+        \\  end)
+        \\  assert(inner_ok and inner_value == 21)
+        \\  return inner_value * 2
+        \\end)
+        \\assert(ok and value == 42)
+    , .{ .name = "=api-memory-recovery-nested-pcall" });
+    defer recovered.deinit();
+    try recovered.call(.{}, void);
 }
