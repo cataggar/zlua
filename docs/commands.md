@@ -215,7 +215,7 @@ Options:
 | `--show-zlua` | Print zlua output. |
 | `--debug-errors` | Pass debug error reporting to zlua executions. |
 
-The harness verifies `.zlua-deps/lua-5.5.0-tests.tar.gz` against the expected SHA-256 before running. The `zig build test-official` step passes `--memory-limit-mb=<n>` from `-Dofficial-memory-limit-mb`, defaulting to `256`.
+The `zig build test-official` step passes `--memory-limit-mb=<n>` from `-Dofficial-memory-limit-mb`, defaulting to `256`.
 
 ## Benchmark Harness
 

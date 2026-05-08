@@ -99,7 +99,7 @@ At the time this documentation was written, `tests/fixtures/expected_failures.to
 
 ## Official Lua 5.5 Suite
 
-The official tests are downloaded as `.zlua-deps/lua-5.5.0-tests.tar.gz` and extracted under `.zlua-deps/lua-5.5.0-tests`. `src/testing/official_suite.zig` verifies the archive SHA-256 before running the dashboard.
+The official tests are downloaded as `.zlua-deps/lua-5.5.0-tests.tar.gz` and extracted under `.zlua-deps/lua-5.5.0-tests`. `tools/fetch-lua.sh` verifies the downloaded archive before extraction.
 
 Default behavior:
 

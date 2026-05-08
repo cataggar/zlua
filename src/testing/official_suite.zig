@@ -2,9 +2,6 @@ const std = @import("std");
 const clua = @import("clua.zig");
 const process = @import("process.zig");
 
-const expected_archive_sha256 = "5e47bbfad7db2965d69580e918ee64edeb8d8d32de404b8dae9ce5c6d76a1472";
-const archive_path = ".zlua-deps/lua-5.5.0-tests.tar.gz";
-
 const Options = struct {
     suite_path: []const u8 = ".zlua-deps/lua-5.5.0-tests",
     file_args: []const []const u8 = &.{},
@@ -50,14 +47,6 @@ pub fn runCli(
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &buffer);
     const out = &writer.interface;
-
-    const actual_hash = verifyArchive(allocator, io) catch |err| {
-        try out.print("archive: fail {s} ({s})\n", .{ archive_path, @errorName(err) });
-        try out.flush();
-        return 1;
-    };
-    defer allocator.free(actual_hash);
-    try out.print("archive: ok {s} sha256={s}\n", .{ archive_path, actual_hash });
 
     const discovery = try clua.detect(allocator, io, environ_map, options.clua);
     defer discovery.deinit(allocator);
@@ -145,17 +134,6 @@ fn parseMode(value: []const u8) !Mode {
         if (std.mem.eql(u8, value, field.name)) return @field(Mode, field.name);
     }
     return error.InvalidMode;
-}
-
-fn verifyArchive(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, archive_path, allocator, .limited(1024 * 1024));
-    defer allocator.free(bytes);
-
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    if (!std.mem.eql(u8, &hex, expected_archive_sha256)) return error.ChecksumMismatch;
-    return allocator.dupe(u8, &hex);
 }
 
 fn runIndividualSuite(
