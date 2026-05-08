@@ -36,15 +36,12 @@ larger table layout rewrite
 
 The embedding API exposes memory, stack, call-frame, and instruction limits. Remaining work is to harden semantics and coverage:
 
-1. Document exact instruction-limit semantics: per state, per chunk, per protected call, or resettable budget.
-2. Add reset/query API only after instruction-limit semantics are fixed.
-3. Strengthen memory-limit tests around parser/compiler allocations, stdlib temporaries, host callback conversion, output buffers, and binary chunk loading.
-4. Stress low stack and low call-frame limits against recursion, metamethod recursion, coroutines, and host callback reentry.
-5. Define output capture limits or stream-only guidance for embedding hosts.
-6. Document the safe/full capability threat model in embedding docs once negative coverage is complete.
-7. Add negative sandbox tests for `io`, `os`, `debug`, `package`, environment, process, filesystem, memory files, and module loading.
-8. Define memory filesystem quotas, path normalization, maximum path length, and rename/remove edge behavior.
-9. Consider CLI flags for sandboxed execution and explicit memory/instruction limits.
+1. Extend low-limit coverage into official and differential harness modes once stack, frame, memory, and instruction limit semantics are stable.
+2. Document stream-only guidance for embedding hosts that do not want captured output buffers counted against state memory.
+3. Document the safe/full capability threat model in embedding docs once negative coverage is complete.
+4. Add negative sandbox tests for remaining `io`, `os`, `debug`, `package`, environment, process, filesystem, memory files, and module loading edges.
+5. Define memory filesystem quotas, path normalization, maximum path length, and rename/remove edge behavior.
+6. Consider CLI flags for sandboxed execution and explicit memory/instruction limits.
 
 ## GC And Error Recovery
 

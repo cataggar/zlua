@@ -589,7 +589,7 @@ pub const State = struct {
         const base = frame.base;
         var pc = frame.pc;
         var stack = thread.stack.items;
-        var executed = false;
+        var executed_count: u64 = 0;
 
         fast_loop: while (pc < instructions.len) {
             switch (instructions[pc]) {
@@ -768,12 +768,13 @@ pub const State = struct {
                 },
                 else => break :fast_loop,
             }
-            executed = true;
+            executed_count = executed_count +| 1;
         }
 
-        if (!executed) return false;
+        if (executed_count == 0) return false;
         frame = &thread.frames.items[frame_index];
         frame.pc = pc;
+        self.instruction_count = self.instruction_count +| executed_count;
         thread.last_result_count = 0;
         thread.last_transfer_count = 0;
         return true;
@@ -1410,13 +1411,22 @@ pub const State = struct {
 
     pub fn loadSourceAsClosureNamedEnv(self: *State, source: []const u8, source_name: ?[]const u8, environment: Value) !Value {
         var diagnostic: ?errors.Diagnostic = null;
-        var tree = frontend.parseWithDiagnostic(self.allocator, source, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot load source");
+        var tree = frontend.parseWithDiagnostic(self.allocator, source, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot load source"),
+        };
         defer tree.deinit();
 
-        compile.resolver.resolveWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot resolve source");
+        compile.resolver.resolveWithDiagnostic(self.allocator, &tree, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot resolve source"),
+        };
         const proto = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(proto);
-        proto.* = compile.compileWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot compile source");
+        proto.* = compile.compileWithDiagnostic(self.allocator, &tree, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot compile source"),
+        };
         if (source_name) |name| try setProtoSourceName(proto, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);
