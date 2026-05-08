@@ -32,7 +32,6 @@ test {
     _ = errors;
     _ = api;
     _ = runtime;
-    _ = @import("runtime/tests.zig");
     _ = stdlib;
     _ = testing;
 }

@@ -2,6 +2,7 @@ const chunk_mod = @import("runtime/chunk.zig");
 const execute_mod = @import("runtime/execute.zig");
 const host = @import("runtime/host.zig");
 const state_mod = @import("runtime/state.zig");
+const tests = @import("runtime/tests.zig");
 const types = @import("runtime/types.zig");
 
 pub const RuntimeError = types.RuntimeError;
@@ -69,3 +70,7 @@ pub const appendFmt = state_mod.appendFmt;
 pub const ExecuteOptions = execute_mod.ExecuteOptions;
 pub const executeSource = execute_mod.executeSource;
 pub const executeSourceWithOptions = execute_mod.executeSourceWithOptions;
+
+test {
+    _ = tests;
+}
