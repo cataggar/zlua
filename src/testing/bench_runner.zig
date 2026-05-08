@@ -2,6 +2,10 @@ const std = @import("std");
 const clua = @import("clua.zig");
 const process = @import("process.zig");
 
+const Dir = std.Io.Dir;
+const File = std.Io.File;
+const Timestamp = std.Io.Timestamp;
+
 const default_bench_root = "tests/bench";
 const default_iterations = 5;
 const default_warmup = 1;
@@ -140,7 +144,7 @@ pub fn runCli(
     if (!try resolveSelectors(allocator, io, benchmarks.items, options, &selected)) return 2;
 
     var buffer: [8192]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     const out = &writer.interface;
 
     if (options.list) {
@@ -274,7 +278,7 @@ fn parsePositiveU64(value: []const u8) !u64 {
 }
 
 fn discoverBenchmarks(allocator: std.mem.Allocator, io: std.Io, root: []const u8, benchmarks: *std.ArrayList(Benchmark)) !void {
-    var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+    var dir = try Dir.cwd().openDir(io, root, .{ .iterate = true });
     defer dir.close(io);
 
     var walker = try dir.walk(allocator);
@@ -289,7 +293,7 @@ fn discoverBenchmarks(allocator: std.mem.Allocator, io: std.Io, root: []const u8
 }
 
 fn appendBenchmark(allocator: std.mem.Allocator, io: std.Io, benchmarks: *std.ArrayList(Benchmark), owned_path: []u8) !void {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, owned_path, allocator, .limited(max_output_bytes));
+    const source = try Dir.cwd().readFileAlloc(io, owned_path, allocator, .limited(max_output_bytes));
     defer allocator.free(source);
 
     const parsed = try parseMetadata(source);
@@ -372,7 +376,7 @@ fn resolveSelectors(
     }
 
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    var stderr_writer = File.stderr().writer(io, &stderr_buffer);
     const err_out = &stderr_writer.interface;
     var ok = true;
 
@@ -722,13 +726,13 @@ fn runTimed(
     if (engine == .zlua and debug_errors) try argv.append(allocator, "--debug-errors");
     try argv.append(allocator, path);
 
-    const start = std.Io.Timestamp.now(io, .awake);
+    const start = Timestamp.now(io, .awake);
     const result = try process.runProcess(allocator, io, argv.items, .{
         .timeout_ms = timeout_ms,
         .max_output_bytes = max_output_bytes,
         .expand_arg0 = engine == .zlua,
     });
-    const elapsed = start.durationTo(std.Io.Timestamp.now(io, .awake));
+    const elapsed = start.durationTo(Timestamp.now(io, .awake));
     return .{ .result = result, .elapsed_ns = @intCast(elapsed.toNanoseconds()) };
 }
 
@@ -1046,7 +1050,7 @@ fn writeJsonReport(allocator: std.mem.Allocator, io: std.Io, path: []const u8, r
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(allocator);
     try appendJsonReport(allocator, &bytes, reports, counts);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes.items });
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes.items });
 }
 
 fn appendJsonReport(allocator: std.mem.Allocator, out: *std.ArrayList(u8), reports: []const BenchmarkReport, counts: Counts) !void {
@@ -1166,7 +1170,7 @@ fn writeCsvReport(allocator: std.mem.Allocator, io: std.Io, path: []const u8, re
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(allocator);
     try appendCsvReport(allocator, &bytes, reports);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes.items });
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes.items });
 }
 
 fn appendCsvReport(allocator: std.mem.Allocator, out: *std.ArrayList(u8), reports: []const BenchmarkReport) !void {
@@ -1244,7 +1248,7 @@ fn lessThanBenchmarkPath(_: void, lhs: Benchmark, rhs: Benchmark) bool {
 
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }

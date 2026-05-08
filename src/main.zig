@@ -2,6 +2,8 @@ const std = @import("std");
 const zlua = @import("zlua");
 
 const ast = zlua.frontend.ast;
+const Dir = std.Io.Dir;
+const File = std.Io.File;
 
 const DumpMode = enum {
     none,
@@ -83,7 +85,7 @@ fn runCliProgram(
     try installArgTable(state_allocator, &state, args, options.script_index);
 
     for (options.evals.items) |source| {
-        if (try executeChunkNamed(state_allocator, &state, source, "=(command line)")) |exit_code| return exit_code;
+        if (try executeChunkNamed(state_allocator, io, &state, source, "=(command line)")) |exit_code| return exit_code;
     }
 
     if (options.script_path) |path| {
@@ -93,16 +95,16 @@ fn runCliProgram(
                 return 1;
             };
             defer state_allocator.free(source);
-            if (try executeChunkNamed(state_allocator, &state, stripInitialShebang(source), "@stdin")) |exit_code| return exit_code;
+            if (try executeChunkNamed(state_allocator, io, &state, stripInitialShebang(source), "@stdin")) |exit_code| return exit_code;
         } else {
-            const source = std.Io.Dir.cwd().readFileAlloc(io, path, state_allocator, .limited(1024 * 1024)) catch |err| {
+            const source = Dir.cwd().readFileAlloc(io, path, state_allocator, .limited(1024 * 1024)) catch |err| {
                 try stderrPrint(io, "cannot read script {s}: {s}\n", .{ path, @errorName(err) });
                 return 1;
             };
             defer state_allocator.free(source);
             const source_name = try std.fmt.allocPrint(state_allocator, "@{s}", .{path});
             defer state_allocator.free(source_name);
-            if (try executeChunkNamed(state_allocator, &state, stripInitialShebang(source), source_name)) |exit_code| return exit_code;
+            if (try executeChunkNamed(state_allocator, io, &state, stripInitialShebang(source), source_name)) |exit_code| return exit_code;
         }
     } else if (no_input and !options.interactive) {
         const source = readStdinAlloc(state_allocator, io) catch |err| {
@@ -110,12 +112,12 @@ fn runCliProgram(
             return 1;
         };
         defer state_allocator.free(source);
-        if (try executeChunkNamed(state_allocator, &state, stripInitialShebang(source), "@stdin")) |exit_code| return exit_code;
+        if (try executeChunkNamed(state_allocator, io, &state, stripInitialShebang(source), "@stdin")) |exit_code| return exit_code;
     }
 
-    if (options.interactive) try runRepl(state_allocator, &state);
+    if (options.interactive) try runRepl(state_allocator, io, &state);
 
-    try flushStateOutput(&state);
+    try flushStateOutput(io, &state);
     return 0;
 }
 
@@ -232,7 +234,7 @@ fn runDumpMode(allocator: std.mem.Allocator, io: std.Io, options: *const CliOpti
     defer source_info.deinit(allocator);
 
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     const out = &writer.interface;
 
     const ok = switch (options.dump_mode) {
@@ -262,7 +264,7 @@ fn readDumpInput(allocator: std.mem.Allocator, io: std.Io, options: *const CliOp
             return .{ .source = try readStdinAlloc(allocator, io), .name = try allocator.dupe(u8, "@stdin") };
         }
         return .{
-            .source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)),
+            .source = try Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)),
             .name = try std.fmt.allocPrint(allocator, "@{s}", .{path}),
         };
     }
@@ -415,11 +417,10 @@ fn indent(out: anytype, depth: usize) !void {
     for (0..depth) |_| try out.writeAll("  ");
 }
 
-fn runRepl(allocator: std.mem.Allocator, state: *zlua.runtime.State) !void {
-    const io = state.options.io.?;
+fn runRepl(allocator: std.mem.Allocator, io: std.Io, state: *zlua.runtime.State) !void {
     const tty = try stdinIsTty(io);
     var read_buffer: [4096]u8 = undefined;
-    var reader = std.Io.File.stdin().readerStreaming(io, &read_buffer);
+    var reader = File.stdin().readerStreaming(io, &read_buffer);
     var source = std.ArrayList(u8).empty;
     defer source.deinit(allocator);
 
@@ -445,14 +446,14 @@ fn runRepl(allocator: std.mem.Allocator, state: *zlua.runtime.State) !void {
 
         const repl_source = try replSourceAlloc(allocator, source.items);
         defer allocator.free(repl_source);
-        try executeReplChunk(allocator, state, repl_source);
+        try executeReplChunk(allocator, io, state, repl_source);
         source.items.len = 0;
     }
 
     if (source.items.len != 0) {
         const repl_source = try replSourceAlloc(allocator, source.items);
         defer allocator.free(repl_source);
-        try executeReplChunk(allocator, state, repl_source);
+        try executeReplChunk(allocator, io, state, repl_source);
     }
 }
 
@@ -494,36 +495,35 @@ fn diagnosticNearEof(diagnostic: ?zlua.errors.Diagnostic) bool {
     };
 }
 
-fn executeChunkNamed(allocator: std.mem.Allocator, state: *zlua.runtime.State, source: []const u8, source_name: []const u8) !?u8 {
+fn executeChunkNamed(allocator: std.mem.Allocator, io: std.Io, state: *zlua.runtime.State, source: []const u8, source_name: []const u8) !?u8 {
     state.executeSourceChunkNamed(source, source_name) catch |err| {
         const detail = try state.errorDetailAlloc(allocator, err);
         defer allocator.free(detail);
         const message = try std.fmt.allocPrint(allocator, "{s}\n", .{detail});
         defer allocator.free(message);
-        try flushStateOutput(state);
-        try stderrWrite(state.options.io.?, message);
+        try flushStateOutput(io, state);
+        try stderrWrite(io, message);
         return 1;
     };
     return null;
 }
 
-fn executeReplChunk(allocator: std.mem.Allocator, state: *zlua.runtime.State, source: []const u8) !void {
+fn executeReplChunk(allocator: std.mem.Allocator, io: std.Io, state: *zlua.runtime.State, source: []const u8) !void {
     state.executeSourceChunkNamed(source, "=stdin") catch |err| {
         const detail = try state.errorDetailAlloc(allocator, err);
         defer allocator.free(detail);
         const message = try std.fmt.allocPrint(allocator, "{s}\n", .{detail});
         defer allocator.free(message);
-        try flushStateOutput(state);
-        try stderrWrite(state.options.io.?, message);
+        try flushStateOutput(io, state);
+        try stderrWrite(io, message);
         state.stdout.items.len = 0;
         state.stderr.items.len = 0;
         return;
     };
-    try flushStateOutput(state);
+    try flushStateOutput(io, state);
 }
 
-fn flushStateOutput(state: *zlua.runtime.State) !void {
-    const io = state.options.io.?;
+fn flushStateOutput(io: std.Io, state: *zlua.runtime.State) !void {
     try stdoutWrite(io, state.stdout.items);
     try stderrWrite(io, state.stderr.items);
     state.stdout.items.len = 0;
@@ -548,12 +548,12 @@ fn installArgTable(
 
 fn readStdinAlloc(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     var buffer: [8192]u8 = undefined;
-    var reader = std.Io.File.stdin().readerStreaming(io, &buffer);
+    var reader = File.stdin().readerStreaming(io, &buffer);
     return reader.interface.allocRemaining(allocator, .limited(1024 * 1024));
 }
 
 fn stdinIsTty(io: std.Io) !bool {
-    return std.Io.File.stdin().isTty(io) catch false;
+    return File.stdin().isTty(io) catch false;
 }
 
 fn stripInitialShebang(source: []const u8) []const u8 {
@@ -586,28 +586,28 @@ fn printUsage(io: std.Io) !void {
 
 fn stdoutPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }
 
 fn stdoutWrite(io: std.Io, bytes: []const u8) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 }
 
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }
 
 fn stderrWrite(io: std.Io, bytes: []const u8) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 }

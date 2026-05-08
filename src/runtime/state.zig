@@ -15,6 +15,8 @@ const value_mod = @import("value.zig");
 
 const bytecode = compile.bytecode;
 const proto_mod = compile.proto;
+const Clock = std.Io.Clock;
+const Dir = std.Io.Dir;
 
 pub const RuntimeError = types.RuntimeError;
 
@@ -1306,8 +1308,8 @@ pub const State = struct {
             },
             .memory_rw => |filesystem| return filesystem.readFileAlloc(self.allocator, path) catch return self.fail("cannot open file"),
             .host_cwd => {
-                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
-                return std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return self.fail("cannot open file");
+                const io = try self.requireIo("filesystem I/O unavailable");
+                return Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return self.fail("cannot open file");
             },
         }
     }
@@ -1335,8 +1337,8 @@ pub const State = struct {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.writeFile(path, data) catch return self.fail("cannot write file"),
             .host_cwd => {
-                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
-                std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data }) catch return self.fail("cannot write file");
+                const io = try self.requireIo("filesystem I/O unavailable");
+                Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data }) catch return self.fail("cannot write file");
             },
         }
     }
@@ -1346,8 +1348,8 @@ pub const State = struct {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.removeFile(path) catch return self.fail("cannot remove file"),
             .host_cwd => {
-                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
-                std.Io.Dir.cwd().deleteFile(io, path) catch return self.fail("cannot remove file");
+                const io = try self.requireIo("filesystem I/O unavailable");
+                Dir.cwd().deleteFile(io, path) catch return self.fail("cannot remove file");
             },
         }
     }
@@ -1357,8 +1359,8 @@ pub const State = struct {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.renameFile(old_path, new_path) catch return self.fail("cannot rename file"),
             .host_cwd => {
-                const io = self.options.io orelse return self.fail("filesystem I/O unavailable");
-                std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, io) catch return self.fail("cannot rename file");
+                const io = try self.requireIo("filesystem I/O unavailable");
+                Dir.cwd().rename(old_path, Dir.cwd(), new_path, io) catch return self.fail("cannot rename file");
             },
         }
     }
@@ -1373,10 +1375,14 @@ pub const State = struct {
             .disabled => self.fail("clock access disabled"),
             .fixed => |value| value,
             .system => {
-                const io = self.options.io orelse return self.fail("clock I/O unavailable");
-                return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+                const io = try self.requireIo("clock I/O unavailable");
+                return @intCast(@divTrunc(Clock.real.now(io).nanoseconds, std.time.ns_per_s));
             },
         };
+    }
+
+    pub fn requireIo(self: *State, unavailable_message: []const u8) RuntimeError!std.Io {
+        return self.options.io orelse self.fail(unavailable_message);
     }
 
     pub fn processEnabled(self: *State) bool {

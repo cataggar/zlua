@@ -9,6 +9,9 @@ const normalizer = @import("normalizer.zig");
 const process = @import("process.zig");
 const runtime = @import("../runtime.zig");
 
+const Dir = std.Io.Dir;
+const File = std.Io.File;
+
 const Options = struct {
     path: []const u8 = "tests/diff",
     clua: ?[]const u8 = null,
@@ -57,7 +60,7 @@ pub fn runCli(
     defer discovery.deinit(allocator);
 
     var buffer: [8192]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = File.stdout().writer(io, &buffer);
     const out = &writer.interface;
 
     var counts: Counts = .{};
@@ -121,7 +124,7 @@ fn parseArgs(args: []const []const u8) !Options {
 }
 
 fn discoverTests(allocator: std.mem.Allocator, io: std.Io, root: []const u8, tests: *std.ArrayList([]u8)) !void {
-    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir => {
             if (std.mem.endsWith(u8, root, ".lua")) {
                 try tests.append(allocator, try allocator.dupe(u8, root));
@@ -153,7 +156,7 @@ fn runOne(
     environ_map: *const std.process.Environ.Map,
     counts: *Counts,
 ) !void {
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+    const source = try Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(source);
 
     const meta = try metadata.parse(source);
@@ -386,7 +389,7 @@ fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
 
 fn stderrPrint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stderr().writer(io, &buffer);
+    var writer = File.stderr().writer(io, &buffer);
     try writer.interface.print(fmt, args);
     try writer.interface.flush();
 }
