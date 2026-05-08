@@ -117,7 +117,7 @@ var lua = try zlua.State.init(allocator, .{
 });
 ```
 
-`max_instructions` is a cumulative per-state budget. Every executed VM instruction consumes one unit across all loaded chunks, protected calls, unprotected calls, and coroutine resumes in that state. There is not yet a public reset/query API.
+`max_instructions` is a cumulative per-state budget. Every executed VM instruction consumes one unit across all loaded chunks, protected calls, unprotected calls, and coroutine resumes in that state. Use `State.instructionBudget` to query the configured limit, used count, and remaining budget. Use `State.resetInstructionBudget` to set the used count back to zero.
 
 `max_memory` installs a bounded allocator for the embedding state. It covers parser/compiler work, bytecode loading, VM objects, API conversion, memory-file copies, and captured stdout/stderr buffers. The VM also checks Lua heap usage at instruction boundaries so collectible objects can be reclaimed before reporting `memory limit exceeded`.
 

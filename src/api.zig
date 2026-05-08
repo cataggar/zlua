@@ -69,6 +69,12 @@ pub const Limits = struct {
     max_instructions: ?u64 = null,
 };
 
+pub const InstructionBudget = struct {
+    limit: ?u64,
+    used: u64,
+    remaining: ?u64,
+};
+
 pub const GcOptions = struct {};
 
 pub const DebugOptions = struct {
@@ -253,6 +259,23 @@ pub const State = struct {
 
     pub fn allocator(self: *State) std.mem.Allocator {
         return self.raw_state.allocator;
+    }
+
+    pub fn instructionBudget(self: *const State) InstructionBudget {
+        const used = self.raw_state.instruction_count;
+        const remaining = if (self.raw_state.options.max_instructions) |limit|
+            if (used >= limit) 0 else limit - used
+        else
+            null;
+        return .{
+            .limit = self.raw_state.options.max_instructions,
+            .used = used,
+            .remaining = remaining,
+        };
+    }
+
+    pub fn resetInstructionBudget(self: *State) void {
+        self.raw_state.instruction_count = 0;
     }
 
     pub fn openLibs(self: *State, mode: Stdlib) !void {
@@ -2138,6 +2161,75 @@ test "api instruction limit returns a protected Lua error" {
             try std.testing.expect(std.mem.indexOf(u8, message, "instruction limit exceeded") != null);
         },
     }
+}
+
+test "api instruction budget can be queried and reset" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .none,
+        .limits = .{ .max_instructions = 1_000 },
+    });
+    defer lua.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 1_000), lua.instructionBudget().limit);
+    try std.testing.expectEqual(@as(u64, 0), lua.instructionBudget().used);
+    try std.testing.expectEqual(@as(?u64, 1_000), lua.instructionBudget().remaining);
+
+    var chunk = try lua.loadString("local x = 0; for i = 1, 5 do x = x + i end; return x", .{ .name = "=api-instruction-budget-query" });
+    defer chunk.deinit();
+    try std.testing.expectEqual(@as(i64, 15), try chunk.call(.{}, i64));
+
+    const used = lua.instructionBudget().used;
+    try std.testing.expect(used > 0);
+    try std.testing.expectEqual(@as(?u64, 1_000 - used), lua.instructionBudget().remaining);
+
+    lua.resetInstructionBudget();
+    try std.testing.expectEqual(@as(u64, 0), lua.instructionBudget().used);
+    try std.testing.expectEqual(@as(?u64, 1_000), lua.instructionBudget().remaining);
+}
+
+test "api instruction budget reset allows more execution after exhaustion" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .none,
+        .limits = .{ .max_instructions = 20 },
+    });
+    defer lua.deinit();
+
+    var loop = try lua.loadString("while true do end", .{ .name = "=api-instruction-budget-exhaust" });
+    defer loop.deinit();
+    const failed = try loop.protectedCall(.{}, void);
+    switch (failed) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "instruction limit exceeded") != null);
+        },
+    }
+    try std.testing.expectEqual(@as(u64, 20), lua.instructionBudget().used);
+    try std.testing.expectEqual(@as(?u64, 0), lua.instructionBudget().remaining);
+
+    lua.resetInstructionBudget();
+    var simple = try lua.loadString("return 42", .{ .name = "=api-instruction-budget-reset" });
+    defer simple.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try simple.call(.{}, i64));
+}
+
+test "api instruction query tracks states without an instruction limit" {
+    var lua = try State.init(std.testing.allocator, .{ .stdlib = .none });
+    defer lua.deinit();
+
+    try std.testing.expectEqual(@as(?u64, null), lua.instructionBudget().limit);
+    try std.testing.expectEqual(@as(?u64, null), lua.instructionBudget().remaining);
+
+    var chunk = try lua.loadString("local x = 0; for i = 1, 3 do x = x + i end; return x", .{ .name = "=api-instruction-budget-unlimited" });
+    defer chunk.deinit();
+    try std.testing.expectEqual(@as(i64, 6), try chunk.call(.{}, i64));
+    try std.testing.expect(lua.instructionBudget().used > 0);
+
+    lua.resetInstructionBudget();
+    try std.testing.expectEqual(@as(u64, 0), lua.instructionBudget().used);
 }
 
 test "api load options support environments and binary modes" {

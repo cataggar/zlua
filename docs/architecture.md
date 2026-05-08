@@ -260,7 +260,7 @@ Each executed instruction can enforce:
 
 | Limit | Behavior |
 | --- | --- |
-| `max_instructions` | Counts executed instructions against a cumulative per-state budget and raises `instruction limit exceeded` when reached. |
+| `max_instructions` | Counts executed instructions against a cumulative per-state budget, exposes query/reset through the embedding API, and raises `instruction limit exceeded` when reached. |
 | `max_memory` | The embedding API uses a bounded allocator for parser/compiler, bytecode, VM, API conversion, and output-buffer allocations. The VM also refreshes Lua heap totals at instruction boundaries, attempts conservative collection when possible, then raises `memory limit exceeded` if still over limit. |
 
 The VM is deliberately compatibility-first. It handles Lua-specific details such as fixed versus multret return adjustment, vararg expansion, named vararg tables, tail calls, to-be-closed unwinding, metamethod dispatch, primitive metatables, debug hooks, line events, C stack overflow guards, and official error-message edge cases.

@@ -589,7 +589,7 @@ pub const State = struct {
         const base = frame.base;
         var pc = frame.pc;
         var stack = thread.stack.items;
-        var executed = false;
+        var executed_count: u64 = 0;
 
         fast_loop: while (pc < instructions.len) {
             switch (instructions[pc]) {
@@ -768,12 +768,13 @@ pub const State = struct {
                 },
                 else => break :fast_loop,
             }
-            executed = true;
+            executed_count = executed_count +| 1;
         }
 
-        if (!executed) return false;
+        if (executed_count == 0) return false;
         frame = &thread.frames.items[frame_index];
         frame.pc = pc;
+        self.instruction_count = self.instruction_count +| executed_count;
         thread.last_result_count = 0;
         thread.last_transfer_count = 0;
         return true;
