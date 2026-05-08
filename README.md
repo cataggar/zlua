@@ -108,6 +108,54 @@ zig build ci
 
 For the full command reference, including `just` recipes, `zig build` steps, CLI options, and harness arguments, see [docs/commands.md](docs/commands.md). For focused development, testing, and benchmarking workflows, see [docs/development.md](docs/development.md), [docs/testing.md](docs/testing.md), and [docs/benchmark.md](docs/benchmark.md).
 
+## How to Use
+
+1. Add zlua to your Zig package dependencies:
+
+```sh
+zig fetch --save git+https://github.com/grant-wade/zlua#v0.1.0
+```
+
+2. Wire the dependency into your executable in `build.zig`:
+
+```zig
+const zlua_dep = b.dependency("zlua", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("zlua", zlua_dep.module("zlua"));
+```
+
+3. Import zlua from Zig and run a Lua chunk:
+
+```zig
+const std = @import("std");
+const zlua = @import("zlua");
+
+pub fn main() !void {
+    const allocator = std.heap.smp_allocator;
+
+    var lua = try zlua.State.init(allocator, .{});
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(
+        \\local name = ...
+        \\return "hello, " .. name
+    , .{ .name = "=hello" });
+    defer chunk.deinit();
+
+    const message = try chunk.call(.{"zlua"}, []const u8);
+    std.debug.print("{s}\n", .{message});
+}
+```
+
+Output:
+
+```text
+hello, zlua
+```
+
 ## Compatibility
 
 Compatibility work is oracle-driven rather than example-driven. The build downloads Lua 5.5 sources and official tests, builds a local `lua5.5`, and uses that binary as the behavioral reference; a system Lua install is not required.
