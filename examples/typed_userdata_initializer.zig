@@ -10,6 +10,13 @@ const Budget = struct {
     }
 };
 
+fn newBudget(ctx: *zlua.Context, amount: i64) !zlua.Userdata(Budget) {
+    var budget = try ctx.state().newUserdata(Budget, .{ .remaining = amount }, .{});
+    errdefer budget.deinit();
+    try budget.method("spend", Budget.spend);
+    return budget;
+}
+
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
@@ -32,11 +39,4 @@ pub fn main() !void {
     defer budget.deinit();
 
     std.debug.print("remaining={d}\n", .{(try budget.ptr()).remaining});
-}
-
-fn newBudget(ctx: *zlua.Context, amount: i64) !zlua.Userdata(Budget) {
-    var budget = try ctx.state().newUserdata(Budget, .{ .remaining = amount }, .{});
-    errdefer budget.deinit();
-    try budget.method("spend", Budget.spend);
-    return budget;
 }
