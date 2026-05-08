@@ -51,7 +51,7 @@ The `justfile` is a convenience layer over `zig build` and direct binaries. It a
 | `just bench [args...]` | `zig build -Doptimize=ReleaseFast --summary all run-test-bench -- [args...]` | Runs benchmarks with a ReleaseFast zlua build. |
 | `just clean` | `rm -rf zig-out .zig-cache` | Removes local build outputs and Zig cache directories. |
 
-`just example` filters can be an example key, binary name, path, basename, or basename without `.zig`. Current keys are `run_script`, `register_function`, `typed_host_function`, `plugin_sandbox`, `bytecode_roundtrip`, `memory_rw_files`, `userdata_counter`, and `preload_module`.
+`just example` filters can be an example key, binary name, path, basename, or basename without `.zig`. Current keys are `run_script`, `register_function`, `typed_host_function`, `plugin_sandbox`, `bytecode_roundtrip`, `memory_rw_files`, `userdata_counter`, `typed_userdata_initializer`, and `preload_module`.
 
 ## zig build Options
 

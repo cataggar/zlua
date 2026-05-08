@@ -488,6 +488,7 @@ examples/plugin_sandbox.zig
 examples/bytecode_roundtrip.zig
 examples/memory_rw_files.zig
 examples/userdata_counter.zig
+examples/typed_userdata_initializer.zig
 examples/preload_module.zig
 ```
 
