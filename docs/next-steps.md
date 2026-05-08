@@ -96,8 +96,8 @@ Current dashboards pass, but the test methodology can still improve:
 
 Recommended documentation follow-up:
 
-1. Expand root `README.md` into install, quickstart, commands, compatibility status, and links to `docs/README.md`.
-2. Add a user-facing CLI document if CLI flags grow beyond the current `--help` output.
+1. Keep the root `README.md` focused on positioning, quickstart, compatibility status, and links to deeper docs.
+2. Keep [commands.md](commands.md) updated when `just` recipes, `zig build` steps, CLI options, or harness flags change.
 3. Add a C API document only when support is intentionally user-facing.
 4. Update `src/root.zig` versioning and release notes when cutting a real release.
 5. Decide whether zlua binary chunks need a format/versioning document or should remain explicitly internal.

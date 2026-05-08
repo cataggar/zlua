@@ -1,6 +1,6 @@
 # Development
 
-This document covers day-to-day zlua development conventions: project shape, common commands, source conventions, and local workflow. For test methodology and detailed harness flags, see [testing.md](testing.md). For benchmark methodology, see [benchmark.md](benchmark.md). For implementation structure, see [architecture.md](architecture.md).
+This document covers day-to-day zlua development conventions: project shape, common commands, source conventions, and local workflow. For the full command reference, see [commands.md](commands.md). For test methodology and detailed harness flags, see [testing.md](testing.md). For benchmark methodology, see [benchmark.md](benchmark.md). For implementation structure, see [architecture.md](architecture.md).
 
 ## Project Shape
 

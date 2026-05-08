@@ -36,23 +36,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try arena_allocator.alloc([]const u8, raw_args.len);
     for (raw_args, 0..) |arg, index| args[index] = arg;
 
-    if (args.len > 1 and std.mem.eql(u8, args[1], "test-diff")) {
-        const exit_code = try zlua.testing.diff_runner.runCli(init.gpa, io, init.environ_map, args[2..]);
-        std.process.exit(exit_code);
-    }
-    if (args.len > 1 and std.mem.eql(u8, args[1], "test-official")) {
-        const zlua_exe = try defaultZluaPath(arena_allocator, args[0]);
-        const exit_code = try zlua.testing.official_suite.runCli(init.gpa, io, init.environ_map, zlua_exe, args[2..]);
-        std.process.exit(exit_code);
-    }
-
     const exit_code = try runCliProgram(arena_allocator, io, init.environ_map, args);
     std.process.exit(exit_code);
-}
-
-fn defaultZluaPath(allocator: std.mem.Allocator, arg0: []const u8) ![]const u8 {
-    const dir = std.fs.path.dirname(arg0) orelse return "zlua";
-    return std.fs.path.join(allocator, &.{ dir, "zlua" });
 }
 
 fn runCliProgram(
@@ -595,10 +580,6 @@ fn printUsage(io: std.Io) !void {
         \\  --dump-scope [script]
         \\  --dump-bytecode [script]
         \\  --trace-vm [script]
-        \\
-        \\Commands:
-        \\  test-diff [args...]
-        \\  test-official [args...]
         \\
     , .{});
 }
