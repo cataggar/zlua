@@ -119,6 +119,79 @@ const RegisteredCallback = struct {
 };
 
 const callback_dispatch_global = "__zlua_api_callback";
+const memory_limit_error_message = "memory limit exceeded";
+
+const MemoryLimitAllocator = struct {
+    parent: std.mem.Allocator,
+    limit: usize,
+    used: usize = 0,
+    exceeded: bool = false,
+
+    fn init(parent: std.mem.Allocator, limit: usize) MemoryLimitAllocator {
+        return .{ .parent = parent, .limit = limit };
+    }
+
+    fn allocator(self: *MemoryLimitAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn canGrow(self: *const MemoryLimitAllocator, amount: usize) bool {
+        return amount <= self.limit -| self.used;
+    }
+
+    fn deny(self: *MemoryLimitAllocator) ?[*]u8 {
+        self.exceeded = true;
+        return null;
+    }
+
+    const vtable = std.mem.Allocator.VTable{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *MemoryLimitAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.canGrow(len)) return self.deny();
+        const ptr = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.used += len;
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *MemoryLimitAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.canGrow(new_len - memory.len)) {
+            self.exceeded = true;
+            return false;
+        }
+        if (!self.parent.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        if (new_len > memory.len) {
+            self.used += new_len - memory.len;
+        } else {
+            self.used -= @min(self.used, memory.len - new_len);
+        }
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *MemoryLimitAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.canGrow(new_len - memory.len)) return self.deny();
+        const ptr = self.parent.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        if (new_len > memory.len) {
+            self.used += new_len - memory.len;
+        } else {
+            self.used -= @min(self.used, memory.len - new_len);
+        }
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *MemoryLimitAllocator = @ptrCast(@alignCast(ctx));
+        self.used -= @min(self.used, memory.len);
+        self.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
 
 pub const GcBudget = struct {
     steps: usize = 0,
@@ -130,6 +203,8 @@ pub const GcStepResult = enum {
 };
 
 pub const State = struct {
+    base_allocator: std.mem.Allocator,
+    memory_limit_allocator: ?*MemoryLimitAllocator = null,
     raw_state: runtime.State,
     last_error_root: ?usize = null,
     memory_files: std.ArrayList(MemoryFile) = .empty,
@@ -137,15 +212,27 @@ pub const State = struct {
     callbacks: std.ArrayList(RegisteredCallback) = .empty,
 
     pub fn init(state_allocator: std.mem.Allocator, options: Options) !State {
+        var memory_limit_allocator: ?*MemoryLimitAllocator = null;
+        errdefer if (memory_limit_allocator) |allocator_ptr| state_allocator.destroy(allocator_ptr);
+
+        const runtime_allocator = if (options.limits.max_memory) |limit| blk: {
+            const allocator_ptr = try state_allocator.create(MemoryLimitAllocator);
+            allocator_ptr.* = MemoryLimitAllocator.init(state_allocator, limit);
+            memory_limit_allocator = allocator_ptr;
+            break :blk allocator_ptr.allocator();
+        } else state_allocator;
+
         var state = State{
-            .raw_state = try runtime.State.initWithOptions(state_allocator, runtimeOptions(options)),
+            .base_allocator = state_allocator,
+            .memory_limit_allocator = memory_limit_allocator,
+            .raw_state = try runtime.State.initWithOptions(runtime_allocator, runtimeOptions(options)),
         };
-        errdefer state.raw_state.deinit();
-        errdefer state.memory_files.deinit(state_allocator);
+        memory_limit_allocator = null;
+        errdefer state.deinit();
 
         if (options.capabilities.filesystem == .memory) {
             const files = options.capabilities.filesystem.memory;
-            try state.memory_files.appendSlice(state_allocator, files);
+            try state.memory_files.appendSlice(state.allocator(), files);
             state.owned_memory_file_start = files.len;
             state.raw_state.options.filesystem = .{ .memory = state.memory_files.items };
         }
@@ -154,12 +241,13 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
-        const state_allocator = self.raw_state.allocator;
+        const state_allocator = self.allocator();
         self.raw_state.deinit();
         self.deinitOwnedMemoryFiles(state_allocator);
         self.memory_files.deinit(state_allocator);
         self.deinitCallbacks(state_allocator);
         self.callbacks.deinit(state_allocator);
+        self.destroyMemoryLimitAllocator();
         self.* = undefined;
     }
 
@@ -340,6 +428,7 @@ pub const State = struct {
 
     fn setLastErrorValue(self: *State, value: runtime.Value) !void {
         if (self.last_error_root) |index| self.raw_state.unrootValue(index);
+        self.last_error_root = null;
         self.last_error_root = try self.raw_state.rootValue(value);
     }
 
@@ -376,7 +465,33 @@ pub const State = struct {
                 self.setLastErrorValue(self.raw_state.currentErrorValue()) catch |root_err| return root_err;
                 return error.LuaError;
             },
+            error.OutOfMemory => if (self.takeMemoryLimitExceeded()) {
+                self.raw_state.last_error = .{ .diagnostic = memory_limit_error_message };
+                self.setLastErrorValue(self.raw_state.currentErrorValue()) catch {};
+                return error.LuaError;
+            } else return err,
             else => return err,
+        }
+    }
+
+    fn takeMemoryLimitExceeded(self: *State) bool {
+        const allocator_ptr = self.memory_limit_allocator orelse return false;
+        if (!allocator_ptr.exceeded) return false;
+        allocator_ptr.exceeded = false;
+        return true;
+    }
+
+    fn memoryLimitErrorRef(self: *State) !ErrorRef {
+        self.raw_state.last_error = .{ .diagnostic = memory_limit_error_message };
+        const value = self.raw_state.currentErrorValue();
+        self.setLastErrorValue(value) catch {};
+        return ErrorRef.fromRuntime(self, value);
+    }
+
+    fn destroyMemoryLimitAllocator(self: *State) void {
+        if (self.memory_limit_allocator) |allocator_ptr| {
+            self.base_allocator.destroy(allocator_ptr);
+            self.memory_limit_allocator = null;
         }
     }
 
@@ -533,7 +648,12 @@ pub const Function = struct {
         const raw_args = try convertArgs(self.ref.state, args);
         defer self.ref.state.allocator().free(raw_args);
 
-        const result = try self.ref.state.raw_state.protectedCallLoadedClosure(try self.rawClosure(), raw_args);
+        const result = self.ref.state.raw_state.protectedCallLoadedClosure(try self.rawClosure(), raw_args) catch |err| {
+            if (err == error.OutOfMemory and self.ref.state.takeMemoryLimitExceeded()) {
+                return .{ .lua_error = try self.ref.state.memoryLimitErrorRef() };
+            }
+            return err;
+        };
         switch (result) {
             .success => |values| {
                 defer self.ref.state.allocator().free(values);
@@ -1267,6 +1387,12 @@ fn deinitIfOwned(comptime T: type, value: *T) void {
     }
 }
 
+fn expectLastErrorContains(lua: *State, needle: []const u8) !void {
+    const message = try lua.errorMessage();
+    defer lua.allocator().free(message);
+    try std.testing.expect(std.mem.indexOf(u8, message, needle) != null);
+}
+
 test "api state initializes with safe defaults" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
@@ -1277,6 +1403,19 @@ test "api state initializes with safe defaults" {
     const message = try lua.errorMessage();
     defer lua.allocator().free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "filesystem access disabled") != null);
+}
+
+test "api safe stdlib excludes ambient capability libraries" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.doString(
+        \\assert(io == nil)
+        \\assert(os == nil)
+        \\assert(debug == nil)
+        \\assert(package == nil)
+        \\assert(require == nil)
+    , .{ .name = "=api-safe-stdlib-negative" });
 }
 
 test "api load string, do string, and protected error" {
@@ -1574,6 +1713,40 @@ test "api host callback can raise Lua error values" {
             const message = try err.message();
             defer lua.allocator().free(message);
             try std.testing.expect(std.mem.indexOf(u8, message, "host boom") != null);
+        },
+    }
+}
+
+test "api memory limit applies to host callback return conversion" {
+    const Callbacks = struct {
+        const payload = [_]u8{'x'} ** (512 * 1024);
+
+        fn large(ctx: *Context) !void {
+            try ctx.returnValues(payload[0..]);
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .base,
+        .limits = .{ .max_memory = 128 * 1024 },
+    });
+    defer lua.deinit();
+
+    var large = try lua.register("large", Callbacks.large);
+    defer large.deinit();
+    try lua.setGlobal("large", large);
+    var chunk = try lua.loadString("return large()", .{ .name = "=api-memory-callback-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, memory_limit_error_message) != null);
         },
     }
 }
@@ -2094,6 +2267,76 @@ test "api memory limit returns a protected Lua error" {
             const message = try err.message();
             defer lua.allocator().free(message);
             try std.testing.expect(std.mem.indexOf(u8, message, "memory limit exceeded") != null);
+        },
+    }
+}
+
+test "api memory limit applies while loading source" {
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "global x\n");
+    for (0..20_000) |_| try source.appendSlice(std.testing.allocator, "x = 1\n");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .none,
+        .limits = .{ .max_memory = 64 * 1024 },
+    });
+    defer lua.deinit();
+
+    try std.testing.expectError(error.LuaError, lua.loadString(source.items, .{ .name = "=api-memory-load-source-limit" }));
+    try expectLastErrorContains(&lua, memory_limit_error_message);
+}
+
+test "api memory limit applies while loading bytecode" {
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "return function() return '");
+    for (0..256 * 1024) |_| try source.append(std.testing.allocator, 'x');
+    try source.appendSlice(std.testing.allocator, "' end");
+
+    var source_state = try State.init(std.testing.allocator, .{ .stdlib = .none });
+    defer source_state.deinit();
+
+    var source_chunk = try source_state.loadString(source.items, .{ .name = "=api-memory-bytecode-source" });
+    defer source_chunk.deinit();
+    const dumped = try source_chunk.dumpBytecode(.{});
+    defer source_state.allocator().free(dumped);
+
+    var target_state = try State.init(std.testing.allocator, .{
+        .stdlib = .none,
+        .limits = .{ .max_memory = 64 * 1024 },
+    });
+    defer target_state.deinit();
+
+    try std.testing.expectError(error.LuaError, target_state.loadBytecode(dumped, .{}));
+    try expectLastErrorContains(&target_state, memory_limit_error_message);
+}
+
+test "api memory limit applies to captured output buffers" {
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "print('");
+    for (0..128 * 1024) |_| try source.append(std.testing.allocator, 'x');
+    try source.appendSlice(std.testing.allocator, "')");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .base,
+        .limits = .{ .max_memory = 224 * 1024 },
+    });
+    defer lua.deinit();
+
+    var chunk = try lua.loadString(source.items, .{ .name = "=api-memory-output-limit" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, memory_limit_error_message) != null);
         },
     }
 }

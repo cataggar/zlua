@@ -1410,13 +1410,22 @@ pub const State = struct {
 
     pub fn loadSourceAsClosureNamedEnv(self: *State, source: []const u8, source_name: ?[]const u8, environment: Value) !Value {
         var diagnostic: ?errors.Diagnostic = null;
-        var tree = frontend.parseWithDiagnostic(self.allocator, source, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot load source");
+        var tree = frontend.parseWithDiagnostic(self.allocator, source, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot load source"),
+        };
         defer tree.deinit();
 
-        compile.resolver.resolveWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot resolve source");
+        compile.resolver.resolveWithDiagnostic(self.allocator, &tree, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot resolve source"),
+        };
         const proto = try self.allocator.create(proto_mod.Proto);
         errdefer self.allocator.destroy(proto);
-        proto.* = compile.compileWithDiagnostic(self.allocator, &tree, &diagnostic) catch return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot compile source");
+        proto.* = compile.compileWithDiagnostic(self.allocator, &tree, &diagnostic) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return self.failLoadDiagnostic(source_name, source, diagnostic, "cannot compile source"),
+        };
         if (source_name) |name| try setProtoSourceName(proto, name);
         errdefer proto.deinit();
         try self.proto_allocations.append(self.allocator, proto);

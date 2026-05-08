@@ -117,7 +117,11 @@ var lua = try zlua.State.init(allocator, .{
 });
 ```
 
-When a protected call hits these limits, zlua returns a Lua error value through `Function.protectedCall`. Convenience APIs such as `doString` return `error.LuaError` and store the error details on the state. `State.stepGc` currently performs a full collection and returns `.complete`; `GcOptions` is reserved for future tuning.
+`max_instructions` is a cumulative per-state budget. Every executed VM instruction consumes one unit across all loaded chunks, protected calls, unprotected calls, and coroutine resumes in that state. There is not yet a public reset/query API.
+
+`max_memory` installs a bounded allocator for the embedding state. It covers parser/compiler work, bytecode loading, VM objects, API conversion, memory-file copies, and captured stdout/stderr buffers. The VM also checks Lua heap usage at instruction boundaries so collectible objects can be reclaimed before reporting `memory limit exceeded`.
+
+When a protected call hits these limits, zlua returns a Lua error value through `Function.protectedCall`. Convenience APIs such as `loadString`, `loadBytecode`, and `doString` return `error.LuaError` and store the error details on the state when the configured limit was the cause. `State.init` can still return `error.OutOfMemory` if the configured memory limit is too small to initialize the requested libraries. `State.stepGc` currently performs a full collection and returns `.complete`; `GcOptions` is reserved for future tuning.
 
 ## Loading And Running Code
 
