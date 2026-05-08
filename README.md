@@ -4,6 +4,12 @@ zlua is a source-compatible Lua 5.5 implementation written in Zig. It is built f
 
 The project targets Zig `0.16.0`.
 
+## Project Status
+
+zlua is pre-1.0.
+
+The Zig embedding API is the main public surface. Runtime internals, zlua binary chunks, and exact C API support scope are still evolving.
+
 ## Example
 
 zlua can run as a CLI, but its main shape is an embeddable Lua runtime where the host decides what Lua can see:
