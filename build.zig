@@ -127,6 +127,7 @@ pub fn build(b: *std.Build) void {
         .{ .key = "bytecode_roundtrip", .name = "zlua-embed-bytecode-roundtrip", .path = "examples/bytecode_roundtrip.zig" },
         .{ .key = "memory_rw_files", .name = "zlua-embed-memory-rw-files", .path = "examples/memory_rw_files.zig" },
         .{ .key = "userdata_counter", .name = "zlua-embed-userdata-counter", .path = "examples/userdata_counter.zig" },
+        .{ .key = "typed_userdata_initializer", .name = "zlua-embed-typed-userdata-initializer", .path = "examples/typed_userdata_initializer.zig" },
         .{ .key = "preload_module", .name = "zlua-embed-preload-module", .path = "examples/preload_module.zig" },
     };
 

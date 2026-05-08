@@ -12,35 +12,51 @@ zlua can run as a CLI, but its main shape is an embeddable Lua runtime where the
 const std = @import("std");
 const zlua = @import("zlua");
 
+const Budget = struct {
+    remaining: i64,
+
+    fn spend(self: *@This(), amount: i64) i64 {
+        self.remaining = @max(self.remaining - amount, 0);
+        return self.remaining;
+    }
+};
+
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
 
     var lua = try zlua.State.init(allocator, .{});
     defer lua.deinit();
 
-    var host_add = try lua.registerTyped("host_add", hostAdd);
-    defer host_add.deinit();
-    try lua.setGlobal("host_add", host_add);
+    var new_budget = try lua.registerTyped("new_budget", newBudget);
+    defer new_budget.deinit();
+    try lua.setGlobal("new_budget", new_budget);
 
     var chunk = try lua.loadString(
-        \\local name = ...
-        \\return name .. " sees " .. host_add(20, 22)
+        \\local budget = new_budget(25)
+        \\budget:spend(7)
+        \\budget:spend(20)
+        \\return budget
     , .{ .name = "=readme" });
     defer chunk.deinit();
 
-    const message = try chunk.call(.{"Lua"}, []const u8);
-    std.debug.print("{s}\n", .{message});
+    var budget = try chunk.call(.{}, zlua.Userdata(Budget));
+    defer budget.deinit();
+
+    std.debug.print("remaining={d}\n", .{(try budget.ptr()).remaining});
 }
 
-fn hostAdd(lhs: i64, rhs: i64) i64 {
-    return lhs + rhs;
+fn newBudget(ctx: *zlua.Context, amount: i64) !zlua.Userdata(Budget) {
+    var budget = try ctx.state().newUserdata(Budget, .{ .remaining = amount }, .{});
+    errdefer budget.deinit();
+    try budget.method("spend", Budget.spend);
+    return budget;
 }
 ```
 
 Output:
 
 ```text
-Lua sees 42
+remaining=0
 ```
 
 The default state opens safe standard libraries with sandboxed host capabilities. Hosts can opt into filesystem, output, clock, process, bytecode, callbacks, userdata, and resource-limit behavior through the API documented in [docs/embedding.md](docs/embedding.md).

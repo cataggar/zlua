@@ -937,9 +937,15 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
     if (function_info.is_var_args) @compileError("registerTyped does not support varargs functions");
 
     var args: std.meta.ArgsTuple(SignatureType) = undefined;
+    var lua_arg_index: usize = 0;
     inline for (function_info.params, 0..) |param, index| {
         const Param = param.type orelse @compileError("registerTyped requires typed parameters");
-        args[index] = try ctx.arg(index, Param);
+        if (Param == *Context) {
+            args[index] = ctx;
+        } else {
+            args[index] = try ctx.arg(lua_arg_index, Param);
+            lua_arg_index += 1;
+        }
     }
 
     const Return = function_info.return_type orelse void;
@@ -951,7 +957,8 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
 
     switch (@typeInfo(Return)) {
         .error_union => |error_union| {
-            const result = try @call(.auto, function, args);
+            var result = try @call(.auto, function, args);
+            defer deinitIfOwned(error_union.payload, &result);
             if (error_union.payload == void) {
                 try ctx.returnValues(.{});
             } else {
@@ -959,7 +966,8 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
             }
         },
         else => {
-            const result = @call(.auto, function, args);
+            var result = @call(.auto, function, args);
+            defer deinitIfOwned(Return, &result);
             try ctx.returnValues(result);
         },
     }
@@ -1615,6 +1623,45 @@ test "api typed host callback wrapper compiles and runs" {
         \\assert(clamp(-1, 1, 10) == 1)
         \\assert(clamp(11, 1, 10) == 10)
     , .{ .name = "=api-21.4-typed" });
+}
+
+test "api typed host callback can create userdata through context" {
+    const Budget = struct {
+        remaining: i64,
+
+        fn spend(self: *@This(), amount: i64) i64 {
+            self.remaining = @max(self.remaining - amount, 0);
+            return self.remaining;
+        }
+    };
+    const Callbacks = struct {
+        fn newBudget(ctx: *Context, amount: i64) !Userdata(Budget) {
+            var budget = try ctx.state().newUserdata(Budget, .{ .remaining = amount }, .{});
+            errdefer budget.deinit();
+            try budget.method("spend", Budget.spend);
+            return budget;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var new_budget = try lua.registerTyped("new_budget", Callbacks.newBudget);
+    defer new_budget.deinit();
+    try lua.setGlobal("new_budget", new_budget);
+
+    var chunk = try lua.loadString(
+        \\local budget = new_budget(25)
+        \\assert(type(budget) == 'userdata')
+        \\assert(budget:spend(7) == 18)
+        \\assert(budget:spend(20) == 0)
+        \\return budget
+    , .{ .name = "=api-21.4-typed-userdata" });
+    defer chunk.deinit();
+
+    var budget = try chunk.call(.{}, Userdata(Budget));
+    defer budget.deinit();
+    try std.testing.expectEqual(@as(i64, 0), (try budget.ptr()).remaining);
 }
 
 test "api userdata methods receive typed Zig pointers" {
