@@ -1,0 +1,17 @@
+.{
+    .name = .zlua_test,
+    .version = "0.1.0",
+    .fingerprint = 0x3a403268a5f6f5fb,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zlua = .{
+            .url = "git+https://github.com/grant-wade/zlua?ref=v0.1.0#dce547b4844e9b992cd14d526a31eed9b9de6fb2",
+            .hash = "zlua-0.1.0-S9VpHMutFgBhLrUgA7iiDbaoeFfnW8iorgg4m-hJrbKt",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
