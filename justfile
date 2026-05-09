@@ -12,6 +12,15 @@ default:
 build:
     {{zig}} build
 
+docs:
+    {{zig}} build docs
+
+docs-serve: docs
+    {{zig}} build docs-serve
+
+docs-serve-pub: docs
+    {{zig}} build docs-serve -- 0.0.0.0
+
 # Download and extract Lua 5.5 source and official tests.
 fetch-lua:
     {{zig}} build fetch-lua

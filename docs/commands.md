@@ -20,6 +20,8 @@ Arguments after `zig build <step> --` are forwarded to that step's executable. A
 | --- | --- |
 | `zig build` or `just build` | Build and install `zlua` and the downloaded `lua5.5` oracle. |
 | `zig build run -- path/to/script.lua` or `just run path/to/script.lua` | Run a Lua script through zlua. |
+| `zig build docs` | Build the docs bundle for `zlua`. |
+| `zig build docs-serve` | Build and serve the docs with a local HTTP server, accessible at 127.0.0.1:8000 by default. |
 | `zig build examples` | Compile all Zig embedding examples. |
 | `zig build run-example` or `just example` | Run all Zig embedding examples. |
 | `zig build ci` or `just ci` | Run the CI-equivalent local check. |
@@ -36,6 +38,9 @@ The `justfile` is a convenience layer over `zig build` and direct binaries. It a
 | --- | --- | --- |
 | `just` | `just --list` | Shows available recipes. |
 | `just build` | `zig build` | Builds and installs zlua plus the downloaded CLua oracle. |
+| `just docs` | `zig build docs` | Builds the docs bundle for `zlua` |
+| `just docs-serve` | `zig build docs-serve` | Builds and serves the docs with a local HTTP server. |
+| `just docs-serve-pub` | `zig build docs-serve -- 0.0.0.0` | Builds and serves the docs with a local HTTP server that is accessible by host IP/URL. |
 | `just fetch-lua` | `zig build fetch-lua` | Downloads and extracts Lua 5.5 source and official tests. |
 | `just release` | `zig build -Doptimize=ReleaseSafe` | Builds with ReleaseSafe optimization. |
 | `just test` | `zig build --summary all test` | Runs Zig unit tests. |
@@ -78,6 +83,8 @@ zig build run-test-official -Doptimize=ReleaseFast -- --mode=complete strings.lu
 | `zig build` | Default build and install step. Builds and installs `zlua`, downloaded `lua5.5`, `zlua-test-diff`, `zlua-test-official`, and `zlua-test-bench`. | None. |
 | `zig build fetch-lua` | Downloads and extracts Lua 5.5 source and official tests into `.zlua-deps/`. | None. |
 | `zig build run -- [args...]` | Builds and runs `zlua`. | zlua CLI arguments. |
+| `zig build docs` | Builds the `zlua` docs from zig sources | None. |
+| `zig build docs-serve -- [Interface] [Port]` | Serve the docs using a local HTTP server, by default it uses 127.0.0.1:8000. | Host interface and Port to bind to. |
 | `zig build test` | Runs Zig unit tests for the library facade and CLI root module. | None. |
 | `zig build examples` | Compiles all Zig embedding examples under `examples/`. | None. |
 | `zig build run-example -- [filters...]` | Runs all embedding examples, or only selected examples. | Example filters. |
