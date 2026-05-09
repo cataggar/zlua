@@ -94,6 +94,8 @@ Use a top-level import instead:
 const std = @import("std");
 ```
 
+Prefer top-level aliases for imported types that are used throughout a file. For example, use `const Dir = std.Io.Dir;` or `const File = std.Io.File;` near the imports instead of repeating long qualified names at each call site.
+
 Keep public embedding changes in `src/api.zig` unless there is a deliberate API decision to expose something else. Prefer adding a small facade method to exposing runtime internals.
 
 The zlua binary chunk format is zlua-specific. It is not PUC Lua `luac` compatibility and should not be treated as a stable external ABI.

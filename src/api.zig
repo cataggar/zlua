@@ -214,7 +214,7 @@ pub const State = struct {
     raw_state: runtime.State,
     last_error_root: ?usize = null,
     memory_files: std.ArrayList(MemoryFile) = .empty,
-    owned_memory_file_start: usize = 0,
+    memory_file_owned_contents: std.ArrayList(bool) = .empty,
     callbacks: std.ArrayList(RegisteredCallback) = .empty,
 
     pub fn init(state_allocator: std.mem.Allocator, options: Options) !State {
@@ -238,8 +238,7 @@ pub const State = struct {
 
         if (options.capabilities.filesystem == .memory) {
             const files = options.capabilities.filesystem.memory;
-            try state.memory_files.appendSlice(state.allocator(), files);
-            state.owned_memory_file_start = files.len;
+            for (files) |file| try state.appendMemoryFile(file.path, file.contents, false);
             state.raw_state.options.filesystem = .{ .memory = state.memory_files.items };
         }
 
@@ -251,6 +250,7 @@ pub const State = struct {
         self.raw_state.deinit();
         self.deinitOwnedMemoryFiles(state_allocator);
         self.memory_files.deinit(state_allocator);
+        self.memory_file_owned_contents.deinit(state_allocator);
         self.deinitCallbacks(state_allocator);
         self.callbacks.deinit(state_allocator);
         self.destroyMemoryLimitAllocator();
@@ -384,12 +384,7 @@ pub const State = struct {
             .host_cwd => return error.UnsupportedOption,
         }
 
-        const path_copy = try self.allocator().dupe(u8, path);
-        errdefer self.allocator().free(path_copy);
-        const contents_copy = try self.allocator().dupe(u8, contents);
-        errdefer self.allocator().free(contents_copy);
-
-        try self.memory_files.append(self.allocator(), .{ .path = path_copy, .contents = contents_copy });
+        try self.appendMemoryFile(path, contents, true);
         self.raw_state.options.filesystem = .{ .memory = self.memory_files.items };
     }
 
@@ -570,10 +565,22 @@ pub const State = struct {
     }
 
     fn deinitOwnedMemoryFiles(self: *State, state_allocator: std.mem.Allocator) void {
-        for (self.memory_files.items[self.owned_memory_file_start..]) |file| {
+        for (self.memory_files.items, 0..) |file, index| {
             state_allocator.free(file.path);
-            state_allocator.free(file.contents);
+            if (self.memory_file_owned_contents.items[index]) state_allocator.free(file.contents);
         }
+    }
+
+    fn appendMemoryFile(self: *State, path: []const u8, contents: []const u8, owned_contents: bool) !void {
+        const normalized_path = try MemoryFilesystem.normalizePathAlloc(self.allocator(), path, MemoryFilesystem.default_max_path_len);
+        errdefer self.allocator().free(normalized_path);
+        const stored_contents = if (owned_contents) try self.allocator().dupe(u8, contents) else contents;
+        errdefer if (owned_contents) self.allocator().free(stored_contents);
+
+        try self.memory_files.ensureUnusedCapacity(self.allocator(), 1);
+        try self.memory_file_owned_contents.ensureUnusedCapacity(self.allocator(), 1);
+        self.memory_files.appendAssumeCapacity(.{ .path = normalized_path, .contents = stored_contents });
+        self.memory_file_owned_contents.appendAssumeCapacity(owned_contents);
     }
 
     fn deinitCallbacks(self: *State, state_allocator: std.mem.Allocator) void {
@@ -2029,7 +2036,25 @@ test "api full stdlib still denies ambient host access by default" {
         \\assert(loaded == nil and load_err == 'cannot open file')
         \\local ok_file, file_err = pcall(dofile, 'missing.lua')
         \\assert(ok_file == false and tostring(file_err):find('filesystem access disabled'))
+        \\local ok_require, require_err = pcall(require, 'missing')
+        \\assert(ok_require == false and tostring(require_err):find("module 'missing' not found"))
+        \\local found, search_err = package.searchpath('missing', '?.lua')
+        \\assert(found == nil and tostring(search_err):find("missing.lua"))
+        \\local ok_lines, lines_err = pcall(io.lines, 'missing.lua')
+        \\assert(ok_lines == false and tostring(lines_err):find('cannot open file'))
     , .{ .name = "=api-21.6-safe-host-access" });
+}
+
+test "api default stdlib omits host-facing libraries" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    try lua.doString(
+        \\assert(io == nil)
+        \\assert(os == nil)
+        \\assert(package == nil)
+        \\assert(debug == nil)
+    , .{ .name = "=api-default-safe-libs" });
 }
 
 test "api os filesystem mutations respect filesystem capability" {
@@ -2114,9 +2139,9 @@ test "api custom stdout captures print and io writes" {
 
 test "api memory filesystem backs loadfile dofile and require" {
     const files = [_]MemoryFile{
-        .{ .path = "script.lua", .contents = "return 42" },
+        .{ .path = "./script.lua", .contents = "return 42" },
         .{ .path = "moddir/chunk.lua", .contents = "return 7" },
-        .{ .path = "plugins/plugin.lua", .contents = "return { value = 9 }" },
+        .{ .path = "plugins//plugin.lua", .contents = "return { value = 9 }" },
     };
     var lua = try State.init(std.testing.allocator, .{
         .stdlib = .full,
@@ -2132,6 +2157,21 @@ test "api memory filesystem backs loadfile dofile and require" {
         \\local plugin = require('plugin')
         \\assert(plugin.value == 9)
     , .{ .name = "=api-21.6-memory-fs" });
+}
+
+test "api memory filesystem rejects sandbox escape paths" {
+    const bad_files = [_]MemoryFile{
+        .{ .path = "../secret.lua", .contents = "return 1" },
+    };
+    try std.testing.expectError(error.InvalidPath, State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &bad_files } },
+    }));
+
+    var lua = try State.init(std.testing.allocator, .{ .stdlib = .full });
+    defer lua.deinit();
+    try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("/tmp/plugin.lua", "return 1"));
+    try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("plugins/../secret.lua", "return 1"));
 }
 
 test "api environment and fixed clock capabilities are explicit" {
