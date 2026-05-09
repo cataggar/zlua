@@ -886,7 +886,7 @@ fn renderDecl(
         try appendHeading(allocator, out, heading_level + 1, "Fields");
         try out.append(allocator, '\n');
         for (decl.fields.items) |field| {
-            try out.print(allocator, "- `{s}`", .{field.name});
+            try out.print(allocator, "- `{s}`", .{field.signature});
             if (field.doc.len != 0) {
                 try out.appendSlice(allocator, " - ");
                 try appendLinkedMarkdownText(allocator, out, symbols, current_module, field.doc, single_file);

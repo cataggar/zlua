@@ -57,9 +57,9 @@ pub const Ast = struct { ... };
 
 ### Fields
 
-- `arena`
-- `source`
-- `statements`
+- `arena: std.heap.ArenaAllocator`
+- `source: []const u8`
+- `statements: []const Stmt`
 
 ### Nested Declarations
 
@@ -85,8 +85,8 @@ pub const Identifier = struct { ... };
 
 ### Fields
 
-- `name`
-- `span`
+- `name: []const u8`
+- `span: source.Span`
 
 <a id="type-binding"></a>
 
@@ -98,8 +98,8 @@ pub const Binding = struct { ... };
 
 ### Fields
 
-- `name`
-- `attribute`
+- `name: Identifier`
+- `attribute: ?Identifier = null`
 
 <a id="const-block"></a>
 
@@ -121,23 +121,23 @@ pub const Stmt = union(enum) { ... };
 
 ### Fields
 
-- `empty`
-- `assignment`
-- `local_decl`
-- `global_decl`
-- `function_decl`
-- `local_function_decl`
-- `if_stmt`
-- `while_stmt`
-- `repeat_stmt`
-- `numeric_for`
-- `generic_for`
-- `break_stmt`
-- `goto_stmt`
-- `label_stmt`
-- `do_block`
-- `return_stmt`
-- `call_stmt`
+- `empty: source.Span`
+- `assignment: Assignment`
+- `local_decl: LocalDecl`
+- `global_decl: GlobalDecl`
+- `function_decl: FunctionDecl`
+- `local_function_decl: LocalFunctionDecl`
+- `if_stmt: IfStmt`
+- `while_stmt: WhileStmt`
+- `repeat_stmt: RepeatStmt`
+- `numeric_for: NumericFor`
+- `generic_for: GenericFor`
+- `break_stmt: source.Span`
+- `goto_stmt: Identifier`
+- `label_stmt: Identifier`
+- `do_block: Block`
+- `return_stmt: ReturnStmt`
+- `call_stmt: *Expr`
 
 <a id="type-assignment"></a>
 
@@ -149,8 +149,8 @@ pub const Assignment = struct { ... };
 
 ### Fields
 
-- `targets`
-- `values`
+- `targets: []const *Expr`
+- `values: []const *Expr`
 
 <a id="type-localdecl"></a>
 
@@ -162,8 +162,8 @@ pub const LocalDecl = struct { ... };
 
 ### Fields
 
-- `bindings`
-- `values`
+- `bindings: []const Binding`
+- `values: []const *Expr`
 
 <a id="type-globaldecl"></a>
 
@@ -175,10 +175,10 @@ pub const GlobalDecl = struct { ... };
 
 ### Fields
 
-- `attribute`
-- `all`
-- `names`
-- `values`
+- `attribute: ?Identifier`
+- `all: bool`
+- `names: []const Binding`
+- `values: []const *Expr`
 
 <a id="type-functionname"></a>
 
@@ -190,9 +190,9 @@ pub const FunctionName = struct { ... };
 
 ### Fields
 
-- `root`
-- `fields`
-- `method`
+- `root: Identifier`
+- `fields: []const Identifier`
+- `method: ?Identifier`
 
 <a id="type-functiondecl"></a>
 
@@ -204,8 +204,8 @@ pub const FunctionDecl = struct { ... };
 
 ### Fields
 
-- `name`
-- `body`
+- `name: FunctionName`
+- `body: FunctionBody`
 
 <a id="type-localfunctiondecl"></a>
 
@@ -217,8 +217,8 @@ pub const LocalFunctionDecl = struct { ... };
 
 ### Fields
 
-- `name`
-- `body`
+- `name: Identifier`
+- `body: FunctionBody`
 
 <a id="type-ifstmt"></a>
 
@@ -230,8 +230,8 @@ pub const IfStmt = struct { ... };
 
 ### Fields
 
-- `branches`
-- `else_block`
+- `branches: []const IfBranch`
+- `else_block: ?Block`
 
 <a id="type-ifbranch"></a>
 
@@ -243,8 +243,8 @@ pub const IfBranch = struct { ... };
 
 ### Fields
 
-- `condition`
-- `body`
+- `condition: *Expr`
+- `body: Block`
 
 <a id="type-whilestmt"></a>
 
@@ -256,9 +256,9 @@ pub const WhileStmt = struct { ... };
 
 ### Fields
 
-- `condition`
-- `body`
-- `end_line`
+- `condition: *Expr`
+- `body: Block`
+- `end_line: usize`
 
 <a id="type-repeatstmt"></a>
 
@@ -270,8 +270,8 @@ pub const RepeatStmt = struct { ... };
 
 ### Fields
 
-- `body`
-- `condition`
+- `body: Block`
+- `condition: *Expr`
 
 <a id="type-numericfor"></a>
 
@@ -283,12 +283,12 @@ pub const NumericFor = struct { ... };
 
 ### Fields
 
-- `name`
-- `start`
-- `limit`
-- `step`
-- `body`
-- `end_line`
+- `name: Identifier`
+- `start: *Expr`
+- `limit: *Expr`
+- `step: ?*Expr`
+- `body: Block`
+- `end_line: usize`
 
 <a id="type-genericfor"></a>
 
@@ -300,10 +300,10 @@ pub const GenericFor = struct { ... };
 
 ### Fields
 
-- `names`
-- `iterators`
-- `body`
-- `end_line`
+- `names: []const Identifier`
+- `iterators: []const *Expr`
+- `body: Block`
+- `end_line: usize`
 
 <a id="type-returnstmt"></a>
 
@@ -315,8 +315,8 @@ pub const ReturnStmt = struct { ... };
 
 ### Fields
 
-- `line`
-- `values`
+- `line: usize`
+- `values: []const *Expr`
 
 <a id="type-functionbody"></a>
 
@@ -328,12 +328,12 @@ pub const FunctionBody = struct { ... };
 
 ### Fields
 
-- `params`
-- `is_vararg`
-- `vararg_name`
-- `body`
-- `defined_line`
-- `end_line`
+- `params: []const Identifier`
+- `is_vararg: bool`
+- `vararg_name: ?Identifier`
+- `body: Block`
+- `defined_line: usize`
+- `end_line: usize`
 
 <a id="type-expr"></a>
 
@@ -345,22 +345,22 @@ pub const Expr = union(enum) { ... };
 
 ### Fields
 
-- `nil`
-- `boolean`
-- `integer`
-- `float`
-- `string`
-- `vararg`
-- `identifier`
-- `table_constructor`
-- `function_literal`
-- `grouped`
-- `index`
-- `field`
-- `call`
-- `method_call`
-- `unary`
-- `binary`
+- `nil: source.Span`
+- `boolean: BoolLiteral`
+- `integer: TokenLiteral`
+- `float: TokenLiteral`
+- `string: TokenLiteral`
+- `vararg: source.Span`
+- `identifier: Identifier`
+- `table_constructor: TableConstructor`
+- `function_literal: FunctionBody`
+- `grouped: *Expr`
+- `index: IndexExpr`
+- `field: FieldExpr`
+- `call: CallExpr`
+- `method_call: MethodCallExpr`
+- `unary: UnaryExpr`
+- `binary: BinaryExpr`
 
 <a id="type-boolliteral"></a>
 
@@ -372,8 +372,8 @@ pub const BoolLiteral = struct { ... };
 
 ### Fields
 
-- `value`
-- `span`
+- `value: bool`
+- `span: source.Span`
 
 <a id="type-tokenliteral"></a>
 
@@ -385,8 +385,8 @@ pub const TokenLiteral = struct { ... };
 
 ### Fields
 
-- `lexeme`
-- `span`
+- `lexeme: []const u8`
+- `span: source.Span`
 
 <a id="type-tableconstructor"></a>
 
@@ -398,7 +398,7 @@ pub const TableConstructor = struct { ... };
 
 ### Fields
 
-- `fields`
+- `fields: []const TableField`
 
 <a id="type-tablefield"></a>
 
@@ -410,9 +410,9 @@ pub const TableField = union(enum) { ... };
 
 ### Fields
 
-- `array`
-- `keyed`
-- `named`
+- `array: *Expr`
+- `keyed: KeyedField`
+- `named: NamedField`
 
 <a id="type-keyedfield"></a>
 
@@ -424,8 +424,8 @@ pub const KeyedField = struct { ... };
 
 ### Fields
 
-- `key`
-- `value`
+- `key: *Expr`
+- `value: *Expr`
 
 <a id="type-namedfield"></a>
 
@@ -437,8 +437,8 @@ pub const NamedField = struct { ... };
 
 ### Fields
 
-- `name`
-- `value`
+- `name: Identifier`
+- `value: *Expr`
 
 <a id="type-indexexpr"></a>
 
@@ -450,8 +450,8 @@ pub const IndexExpr = struct { ... };
 
 ### Fields
 
-- `receiver`
-- `key`
+- `receiver: *Expr`
+- `key: *Expr`
 
 <a id="type-fieldexpr"></a>
 
@@ -463,8 +463,8 @@ pub const FieldExpr = struct { ... };
 
 ### Fields
 
-- `receiver`
-- `name`
+- `receiver: *Expr`
+- `name: Identifier`
 
 <a id="type-callexpr"></a>
 
@@ -476,9 +476,9 @@ pub const CallExpr = struct { ... };
 
 ### Fields
 
-- `callee`
-- `call_line`
-- `args`
+- `callee: *Expr`
+- `call_line: usize`
+- `args: []const *Expr`
 
 <a id="type-methodcallexpr"></a>
 
@@ -490,10 +490,10 @@ pub const MethodCallExpr = struct { ... };
 
 ### Fields
 
-- `receiver`
-- `method`
-- `call_line`
-- `args`
+- `receiver: *Expr`
+- `method: Identifier`
+- `call_line: usize`
+- `args: []const *Expr`
 
 <a id="type-unaryop"></a>
 
@@ -513,9 +513,9 @@ pub const UnaryExpr = struct { ... };
 
 ### Fields
 
-- `op`
-- `op_line`
-- `operand`
+- `op: UnaryOp`
+- `op_line: usize`
+- `operand: *Expr`
 
 <a id="type-binaryop"></a>
 
@@ -535,8 +535,8 @@ pub const BinaryExpr = struct { ... };
 
 ### Fields
 
-- `op`
-- `op_line`
-- `left`
-- `right`
+- `op: BinaryOp`
+- `op_line: usize`
+- `left: *Expr`
+- `right: *Expr`
 

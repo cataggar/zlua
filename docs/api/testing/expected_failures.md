@@ -25,7 +25,7 @@ pub const Registry = struct { ... };
 
 ### Fields
 
-- `failures`
+- `failures: std.StringHashMap([]u8)`
 
 ### Nested Declarations
 

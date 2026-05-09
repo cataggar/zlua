@@ -26,13 +26,13 @@ pub const Lexer = struct { ... };
 
 ### Fields
 
-- `allocator`
-- `source`
-- `error_diagnostic`
-- `index`
-- `line`
-- `column`
-- `diagnostics`
+- `allocator: std.mem.Allocator`
+- `source: []const u8`
+- `error_diagnostic: ?*?errors.Diagnostic = null`
+- `index: usize = 0`
+- `line: usize = 1`
+- `column: usize = 1`
+- `diagnostics: std.ArrayList(diagnostic.Diagnostic) = .empty`
 
 ### Nested Declarations
 

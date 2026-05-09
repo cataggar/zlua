@@ -136,10 +136,10 @@ pub const IoCapability = struct { ... };
 
 ### Fields
 
-- `runtime`
-- `stdin`
-- `stdout`
-- `stderr`
+- `runtime: ?std.Io = null`
+- `stdin: []const u8 = ""`
+- `stdout: ?*std.Io.Writer = null`
+- `stderr: ?*std.Io.Writer = null`
 
 ### Nested Declarations
 
@@ -175,7 +175,7 @@ pub const EnvironmentCapability = union(enum) { ... };
 
 ### Fields
 
-- `map`
+- `map: *const std.process.Environ.Map`
 
 <a id="alias-clockcapability"></a>
 
@@ -207,11 +207,11 @@ pub const Capabilities = struct { ... };
 
 ### Fields
 
-- `io`
-- `filesystem`
-- `environment`
-- `clock`
-- `process`
+- `io: IoCapability = .disabled`
+- `filesystem: FilesystemCapability = .disabled`
+- `environment: EnvironmentCapability = .disabled`
+- `clock: ClockCapability = .disabled`
+- `process: ProcessCapability = .disabled`
 
 ### Nested Declarations
 
@@ -237,10 +237,10 @@ pub const Limits = struct { ... };
 
 ### Fields
 
-- `max_memory`
-- `max_stack_values`
-- `max_call_frames`
-- `max_instructions`
+- `max_memory: ?usize = null`
+- `max_stack_values: ?usize = null`
+- `max_call_frames: ?usize = null`
+- `max_instructions: ?u64 = null`
 
 <a id="type-instructionbudget"></a>
 
@@ -252,9 +252,9 @@ pub const InstructionBudget = struct { ... };
 
 ### Fields
 
-- `limit`
-- `used`
-- `remaining`
+- `limit: ?u64`
+- `used: u64`
+- `remaining: ?u64`
 
 <a id="type-gcoptions"></a>
 
@@ -274,8 +274,8 @@ pub const DebugOptions = struct { ... };
 
 ### Fields
 
-- `errors`
-- `trace_vm`
+- `errors: bool = false`
+- `trace_vm: bool = false`
 
 <a id="type-options"></a>
 
@@ -287,11 +287,11 @@ pub const Options = struct { ... };
 
 ### Fields
 
-- `stdlib`
-- `capabilities`
-- `limits`
-- `gc`
-- `debug`
+- `stdlib: Stdlib = .safe`
+- `capabilities: Capabilities = .sandboxed`
+- `limits: Limits = .{}`
+- `gc: GcOptions = .{}`
+- `debug: DebugOptions = .{}`
 
 <a id="type-loadmode"></a>
 
@@ -311,9 +311,9 @@ pub const LoadOptions = struct { ... };
 
 ### Fields
 
-- `name`
-- `environment`
-- `mode`
+- `name: ?[]const u8 = null`
+- `environment: ?Table = null`
+- `mode: LoadMode = .source_only`
 
 <a id="alias-dooptions"></a>
 
@@ -335,7 +335,7 @@ pub const BytecodeLoadOptions = struct { ... };
 
 ### Fields
 
-- `environment`
+- `environment: ?Table = null`
 
 <a id="type-bytecodedumpoptions"></a>
 
@@ -347,7 +347,7 @@ pub const BytecodeDumpOptions = struct { ... };
 
 ### Fields
 
-- `strip_debug`
+- `strip_debug: bool = false`
 
 <a id="type-tableoptions"></a>
 
@@ -359,8 +359,8 @@ pub const TableOptions = struct { ... };
 
 ### Fields
 
-- `array_hint`
-- `hash_hint`
+- `array_hint: u32 = 0`
+- `hash_hint: u32 = 0`
 
 <a id="const-hostfn"></a>
 
@@ -382,7 +382,7 @@ pub const GcBudget = struct { ... };
 
 ### Fields
 
-- `steps`
+- `steps: usize = 0`
 
 <a id="type-gcstepresult"></a>
 
@@ -402,13 +402,13 @@ pub const State = struct { ... };
 
 ### Fields
 
-- `base_allocator`
-- `memory_limit_allocator`
-- `raw_state`
-- `last_error_root`
-- `memory_files`
-- `memory_file_owned_contents`
-- `callbacks`
+- `base_allocator: std.mem.Allocator`
+- `memory_limit_allocator: ?*MemoryLimitAllocator = null`
+- `raw_state: runtime.State`
+- `last_error_root: ?usize = null`
+- `memory_files: std.ArrayList(MemoryFile) = .empty`
+- `memory_file_owned_contents: std.ArrayList(bool) = .empty`
+- `callbacks: std.ArrayList(RegisteredCallback) = .empty`
 
 ### Nested Declarations
 
@@ -731,8 +731,8 @@ pub const Ref = struct { ... };
 
 ### Fields
 
-- `state`
-- `index`
+- `state: *State`
+- `index: usize`
 
 ### Nested Declarations
 
@@ -769,7 +769,7 @@ pub const Table = struct { ... };
 
 ### Fields
 
-- `ref`
+- `ref: Ref`
 
 ### Nested Declarations
 
@@ -817,7 +817,7 @@ pub const Function = struct { ... };
 
 ### Fields
 
-- `ref`
+- `ref: Ref`
 
 ### Nested Declarations
 
@@ -884,7 +884,7 @@ pub const AnyUserdata = struct { ... };
 
 ### Fields
 
-- `ref`
+- `ref: Ref`
 
 ### Nested Declarations
 
@@ -918,7 +918,7 @@ pub const ErrorRef = struct { ... };
 
 ### Fields
 
-- `ref`
+- `ref: Ref`
 
 ### Nested Declarations
 
@@ -966,13 +966,13 @@ pub const Value = union(enum) { ... };
 
 ### Fields
 
-- `boolean`
-- `integer`
-- `number`
-- `string`
-- `table`
-- `function`
-- `userdata`
+- `boolean: bool`
+- `integer: i64`
+- `number: f64`
+- `string: []const u8`
+- `table: Table`
+- `function: Function`
+- `userdata: AnyUserdata`
 
 ### Nested Declarations
 
@@ -1006,8 +1006,8 @@ pub const Context = struct { ... };
 
 ### Fields
 
-- `lua`
-- `raw`
+- `lua: *State`
+- `raw: *runtime.ApiCallbackContext`
 
 ### Nested Declarations
 

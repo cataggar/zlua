@@ -22,9 +22,9 @@ pub const Position = struct { ... };
 
 ### Fields
 
-- `offset`
-- `line`
-- `column`
+- `offset: usize = 0`
+- `line: usize = 1`
+- `column: usize = 1`
 
 <a id="type-span"></a>
 
@@ -36,8 +36,8 @@ pub const Span = struct { ... };
 
 ### Fields
 
-- `start`
-- `end`
+- `start: Position`
+- `end: Position`
 
 ### Nested Declarations
 

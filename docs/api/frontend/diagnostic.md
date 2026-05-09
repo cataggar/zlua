@@ -30,7 +30,7 @@ pub const Diagnostic = struct { ... };
 
 ### Fields
 
-- `code`
-- `span`
-- `message`
+- `code: Code`
+- `span: source.Span`
+- `message: []const u8`
 
