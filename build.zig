@@ -237,6 +237,34 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(diff_step);
     ci_step.dependOn(official_step);
     ci_step.dependOn(ci_c_api_step);
+
+    const docs_lib = b.addLibrary(.{
+        .name = "zlua",
+        .root_module = mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Generate project documentation");
+    docs_step.dependOn(&install_docs.step);
+
+    const doc_server = b.addExecutable(.{
+        .name = "doc-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/doc_server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_doc_server = b.addRunArtifact(doc_server);
+    run_doc_server.step.dependOn(&install_docs.step);
+    if (b.args) |args| run_doc_server.addArgs(args);
+
+    const doc_serve_step = b.step("docs-serve", "Generate docs and serve zig-out/docs over HTTP");
+    doc_serve_step.dependOn(&run_doc_server.step);
 }
 
 fn addFetchLuaStep(b: *std.Build) *std.Build.Step {
