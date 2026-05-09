@@ -1,6 +1,18 @@
 # Next Steps
 
-The original milestone plan is largely implemented. Remaining work is now about hardening, performance attribution, documentation, API polish, and release readiness.
+The original milestone plan is largely implemented. Current correctness dashboards pass, expected failures are empty, and basic embedding resource limits are implemented. Trust the codebase and harnesses over older milestone wording. Remaining work should focus on hardening the public embedding safety boundary, then performance attribution, API polish, and release readiness.
+
+## Highest Priority: Embedding Sandbox Hardening
+
+The highest-priority follow-up is to make the Zig embedding API's sandbox behavior explicit, tested, and documented. The default `State.init` path is safe-by-default, and `.full` standard libraries still require explicit host capabilities, but the remaining work is in edge coverage and file policy decisions.
+
+Immediate tasks:
+
+1. Define and test memory-filesystem path rules: relative paths only, normalization of `.` and duplicate separators, rejection of absolute paths and `..`, maximum path length, and rename/remove overwrite behavior.
+2. Add optional memory-filesystem quotas and tests for quota exhaustion during creates, overwrites, and initialization from seed files.
+3. Add negative sandbox tests for `io`, `os`, `package`, environment, process, filesystem mutation, and module-loading edges under default and full-stdlib-without-capabilities states.
+4. Document the safe/full capability threat model in [embedding.md](embedding.md), including what each capability grants and what remains denied by default.
+5. Keep CLI behavior separate: the CLI intentionally starts with full host capabilities unless explicit sandbox flags are added later.
 
 ## Performance
 
@@ -34,13 +46,12 @@ larger table layout rewrite
 
 ## Resource Limits And Sandboxing
 
-The embedding API exposes memory, stack, call-frame, and instruction limits. Remaining work is to harden semantics and coverage:
+The embedding API exposes memory, stack, call-frame, and instruction limits. Unit coverage already exercises protected errors, resettable instruction budgets, stack/frame recursion, memory limits during loading and execution, captured output, stdlib temporaries, memory file reads, and recovery after OOM-style Lua errors. Remaining work is mostly edge hardening and harness expansion:
 
 1. Extend low-limit coverage into official and differential harness modes once stack, frame, memory, and instruction limit semantics are stable.
 2. Document stream-only guidance for embedding hosts that do not want captured output buffers counted against state memory.
-3. Document the safe/full capability threat model in embedding docs once negative coverage is complete.
-4. Add negative sandbox tests for remaining `io`, `os`, `debug`, `package`, environment, process, filesystem, memory files, and module loading edges.
-5. Define memory filesystem quotas, path normalization, maximum path length, and rename/remove edge behavior.
+3. Keep adding negative sandbox tests for remaining `io`, `os`, `debug`, `package`, environment, process, filesystem, memory files, and module loading edges.
+4. Keep memory-filesystem quotas, path normalization, maximum path length, and rename/remove edge behavior documented as they become stable API.
 6. Consider CLI flags for sandboxed execution and explicit memory/instruction limits.
 
 ## GC And Error Recovery

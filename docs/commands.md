@@ -21,7 +21,7 @@ Arguments after `zig build <step> --` are forwarded to that step's executable. A
 | `zig build` or `just build` | Build and install `zlua` and the downloaded `lua5.5` oracle. |
 | `zig build run -- path/to/script.lua` or `just run path/to/script.lua` | Run a Lua script through zlua. |
 | `zig build docs` | Build the docs bundle for `zlua`. |
-| `zig build docs-serve` | Build and serve the docs with a local HTTP server, accessible at 127.0.0.1:8000 by default. |
+| `zig build docs-serve` | Build and serve the docs with a local HTTP server |
 | `zig build examples` | Compile all Zig embedding examples. |
 | `zig build run-example` or `just example` | Run all Zig embedding examples. |
 | `zig build ci` or `just ci` | Run the CI-equivalent local check. |

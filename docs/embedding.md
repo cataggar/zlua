@@ -102,6 +102,8 @@ defer allocator.free(report);
 
 `State.addMemoryFile` can add owned files to a state that was initialized with disabled or read-only memory filesystem access. It writes through to `.memory_rw` filesystems and returns `error.UnsupportedOption` for host-filesystem states.
 
+Memory filesystem paths are sandbox-relative. zlua normalizes `.` segments and repeated `/` separators, rejects absolute paths, rejects `..` path traversal, rejects backslash-containing paths, and enforces a configurable maximum path length for writable memory files. `MemoryFilesystem.init` uses the default path limit; use `MemoryFilesystem.initWithOptions` to set `max_path_len` or an optional `max_bytes` content quota for writable memory files.
+
 ## Limits
 
 Public options include memory, instruction, stack value, and call frame limits:

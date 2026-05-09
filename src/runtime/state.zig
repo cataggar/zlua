@@ -1301,8 +1301,10 @@ pub const State = struct {
         switch (self.options.filesystem) {
             .disabled => return self.fail("filesystem access disabled"),
             .memory => |files| {
+                const normalized_path = host.MemoryFilesystem.normalizePathAlloc(self.allocator, path, host.MemoryFilesystem.default_max_path_len) catch return self.fail("cannot open file");
+                defer self.allocator.free(normalized_path);
                 for (files) |file| {
-                    if (std.mem.eql(u8, file.path, path)) return self.allocator.dupe(u8, file.contents);
+                    if (std.mem.eql(u8, file.path, normalized_path)) return self.allocator.dupe(u8, file.contents);
                 }
                 return self.fail("cannot open file");
             },
