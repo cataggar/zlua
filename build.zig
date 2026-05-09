@@ -251,6 +251,27 @@ pub fn build(b: *std.Build) void {
     const docs_step = b.step("docs", "Generate project documentation");
     docs_step.dependOn(&install_docs.step);
 
+    const md_docgen = b.addExecutable(.{
+        .name = "zig-md-docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/zig-md-docs.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run_md_docgen = b.addRunArtifact(md_docgen);
+    run_md_docgen.addArgs(&.{
+        "--root", "src/root.zig",
+        "--out", "docs/api",
+        "--project-root", ".",
+        "--name", "zlua",
+        "--emit-index",
+        "--follow-imports",
+    });
+
+    const docs_md_step = b.step("docs-md", "Generate Markdown API documentation");
+    docs_md_step.dependOn(&run_md_docgen.step);
+
     const doc_server = b.addExecutable(.{
         .name = "doc-server",
         .root_module = b.createModule(.{
