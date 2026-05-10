@@ -51,8 +51,8 @@ fn newBudget(ctx: *zlua.Context, amount: i64) !zlua.Userdata(Budget) {
     return budget;
 }
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     var lua = try zlua.State.init(allocator, .{});
     defer lua.deinit();
