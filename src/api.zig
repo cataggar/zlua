@@ -2299,6 +2299,27 @@ test "api default stdlib omits host-facing libraries" {
     , .{ .name = "=api-default-safe-libs" });
 }
 
+test "api host-backed capabilities require explicit I/O access" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{
+            .filesystem = .host_cwd,
+            .clock = .system,
+            .process = .enabled,
+        },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local ok_process, process_err = pcall(os.execute, 'true')
+        \\assert(ok_process == false and tostring(process_err):find('process I/O unavailable'))
+        \\local ok_time, time_err = pcall(os.time)
+        \\assert(ok_time == false and tostring(time_err):find('clock I/O unavailable'))
+        \\local ok_file, file_err = pcall(dofile, 'missing.lua')
+        \\assert(ok_file == false and tostring(file_err):find('filesystem I/O unavailable'))
+    , .{ .name = "=api-host-backed-capabilities-need-io" });
+}
+
 test "api os filesystem mutations respect filesystem capability" {
     const files = [_]MemoryFile{
         .{ .path = "keep.lua", .contents = "return 42" },
@@ -2316,6 +2337,37 @@ test "api os filesystem mutations respect filesystem capability" {
         \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
         \\assert(dofile('keep.lua') == 42)
     , .{ .name = "=api-21.6-os-fs-capability" });
+}
+
+test "api read-only memory filesystem denies stdlib writes" {
+    const files = [_]MemoryFile{
+        .{ .path = "seed.txt", .contents = "seed" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local read = assert(io.open('seed.txt', 'r'))
+        \\assert(read:read('*a') == 'seed')
+        \\assert(read:close())
+        \\local ok_write, write_err = pcall(io.open, 'new.txt', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('filesystem write access disabled'))
+        \\local ok_append, append_err = pcall(io.open, 'seed.txt', 'a')
+        \\assert(ok_append == false and tostring(append_err):find('filesystem write access disabled'))
+        \\local tmp = assert(io.tmpfile())
+        \\assert(tmp:write('temporary'))
+        \\local ok_tmp, tmp_err = pcall(function() return tmp:close() end)
+        \\assert(ok_tmp == false and tostring(tmp_err):find('filesystem write access disabled'))
+        \\local removed, remove_err = os.remove('seed.txt')
+        \\assert(removed == nil and tostring(remove_err):find('filesystem write access disabled'))
+        \\local renamed, rename_err = os.rename('seed.txt', 'renamed.txt')
+        \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
+        \\read = assert(io.open('seed.txt', 'r'))
+        \\assert(read:read('*a') == 'seed')
+    , .{ .name = "=api-memory-read-only-negative" });
 }
 
 test "api writable memory filesystem supports Lua writes and mutations" {
@@ -2353,6 +2405,44 @@ test "api writable memory filesystem supports Lua writes and mutations" {
     const log = try filesystem.readFileAlloc(std.testing.allocator, "log.txt");
     defer std.testing.allocator.free(log);
     try std.testing.expectEqualStrings("alpha beta", log);
+}
+
+test "api writable memory filesystem rejects sandbox escape writes" {
+    var filesystem = MemoryFilesystem.init(std.testing.allocator);
+    defer filesystem.deinit();
+    try filesystem.writeFile("seed.txt", "seed");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory_rw = &filesystem } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local absolute, absolute_err = io.open('/tmp/escape.txt', 'w')
+        \\assert(absolute == nil and tostring(absolute_err):find('cannot open file'))
+        \\local ok_write, write_err = pcall(io.open, '../escape.txt', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('cannot write file'))
+        \\local ok_output, output_err = pcall(function()
+        \\  local file = assert(io.open('generated.txt', 'w'))
+        \\  assert(file:write('generated'))
+        \\  return file:close()
+        \\end)
+        \\assert(ok_output == true)
+        \\local removed, remove_err = os.remove('../escape.txt')
+        \\assert(removed == nil and tostring(remove_err):find('cannot remove file'))
+        \\local renamed, rename_err = os.rename('seed.txt', '../escape.txt')
+        \\assert(renamed == nil and tostring(rename_err):find('cannot rename file'))
+        \\local loaded, load_err = loadfile('../escape.lua')
+        \\assert(loaded == nil and tostring(load_err):find('cannot open file'))
+        \\local ok_do, do_err = pcall(dofile, '../escape.lua')
+        \\assert(ok_do == false and tostring(do_err):find('cannot open file'))
+    , .{ .name = "=api-memory-rw-escape-negative" });
+
+    const seed = try filesystem.readFileAlloc(std.testing.allocator, "seed.txt");
+    defer std.testing.allocator.free(seed);
+    try std.testing.expectEqualStrings("seed", seed);
+    try std.testing.expectError(error.FileNotFound, filesystem.readFileAlloc(std.testing.allocator, "escape.txt"));
 }
 
 test "api custom stdout captures print and io writes" {
@@ -2429,6 +2519,30 @@ test "api memory filesystem rejects sandbox escape paths" {
         \\assert(ok == false and tostring(err):find("module 'secret' not found"))
         \\assert(require('safe') == true)
     , .{ .name = "=api-memory-require-sandbox-paths" });
+}
+
+test "api package loading rejects sandbox escape module paths" {
+    const files = [_]MemoryFile{
+        .{ .path = "plugins/safe.lua", .contents = "return true" },
+        .{ .path = "secret.lua", .contents = "return 'secret'" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+    try lua.setPackagePath("?.lua;plugins/?.lua;../?.lua;/tmp/?.lua");
+
+    try lua.doString(
+        \\local found, search_err = package.searchpath('../secret', '?.lua;../?.lua;/tmp/?.lua', '', '')
+        \\assert(found == nil and tostring(search_err):find('no file'))
+        \\local loader, loader_data = package.searchers[2]('..secret')
+        \\assert(type(loader) == 'string' and loader:find('no matching file'))
+        \\assert(loader_data == nil)
+        \\local ok, require_err = pcall(require, '..secret')
+        \\assert(ok == false and tostring(require_err):find("module '..secret' not found"))
+        \\assert(require('safe') == true)
+    , .{ .name = "=api-package-escape-negative" });
 }
 
 test "api environment and fixed clock capabilities are explicit" {
