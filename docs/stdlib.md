@@ -2,7 +2,7 @@
 
 This page documents the Lua-visible libraries zlua opens, how to select them, and the zlua extensions available alongside the Lua standard library. zlua targets `Lua 5.5`, and `_VERSION` is `Lua 5.5` when the base library is open.
 
-For Zig API details, see the generated [`stdlib` API docs](api/stdlib.md). For sandbox capability controls, see [Embedding zlua From Zig](embedding.md).
+For Zig API details, see the generated [API docs](api/api.md). For sandbox capability controls, see [Embedding zlua From Zig](embedding.md).
 
 ## Library Selection
 
