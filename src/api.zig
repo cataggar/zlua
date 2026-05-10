@@ -1705,6 +1705,36 @@ test "api callback argument roots survive forced GC through weak tables" {
     try std.testing.expectEqual(@as(i64, 7), result.get(1));
 }
 
+test "api native callback dispatch tolerates forced GC" {
+    const Callbacks = struct {
+        fn stress(ctx: *Context) !void {
+            var callback = try ctx.arg(0, Function);
+            defer callback.deinit();
+
+            try ctx.state().collect();
+            const returned = try callback.call(.{"native"}, []const u8);
+            try ctx.returnValues(.{returned});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var stress = try lua.register("stress_callback_gc", Callbacks.stress);
+    defer stress.deinit();
+    try lua.setGlobal("stress_callback_gc", stress);
+
+    var chunk = try lua.loadString(
+        \\return stress_callback_gc(function(value)
+        \\  collectgarbage('collect')
+        \\  return value .. '-callback'
+        \\end)
+    , .{ .name = "=api-callback-dispatch-gc" });
+    defer chunk.deinit();
+
+    try std.testing.expectEqualStrings("native-callback", try chunk.call(.{}, []const u8));
+}
+
 test "api userdata handles root weak values until finalizers can run" {
     const Tracker = struct {
         finalized: *usize,

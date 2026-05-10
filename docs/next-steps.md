@@ -41,11 +41,10 @@ larger table layout rewrite
 
 ## GC And Error Recovery
 
-1. Test GC during table mutation, closure allocation, string interning, native callback dispatch, binary dumping, and bytecode loading.
-2. Decide whether `State.stepGc` remains full-collection semantics or becomes budget-respecting.
-3. Test errors during `__close`, `__gc`, host callbacks, OOM paths, stack overflow, nested protected calls, and coroutine close/resume chains.
-4. Verify protected calls restore stack, frames, pending returns, current error, registry roots, and GC roots after error paths.
-5. Add small-memory and small-stack modes to the differential or official harness once semantics are stable.
+1. Decide whether `State.stepGc` remains full-collection semantics or becomes budget-respecting.
+2. Test errors during `__close`, `__gc`, host callbacks, OOM paths, stack overflow, nested protected calls, and coroutine close/resume chains.
+3. Verify protected calls restore stack, frames, pending returns, current error, registry roots, and GC roots after error paths.
+4. Add small-memory and small-stack modes to the differential or official harness once semantics are stable.
 
 ## Zig Embedding API
 
