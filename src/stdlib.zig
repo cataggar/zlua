@@ -290,8 +290,11 @@ fn openDebug(state: *State) !void {
 }
 
 fn openJson(state: *State) !void {
-    _ = try json.moduleTable(state);
-    try state.globals.put(try state.intern("import"), .{ .native = .import_module });
+    const json_lib = try state.newTableWithHints(0, 3);
+    try setField(state, json_lib, "read", .{ .native = .json_read });
+    try setField(state, json_lib, "write", .{ .native = .json_write });
+    try setField(state, json_lib, "null", try json.nullValue(state));
+    try state.globals.put(try state.intern("json"), json_lib);
 }
 
 fn openPackage(state: *State, libraries: LibrarySet) !void {
@@ -313,7 +316,7 @@ fn openPackage(state: *State, libraries: LibrarySet) !void {
     if (libraries.string) try setField(state, loaded, "string", state.getGlobal("string"));
     if (libraries.table) try setField(state, loaded, "table", state.getGlobal("table"));
     if (libraries.utf8) try setField(state, loaded, "utf8", state.getGlobal("utf8"));
-    if (libraries.json) try setField(state, loaded, "json", .{ .table = try json.moduleTable(state) });
+    if (libraries.json) try setField(state, loaded, "json", state.getGlobal("json"));
     try setField(state, loaded, "package", package_lib);
     try setField(state, package_lib, "loaded", loaded);
     try setField(state, package_lib, "preload", preload);
@@ -463,7 +466,6 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .debug_setmetatable => try debug.setmetatable(state, thread, op),
         .debug_setuservalue => try debug.setuservalue(state, thread, op),
         .debug_getuservalue => try debug.getuservalue(state, thread, op),
-        .import_module => try json.importModule(state, thread, op),
         .json_read => try json.read(state, thread, op),
         .json_write => try json.write(state, thread, op),
         .api_callback_dispatch => try state.callApiCallbackDispatch(thread, op),

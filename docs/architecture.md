@@ -275,7 +275,7 @@ Library selection:
 | --- | --- |
 | `none` | No standard libraries. |
 | `base` | Base globals only. |
-| `safe` | Base, table, string, math, utf8, and coroutine. |
+| `safe` | Base, table, string, math, utf8, coroutine, and json. |
 | `full` | Safe libraries plus io, os, debug, and package. |
 | `libraries` | Explicit per-library set. |
 

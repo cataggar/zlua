@@ -137,7 +137,6 @@ pub const State = struct {
     number_metatable: ?*Table = null,
     boolean_metatable: ?*Table = null,
     nil_metatable: ?*Table = null,
-    json_module: ?*Table = null,
     zerde_null: ?*Table = null,
     zerde_array_metatable: ?*Table = null,
     zerde_object_metatable: ?*Table = null,

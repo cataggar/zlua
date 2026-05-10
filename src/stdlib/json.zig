@@ -8,37 +8,12 @@ const bytecode = compile.bytecode;
 const State = runtime.State;
 const Thread = runtime.Thread;
 const Value = runtime.Value;
-const Table = runtime.Table;
 
-pub fn moduleTable(state: *State) !*Table {
-    if (state.json_module) |module| return module;
-
-    try zerde_lua.ensureSupportTables(state);
-
-    const module_value = try state.newTableWithHints(0, 3);
-    const module = module_value.table;
-    try module.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .json_read });
-    try module.set(state.allocator, .{ .string = try state.intern("write") }, .{ .native = .json_write });
-    try module.set(state.allocator, .{ .string = try state.intern("null") }, try zerde_lua.nullValue(state));
-    state.json_module = module;
-    return module;
-}
-
-pub fn importModule(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const name = try state.expectArgumentString(thread, op, "import", 0);
-    if (std.mem.eql(u8, name, "json")) {
-        try state.returnValues(thread, op.base, op.return_count, &.{.{ .table = try moduleTable(state) }});
-        return;
-    }
-
-    var message: std.ArrayList(u8) = .empty;
-    defer message.deinit(state.allocator);
-    try runtime.appendFmt(state.allocator, &message, "module '{s}' not found", .{name});
-    return state.fail(try state.intern(message.items));
+pub fn nullValue(state: *State) !Value {
+    return zerde_lua.nullValue(state);
 }
 
 pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    _ = try moduleTable(state);
     const input = try state.expectArgumentString(thread, op, "json.read", 0);
 
     var reader: std.Io.Reader = .fixed(input);
@@ -54,7 +29,6 @@ pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn write(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    _ = try moduleTable(state);
     if (op.arg_count == 0) return state.failArgumentMessage("json.write", 1, "value expected");
 
     const value = runtime.argValue(state, thread, op, 0);
