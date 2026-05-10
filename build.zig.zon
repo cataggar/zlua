@@ -3,7 +3,12 @@
     .version = "0.1.1",
     .fingerprint = 0xcf671dd1c69d54b,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zerde = .{
+            .url = "git+https://codeberg.org/gron/zerde?ref=v0.2.1#2534f2afe1ae1e5a5b65424b6b2ad1445fa68a19",
+            .hash = "zerde-0.2.0-r7zGa9Z5CQCYYM2i0DJE_rlXo2h5x7eB-K_CStdSBoKJ",
+        },
+    },
     .paths = .{
         "README.md",
         "LICENSE",

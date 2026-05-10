@@ -157,4 +157,4 @@ Start with [docs/README.md](docs/README.md) for the full documentation index.
 
 ## License
 
-See [LICENSE](LICENSE).
+MIT License see [LICENSE](LICENSE).
