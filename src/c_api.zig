@@ -681,6 +681,8 @@ fn createThread(parent: *CThread) ?*CThread {
         return null;
     };
     block.* = .{ .header = .{ .thread = thread } };
+    const parent_block: *StateBlock = @fieldParentPtr("header", parent.public_state);
+    @memcpy(block.extraspace[0..], parent_block.extraspace[0..]);
     thread.* = .{ .owner = state, .public_state = &block.header, .owned_block = block };
     if (!ensureStack(thread, LUA_MINSTACK)) {
         thread.deinit();
