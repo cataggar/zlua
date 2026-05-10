@@ -1,0 +1,6 @@
+meta = { name = "inline" }
+meta = { name = "inline_tables" }
+[meta]
+name = "sections"
+false	true
+false	true

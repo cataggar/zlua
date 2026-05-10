@@ -73,6 +73,10 @@ pub const LuaSink = struct {
         try self.appendValue(.{ .string = try self.state.intern(value) });
     }
 
+    pub fn emitDateTimeRaw(self: *LuaSink, value: []const u8) !void {
+        try self.emitString(value);
+    }
+
     pub fn beginSeq(self: *LuaSink, len: ?usize) !void {
         try ensureSupportTables(self.state);
         const hint = if (len) |count| std.math.cast(u32, count) orelse std.math.maxInt(u32) else 0;

@@ -168,6 +168,8 @@ pub const NativeFn = enum {
     debug_getuservalue,
     json_read,
     json_write,
+    toml_read,
+    toml_write,
     api_callback_dispatch,
 
     pub fn name(self: NativeFn) []const u8 {
@@ -281,6 +283,8 @@ pub const NativeFn = enum {
             .debug_getuservalue => "debug.getuservalue",
             .json_read => "json.read",
             .json_write => "json.write",
+            .toml_read => "toml.read",
+            .toml_write => "toml.write",
             .api_callback_dispatch => "__zlua_api_callback",
         };
     }
