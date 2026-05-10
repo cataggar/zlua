@@ -61,6 +61,10 @@ clua-version: build
 diff *args:
     {{zig}} build --summary all run-test-diff -- --debug-errors {{args}}
 
+# Run zlua extension fixtures, or one fixture file/directory.
+extensions *args:
+    {{zig}} build --summary all run-test-extensions -- {{args}}
+
 # Run all official Lua 5.5 files, or selected files by name.
 official *args:
     {{zig}} build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 {{args}}
