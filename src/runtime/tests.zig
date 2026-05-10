@@ -191,6 +191,45 @@ test "GC stress preserves live locals during execution" {
     try std.testing.expect(std.mem.eql(u8, result.stdout, "42\n"));
 }
 
+test "GC stress during table mutation closure allocation and string interning" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\local roots = { entries = {} }
+        \\local marker = "literal-anchor"
+        \\for i = 1, 30 do
+        \\  local key = assert(load("return 'interned-" .. i .. "'"))()
+        \\  roots.entries[key] = { value = i }
+        \\  roots.entries[i] = function(delta)
+        \\    return key, roots.entries[key].value + delta, marker
+        \\  end
+        \\  collectgarbage("collect")
+        \\  local got_key, total, got_marker = roots.entries[i](2)
+        \\  assert(got_key == key and total == i + 2 and got_marker == marker)
+        \\end
+        \\collectgarbage("collect")
+        \\print(roots.entries["interned-30"].value, roots.entries[30](12))
+    , .{ .collect_after_instruction = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "30\tinterned-30\t42\tliteral-anchor\n"));
+}
+
+test "GC stress during binary dumping and bytecode loading" {
+    var result = try executeSourceWithOptions(std.testing.allocator,
+        \\answer = 37
+        \\local dumped = string.dump(assert(load("return function(delta) return answer + delta end"))())
+        \\collectgarbage("collect")
+        \\local loaded = assert(load(dumped, "dumped", "b", _ENV))
+        \\collectgarbage("collect")
+        \\answer = 40
+        \\print(loaded(2))
+    , .{ .collect_after_instruction = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(?u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.eql(u8, result.stdout, "42\n"));
+}
+
 test "collectgarbage runs table finalizers before sweeping" {
     var result = try executeSource(std.testing.allocator,
         \\do

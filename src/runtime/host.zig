@@ -194,6 +194,17 @@ test "memory filesystem enforces path length and byte quota" {
     try std.testing.expectError(error.QuotaExceeded, filesystem.writeFile("a.lua", "123456"));
 }
 
+test "memory filesystem enforces byte quota while seeding files" {
+    const files = [_]MemoryFile{
+        .{ .path = "a.lua", .contents = "123" },
+        .{ .path = "b.lua", .contents = "456" },
+    };
+
+    try std.testing.expectError(error.QuotaExceeded, MemoryFilesystem.initWithFilesAndOptions(std.testing.allocator, &files, .{
+        .max_bytes = 5,
+    }));
+}
+
 test "memory filesystem rename overwrites normalized target" {
     var filesystem = MemoryFilesystem.init(std.testing.allocator);
     defer filesystem.deinit();

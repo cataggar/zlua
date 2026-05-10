@@ -1537,24 +1537,276 @@ test "api tuple helper reads multiple returns" {
     try std.testing.expectEqualStrings("ok", result.get(2));
 }
 
-test "api table and function handles round trip and survive forced GC" {
+test "api public handles survive forced GC" {
+    const Counter = struct {
+        value: i64,
+    };
+
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    var chunk = try lua.loadString(
-        \\local t = { answer = 42 }
+    var ref_chunk = try lua.loadString("return { answer = 42 }", .{ .name = "=ref-handle" });
+    var ref = try ref_chunk.call(.{}, Ref);
+    ref_chunk.deinit();
+    defer ref.deinit();
+
+    try lua.collect();
+    var ref_value = try ref.value();
+    defer ref_value.deinit();
+    switch (ref_value) {
+        .table => |table| try std.testing.expectEqual(@as(i64, 42), try table.get("answer", i64)),
+        else => return error.TypeMismatch,
+    }
+
+    var table = try lua.createTable(.{ .hash_hint = 1 });
+    defer table.deinit();
+    try table.set("answer", 43);
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 43), try table.get("answer", i64));
+
+    var function_chunk = try lua.loadString("return function(x) return x + 1 end", .{ .name = "=function-handle" });
+    var function = try function_chunk.call(.{}, Function);
+    function_chunk.deinit();
+    defer function.deinit();
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 44), try function.call(.{43}, i64));
+
+    var value = try lua.push(.{ .answer = 45 });
+    defer value.deinit();
+
+    try lua.collect();
+    switch (value) {
+        .table => |value_table| try std.testing.expectEqual(@as(i64, 45), try value_table.get("answer", i64)),
+        else => return error.TypeMismatch,
+    }
+
+    var tuple_chunk = try lua.loadString(
+        \\local t = { answer = 46 }
         \\local function f(x) return x + 1 end
         \\return t, f
-    , .{ .name = "=handles" });
-    defer chunk.deinit();
+    , .{ .name = "=tuple-handle" });
 
     const Result = Tuple(&.{ Table, Function });
-    var result = try chunk.call(.{}, Result);
+    var result = try tuple_chunk.call(.{}, Result);
+    tuple_chunk.deinit();
     defer result.deinit();
 
     try lua.collect();
-    try std.testing.expectEqual(@as(i64, 42), try result.get(0).get("answer", i64));
-    try std.testing.expectEqual(@as(i64, 42), try result.get(1).call(.{41}, i64));
+    try std.testing.expectEqual(@as(i64, 46), try result.get(0).get("answer", i64));
+    try std.testing.expectEqual(@as(i64, 47), try result.get(1).call(.{46}, i64));
+
+    var userdata = try lua.newUserdata(Counter, .{ .value = 48 }, .{});
+    defer userdata.deinit();
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 48), (try userdata.ptr()).value);
+
+    var typed_userdata = try lua.newUserdata(Counter, .{ .value = 49 }, .{});
+    var any_chunk = try lua.loadString("return ...", .{ .name = "=any-userdata-handle" });
+    var any_userdata = try any_chunk.call(.{typed_userdata}, AnyUserdata);
+    any_chunk.deinit();
+    typed_userdata.deinit();
+    defer any_userdata.deinit();
+
+    try lua.collect();
+    switch (try any_userdata.rawValue()) {
+        .userdata => |raw| try std.testing.expectEqual(@as(i64, 49), (try userdataPtr(Counter, raw)).value),
+        else => return error.TypeMismatch,
+    }
+}
+
+test "api error refs survive forced GC" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var failing = try lua.loadString("error({ message = 'boom' }, 0)", .{ .name = "=error-ref-gc" });
+    var err = blk: {
+        const result = try failing.protectedCall(.{}, void);
+        switch (result) {
+            .ok => return error.TestExpectedLuaError,
+            .lua_error => |err_ref| break :blk err_ref,
+        }
+    };
+    failing.deinit();
+    defer err.deinit();
+
+    if (lua.takeErrorValue()) |last_error_ref| {
+        var last = last_error_ref;
+        last.deinit();
+    }
+    lua.raw_state.last_error = null;
+
+    try lua.collect();
+    var value = try err.value();
+    defer value.deinit();
+    switch (value) {
+        .table => |table| try std.testing.expectEqualStrings("boom", try table.get("message", []const u8)),
+        else => return error.TypeMismatch,
+    }
+}
+
+test "api callback argument roots survive forced GC through weak tables" {
+    const Tracker = struct {
+        id: i64,
+    };
+    const Callbacks = struct {
+        fn stress(ctx: *Context) !void {
+            var payload = try ctx.arg(0, Table);
+            defer payload.deinit();
+            var tracker = try ctx.arg(1, Userdata(Tracker));
+            defer tracker.deinit();
+            var check = try ctx.arg(2, Function);
+            defer check.deinit();
+
+            try ctx.state().collect();
+            try std.testing.expectEqualStrings("payload", try payload.get("name", []const u8));
+            try std.testing.expectEqual(@as(i64, 7), (try tracker.ptr()).id);
+
+            const CheckResult = Tuple(&.{ []const u8, bool });
+            var checked = try check.call(.{}, CheckResult);
+            defer checked.deinit();
+            try std.testing.expectEqualStrings("payload", checked.get(0));
+            try std.testing.expectEqual(true, checked.get(1));
+
+            try ctx.state().collect();
+            try ctx.returnValues(.{ try payload.get("name", []const u8), (try tracker.ptr()).id });
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var tracker = try lua.newUserdata(Tracker, .{ .id = 7 }, .{});
+    defer tracker.deinit();
+
+    var stress = try lua.register("stress_roots", Callbacks.stress);
+    defer stress.deinit();
+    try lua.setGlobal("stress_roots", stress);
+
+    var chunk = try lua.loadString(
+        \\local tracker = ...
+        \\local weak = setmetatable({}, { __mode = 'v' })
+        \\local payload = { name = 'payload' }
+        \\weak.payload = payload
+        \\weak.tracker = tracker
+        \\return stress_roots(payload, weak.tracker, function()
+        \\  collectgarbage('collect')
+        \\  return weak.payload.name, weak.tracker ~= nil
+        \\end)
+    , .{ .name = "=api-callback-root-stress" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ []const u8, i64 });
+    var result = try chunk.call(.{tracker}, Result);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("payload", result.get(0));
+    try std.testing.expectEqual(@as(i64, 7), result.get(1));
+}
+
+test "api native callback dispatch tolerates forced GC" {
+    const Callbacks = struct {
+        fn stress(ctx: *Context) !void {
+            var callback = try ctx.arg(0, Function);
+            defer callback.deinit();
+
+            try ctx.state().collect();
+            const returned = try callback.call(.{"native"}, []const u8);
+            try ctx.returnValues(.{returned});
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var stress = try lua.register("stress_callback_gc", Callbacks.stress);
+    defer stress.deinit();
+    try lua.setGlobal("stress_callback_gc", stress);
+
+    var chunk = try lua.loadString(
+        \\return stress_callback_gc(function(value)
+        \\  collectgarbage('collect')
+        \\  return value .. '-callback'
+        \\end)
+    , .{ .name = "=api-callback-dispatch-gc" });
+    defer chunk.deinit();
+
+    try std.testing.expectEqualStrings("native-callback", try chunk.call(.{}, []const u8));
+}
+
+test "api userdata handles root weak values until finalizers can run" {
+    const Tracker = struct {
+        finalized: *usize,
+
+        fn finalize(self: *@This()) void {
+            self.finalized.* += 1;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var finalized: usize = 0;
+    var tracker = try lua.newUserdata(Tracker, .{ .finalized = &finalized }, .{ .finalizer = Tracker.finalize });
+    try lua.setGlobal("tracker", tracker);
+    try lua.doString(
+        \\weak_trackers = setmetatable({}, { __mode = 'v' })
+        \\weak_trackers.item = tracker
+    , .{ .name = "=api-userdata-root-weak-setup" });
+    try lua.setGlobal("tracker", null);
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(usize, 0), finalized);
+    try lua.doString("assert(weak_trackers.item ~= nil)", .{ .name = "=api-userdata-root-weak-alive" });
+
+    tracker.deinit();
+    try lua.collect();
+    try lua.collect();
+    try std.testing.expectEqual(@as(usize, 1), finalized);
+    try lua.doString("assert(weak_trackers.item == nil)", .{ .name = "=api-userdata-root-weak-collected" });
+}
+
+test "api error value refs root weak-table values through forced GC" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var failing = try lua.loadString(
+        \\weak_errors = setmetatable({}, { __mode = 'v' })
+        \\local err = { tag = 'kept' }
+        \\weak_errors.err = err
+        \\error(err, 0)
+    , .{ .name = "=api-error-root-weak" });
+    var err = blk: {
+        const result = try failing.protectedCall(.{}, void);
+        switch (result) {
+            .ok => return error.TestExpectedLuaError,
+            .lua_error => |err_ref| break :blk err_ref,
+        }
+    };
+    failing.deinit();
+
+    if (lua.takeErrorValue()) |last_error_ref| {
+        var last = last_error_ref;
+        last.deinit();
+    }
+    lua.raw_state.last_error = null;
+
+    try lua.collect();
+    var value = try err.value();
+    switch (value) {
+        .table => |table| try std.testing.expectEqualStrings("kept", try table.get("tag", []const u8)),
+        else => return error.TypeMismatch,
+    }
+    value.deinit();
+
+    var check_alive = try lua.loadString("return weak_errors.err and weak_errors.err.tag or 'gone'", .{ .name = "=api-error-root-weak-alive" });
+    defer check_alive.deinit();
+    try std.testing.expectEqualStrings("kept", try check_alive.call(.{}, []const u8));
+
+    err.deinit();
+    try lua.collect();
+    try lua.doString("assert(weak_errors.err == nil)", .{ .name = "=api-error-root-weak-collected" });
 }
 
 test "api released handles remove runtime roots" {
@@ -2030,18 +2282,38 @@ test "api full stdlib still denies ambient host access by default" {
         \\assert(os.getenv('ZLUA_API_ENV') == nil)
         \\local ok, err = pcall(os.execute, 'true')
         \\assert(ok == false and tostring(err):find('process access disabled'))
+        \\local ok_time, time_err = pcall(os.time)
+        \\assert(ok_time == false and tostring(time_err):find('clock access disabled'))
+        \\local ok_date, date_err = pcall(os.date)
+        \\assert(ok_date == false and tostring(date_err):find('clock access disabled'))
         \\local file = io.open('missing.lua', 'r')
         \\assert(file == nil)
+        \\local ok_write, write_err = pcall(io.open, 'blocked.lua', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('filesystem write access disabled'))
+        \\local ok_append, append_err = pcall(io.open, 'blocked.lua', 'a')
+        \\assert(ok_append == false and tostring(append_err):find('filesystem write access disabled'))
+        \\local ok_input, input_err = pcall(io.input, 'missing.lua')
+        \\assert(ok_input == false and tostring(input_err):find('cannot open file'))
+        \\local tmp = assert(io.tmpfile())
+        \\local ok_tmp_close, tmp_close_err = pcall(function() return tmp:close() end)
+        \\assert(ok_tmp_close == false and tostring(tmp_close_err):find('filesystem write access disabled'))
         \\local loaded, load_err = loadfile('missing.lua')
         \\assert(loaded == nil and load_err == 'cannot open file')
         \\local ok_file, file_err = pcall(dofile, 'missing.lua')
         \\assert(ok_file == false and tostring(file_err):find('filesystem access disabled'))
         \\local ok_require, require_err = pcall(require, 'missing')
         \\assert(ok_require == false and tostring(require_err):find("module 'missing' not found"))
+        \\package.path = '/tmp/?.lua;../?.lua'
+        \\local ok_escape_require, escape_require_err = pcall(require, 'missing')
+        \\assert(ok_escape_require == false and tostring(escape_require_err):find("module 'missing' not found"))
         \\local found, search_err = package.searchpath('missing', '?.lua')
         \\assert(found == nil and tostring(search_err):find("missing.lua"))
         \\local ok_lines, lines_err = pcall(io.lines, 'missing.lua')
         \\assert(ok_lines == false and tostring(lines_err):find('cannot open file'))
+        \\local removed, remove_err = os.remove('missing.lua')
+        \\assert(removed == nil and tostring(remove_err):find('filesystem write access disabled'))
+        \\local renamed, rename_err = os.rename('missing.lua', 'other.lua')
+        \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
     , .{ .name = "=api-21.6-safe-host-access" });
 }
 
@@ -2055,6 +2327,27 @@ test "api default stdlib omits host-facing libraries" {
         \\assert(package == nil)
         \\assert(debug == nil)
     , .{ .name = "=api-default-safe-libs" });
+}
+
+test "api host-backed capabilities require explicit I/O access" {
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{
+            .filesystem = .host_cwd,
+            .clock = .system,
+            .process = .enabled,
+        },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local ok_process, process_err = pcall(os.execute, 'true')
+        \\assert(ok_process == false and tostring(process_err):find('process I/O unavailable'))
+        \\local ok_time, time_err = pcall(os.time)
+        \\assert(ok_time == false and tostring(time_err):find('clock I/O unavailable'))
+        \\local ok_file, file_err = pcall(dofile, 'missing.lua')
+        \\assert(ok_file == false and tostring(file_err):find('filesystem I/O unavailable'))
+    , .{ .name = "=api-host-backed-capabilities-need-io" });
 }
 
 test "api os filesystem mutations respect filesystem capability" {
@@ -2074,6 +2367,37 @@ test "api os filesystem mutations respect filesystem capability" {
         \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
         \\assert(dofile('keep.lua') == 42)
     , .{ .name = "=api-21.6-os-fs-capability" });
+}
+
+test "api read-only memory filesystem denies stdlib writes" {
+    const files = [_]MemoryFile{
+        .{ .path = "seed.txt", .contents = "seed" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local read = assert(io.open('seed.txt', 'r'))
+        \\assert(read:read('*a') == 'seed')
+        \\assert(read:close())
+        \\local ok_write, write_err = pcall(io.open, 'new.txt', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('filesystem write access disabled'))
+        \\local ok_append, append_err = pcall(io.open, 'seed.txt', 'a')
+        \\assert(ok_append == false and tostring(append_err):find('filesystem write access disabled'))
+        \\local tmp = assert(io.tmpfile())
+        \\assert(tmp:write('temporary'))
+        \\local ok_tmp, tmp_err = pcall(function() return tmp:close() end)
+        \\assert(ok_tmp == false and tostring(tmp_err):find('filesystem write access disabled'))
+        \\local removed, remove_err = os.remove('seed.txt')
+        \\assert(removed == nil and tostring(remove_err):find('filesystem write access disabled'))
+        \\local renamed, rename_err = os.rename('seed.txt', 'renamed.txt')
+        \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
+        \\read = assert(io.open('seed.txt', 'r'))
+        \\assert(read:read('*a') == 'seed')
+    , .{ .name = "=api-memory-read-only-negative" });
 }
 
 test "api writable memory filesystem supports Lua writes and mutations" {
@@ -2111,6 +2435,44 @@ test "api writable memory filesystem supports Lua writes and mutations" {
     const log = try filesystem.readFileAlloc(std.testing.allocator, "log.txt");
     defer std.testing.allocator.free(log);
     try std.testing.expectEqualStrings("alpha beta", log);
+}
+
+test "api writable memory filesystem rejects sandbox escape writes" {
+    var filesystem = MemoryFilesystem.init(std.testing.allocator);
+    defer filesystem.deinit();
+    try filesystem.writeFile("seed.txt", "seed");
+
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory_rw = &filesystem } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local absolute, absolute_err = io.open('/tmp/escape.txt', 'w')
+        \\assert(absolute == nil and tostring(absolute_err):find('cannot open file'))
+        \\local ok_write, write_err = pcall(io.open, '../escape.txt', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('cannot write file'))
+        \\local ok_output, output_err = pcall(function()
+        \\  local file = assert(io.open('generated.txt', 'w'))
+        \\  assert(file:write('generated'))
+        \\  return file:close()
+        \\end)
+        \\assert(ok_output == true)
+        \\local removed, remove_err = os.remove('../escape.txt')
+        \\assert(removed == nil and tostring(remove_err):find('cannot remove file'))
+        \\local renamed, rename_err = os.rename('seed.txt', '../escape.txt')
+        \\assert(renamed == nil and tostring(rename_err):find('cannot rename file'))
+        \\local loaded, load_err = loadfile('../escape.lua')
+        \\assert(loaded == nil and tostring(load_err):find('cannot open file'))
+        \\local ok_do, do_err = pcall(dofile, '../escape.lua')
+        \\assert(ok_do == false and tostring(do_err):find('cannot open file'))
+    , .{ .name = "=api-memory-rw-escape-negative" });
+
+    const seed = try filesystem.readFileAlloc(std.testing.allocator, "seed.txt");
+    defer std.testing.allocator.free(seed);
+    try std.testing.expectEqualStrings("seed", seed);
+    try std.testing.expectError(error.FileNotFound, filesystem.readFileAlloc(std.testing.allocator, "escape.txt"));
 }
 
 test "api custom stdout captures print and io writes" {
@@ -2172,6 +2534,45 @@ test "api memory filesystem rejects sandbox escape paths" {
     defer lua.deinit();
     try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("/tmp/plugin.lua", "return 1"));
     try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("plugins/../secret.lua", "return 1"));
+
+    const files = [_]MemoryFile{
+        .{ .path = "plugins/safe.lua", .contents = "return true" },
+    };
+    var sandboxed = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer sandboxed.deinit();
+    try sandboxed.setPackagePath("../?.lua;/tmp/?.lua;plugins/?.lua");
+    try sandboxed.doString(
+        \\local ok, err = pcall(require, 'secret')
+        \\assert(ok == false and tostring(err):find("module 'secret' not found"))
+        \\assert(require('safe') == true)
+    , .{ .name = "=api-memory-require-sandbox-paths" });
+}
+
+test "api package loading rejects sandbox escape module paths" {
+    const files = [_]MemoryFile{
+        .{ .path = "plugins/safe.lua", .contents = "return true" },
+        .{ .path = "secret.lua", .contents = "return 'secret'" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+    try lua.setPackagePath("?.lua;plugins/?.lua;../?.lua;/tmp/?.lua");
+
+    try lua.doString(
+        \\local found, search_err = package.searchpath('../secret', '?.lua;../?.lua;/tmp/?.lua', '', '')
+        \\assert(found == nil and tostring(search_err):find('no file'))
+        \\local loader, loader_data = package.searchers[2]('..secret')
+        \\assert(type(loader) == 'string' and loader:find('no matching file'))
+        \\assert(loader_data == nil)
+        \\local ok, require_err = pcall(require, '..secret')
+        \\assert(ok == false and tostring(require_err):find("module '..secret' not found"))
+        \\assert(require('safe') == true)
+    , .{ .name = "=api-package-escape-negative" });
 }
 
 test "api environment and fixed clock capabilities are explicit" {
