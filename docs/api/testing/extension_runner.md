@@ -1,9 +1,10 @@
-# testing.official_suite
+# testing.extension_runner
 
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [testing.extension_runner](../testing/extension_runner.md)
+- Previous: [testing.normalizer](../testing/normalizer.md)
+- Next: [testing.official_suite](../testing/official_suite.md)
 - Parent: [testing](../testing.md)
 
 ## Functions
@@ -18,8 +19,7 @@
 pub fn runCli(
     allocator: std.mem.Allocator,
     io: std.Io,
-    environ_map: *const std.process.Environ.Map,
-    zlua_exe: []const u8,
+    default_zlua: []const u8,
     args: []const []const u8,
 ) !u8
 ```

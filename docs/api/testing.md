@@ -5,7 +5,7 @@
 - [API Index](README.md)
 - Previous: [runtime.internal](runtime/internal.md)
 - Next: [testing.clua](testing/clua.md)
-- Submodules: [testing.process](testing/process.md), [testing.clua](testing/clua.md), [testing.bench_runner](testing/bench_runner.md), [testing.c_api_runner](testing/c_api_runner.md), [testing.diff_runner](testing/diff_runner.md), [testing.expected_failures](testing/expected_failures.md), [testing.metadata](testing/metadata.md), [testing.normalizer](testing/normalizer.md), [testing.official_suite](testing/official_suite.md)
+- Submodules: [testing.process](testing/process.md), [testing.clua](testing/clua.md), [testing.bench_runner](testing/bench_runner.md), [testing.c_api_runner](testing/c_api_runner.md), [testing.diff_runner](testing/diff_runner.md), [testing.expected_failures](testing/expected_failures.md), [testing.metadata](testing/metadata.md), [testing.normalizer](testing/normalizer.md), [testing.extension_runner](testing/extension_runner.md), [testing.official_suite](testing/official_suite.md)
 
 ## Imports
 
@@ -13,6 +13,7 @@
 - [bench_runner](#import-bench_runner) `@import("testing/bench_runner.zig")`
 - [c_api_runner](#import-c_api_runner) `@import("testing/c_api_runner.zig")`
 - [diff_runner](#import-diff_runner) `@import("testing/diff_runner.zig")`
+- [extension_runner](#import-extension_runner) `@import("testing/extension_runner.zig")`
 - [expected_failures](#import-expected_failures) `@import("testing/expected_failures.zig")`
 - [metadata](#import-metadata) `@import("testing/metadata.zig")`
 - [normalizer](#import-normalizer) `@import("testing/normalizer.zig")`
@@ -49,6 +50,14 @@ pub const c_api_runner = @import("testing/c_api_runner.zig");
 
 ```zig
 pub const diff_runner = @import("testing/diff_runner.zig");
+```
+
+<a id="import-extension_runner"></a>
+
+## extension_runner
+
+```zig
+pub const extension_runner = @import("testing/extension_runner.zig");
 ```
 
 <a id="import-expected_failures"></a>

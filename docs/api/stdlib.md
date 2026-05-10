@@ -5,7 +5,7 @@
 - [API Index](README.md)
 - Previous: [runtime.host](runtime/host.md)
 - Next: [stdlib.base](stdlib/base.md)
-- Submodules: [stdlib.base](stdlib/base.md), [stdlib.table](stdlib/table.md), [stdlib.string](stdlib/string.md), [stdlib.math](stdlib/math.md), [stdlib.utf8](stdlib/utf8.md), [stdlib.coroutine](stdlib/coroutine.md), [stdlib.debug](stdlib/debug.md), [stdlib.package](stdlib/package.md), [stdlib.io](stdlib/io.md), [stdlib.os](stdlib/os.md)
+- Submodules: [stdlib.base](stdlib/base.md), [stdlib.table](stdlib/table.md), [stdlib.string](stdlib/string.md), [stdlib.math](stdlib/math.md), [stdlib.utf8](stdlib/utf8.md), [stdlib.coroutine](stdlib/coroutine.md), [stdlib.debug](stdlib/debug.md), [stdlib.package](stdlib/package.md), [stdlib.io](stdlib/io.md), [stdlib.os](stdlib/os.md), [stdlib.json](stdlib/json.md), [stdlib.zerde_lua](stdlib/zerde_lua.md), [stdlib.toml](stdlib/toml.md), [stdlib.msgpack](stdlib/msgpack.md)
 
 ## Functions
 
@@ -34,6 +34,9 @@
 - [package](#import-package) `@import("stdlib/package.zig")`
 - [io](#import-io) `@import("stdlib/io.zig")`
 - [os](#import-os) `@import("stdlib/os.zig")`
+- [json](#import-json) `@import("stdlib/json.zig")`
+- [toml](#import-toml) `@import("stdlib/toml.zig")`
+- [msgpack](#import-msgpack) `@import("stdlib/msgpack.zig")`
 
 <a id="import-base"></a>
 
@@ -115,6 +118,30 @@ pub const io = @import("stdlib/io.zig");
 pub const os = @import("stdlib/os.zig");
 ```
 
+<a id="import-json"></a>
+
+## json
+
+```zig
+pub const json = @import("stdlib/json.zig");
+```
+
+<a id="import-toml"></a>
+
+## toml
+
+```zig
+pub const toml = @import("stdlib/toml.zig");
+```
+
+<a id="import-msgpack"></a>
+
+## msgpack
+
+```zig
+pub const msgpack = @import("stdlib/msgpack.zig");
+```
+
 <a id="type-libraryselection"></a>
 
 ## LibrarySelection
@@ -176,6 +203,9 @@ pub const LibrarySet = struct { ... };
     os: bool = false
     debug: bool = false
     package: bool = false
+    json: bool = false
+    toml: bool = false
+    msgpack: bool = false
 ```
 
 

@@ -4,7 +4,7 @@
 
 - [API Index](../README.md)
 - Previous: [testing.metadata](../testing/metadata.md)
-- Next: [testing.official_suite](../testing/official_suite.md)
+- Next: [testing.extension_runner](../testing/extension_runner.md)
 - Parent: [testing](../testing.md)
 
 ## Functions
