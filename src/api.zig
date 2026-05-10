@@ -1537,24 +1537,114 @@ test "api tuple helper reads multiple returns" {
     try std.testing.expectEqualStrings("ok", result.get(2));
 }
 
-test "api table and function handles round trip and survive forced GC" {
+test "api public handles survive forced GC" {
+    const Counter = struct {
+        value: i64,
+    };
+
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();
 
-    var chunk = try lua.loadString(
-        \\local t = { answer = 42 }
+    var ref_chunk = try lua.loadString("return { answer = 42 }", .{ .name = "=ref-handle" });
+    var ref = try ref_chunk.call(.{}, Ref);
+    ref_chunk.deinit();
+    defer ref.deinit();
+
+    try lua.collect();
+    var ref_value = try ref.value();
+    defer ref_value.deinit();
+    switch (ref_value) {
+        .table => |table| try std.testing.expectEqual(@as(i64, 42), try table.get("answer", i64)),
+        else => return error.TypeMismatch,
+    }
+
+    var table = try lua.createTable(.{ .hash_hint = 1 });
+    defer table.deinit();
+    try table.set("answer", 43);
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 43), try table.get("answer", i64));
+
+    var function_chunk = try lua.loadString("return function(x) return x + 1 end", .{ .name = "=function-handle" });
+    var function = try function_chunk.call(.{}, Function);
+    function_chunk.deinit();
+    defer function.deinit();
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 44), try function.call(.{43}, i64));
+
+    var value = try lua.push(.{ .answer = 45 });
+    defer value.deinit();
+
+    try lua.collect();
+    switch (value) {
+        .table => |value_table| try std.testing.expectEqual(@as(i64, 45), try value_table.get("answer", i64)),
+        else => return error.TypeMismatch,
+    }
+
+    var tuple_chunk = try lua.loadString(
+        \\local t = { answer = 46 }
         \\local function f(x) return x + 1 end
         \\return t, f
-    , .{ .name = "=handles" });
-    defer chunk.deinit();
+    , .{ .name = "=tuple-handle" });
 
     const Result = Tuple(&.{ Table, Function });
-    var result = try chunk.call(.{}, Result);
+    var result = try tuple_chunk.call(.{}, Result);
+    tuple_chunk.deinit();
     defer result.deinit();
 
     try lua.collect();
-    try std.testing.expectEqual(@as(i64, 42), try result.get(0).get("answer", i64));
-    try std.testing.expectEqual(@as(i64, 42), try result.get(1).call(.{41}, i64));
+    try std.testing.expectEqual(@as(i64, 46), try result.get(0).get("answer", i64));
+    try std.testing.expectEqual(@as(i64, 47), try result.get(1).call(.{46}, i64));
+
+    var userdata = try lua.newUserdata(Counter, .{ .value = 48 }, .{});
+    defer userdata.deinit();
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(i64, 48), (try userdata.ptr()).value);
+
+    var typed_userdata = try lua.newUserdata(Counter, .{ .value = 49 }, .{});
+    var any_chunk = try lua.loadString("return ...", .{ .name = "=any-userdata-handle" });
+    var any_userdata = try any_chunk.call(.{typed_userdata}, AnyUserdata);
+    any_chunk.deinit();
+    typed_userdata.deinit();
+    defer any_userdata.deinit();
+
+    try lua.collect();
+    switch (try any_userdata.rawValue()) {
+        .userdata => |raw| try std.testing.expectEqual(@as(i64, 49), (try userdataPtr(Counter, raw)).value),
+        else => return error.TypeMismatch,
+    }
+}
+
+test "api error refs survive forced GC" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var failing = try lua.loadString("error({ message = 'boom' }, 0)", .{ .name = "=error-ref-gc" });
+    var err = blk: {
+        const result = try failing.protectedCall(.{}, void);
+        switch (result) {
+            .ok => return error.TestExpectedLuaError,
+            .lua_error => |err_ref| break :blk err_ref,
+        }
+    };
+    failing.deinit();
+    defer err.deinit();
+
+    if (lua.takeErrorValue()) |last_error_ref| {
+        var last = last_error_ref;
+        last.deinit();
+    }
+    lua.raw_state.last_error = null;
+
+    try lua.collect();
+    var value = try err.value();
+    defer value.deinit();
+    switch (value) {
+        .table => |table| try std.testing.expectEqualStrings("boom", try table.get("message", []const u8)),
+        else => return error.TypeMismatch,
+    }
 }
 
 test "api released handles remove runtime roots" {
