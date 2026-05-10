@@ -120,10 +120,13 @@ pub const Constant = union(enum) { ... };
 
 ### Fields
 
-- `boolean: bool`
-- `integer: []const u8`
-- `number: []const u8`
-- `string: []const u8`
+```zig
+    boolean: bool
+    integer: []const u8
+    number: []const u8
+    string: []const u8
+```
+
 
 <a id="fn-constanteql"></a>
 
@@ -145,59 +148,62 @@ pub const Instruction = union(enum) { ... };
 
 ### Fields
 
-- `load_nil: Register`
-- `load_bool: LoadBool`
-- `load_const: LoadConst`
-- `move: Move`
-- `get_global: GlobalAccess`
-- `set_global: GlobalAccess`
-- `declare_global: GlobalDeclare`
-- `get_upvalue: UpvalueAccess`
-- `set_upvalue: UpvalueAccess`
-- `get_table: TableAccess`
-- `set_table: TableSet`
-- `set_array: ArraySet`
-- `get_field: FieldAccess`
-- `set_field: FieldSet`
-- `new_table: NewTable`
-- `set_list: SetList`
-- `add: Binary`
-- `sub: Binary`
-- `mul: Binary`
-- `div: Binary`
-- `idiv: Binary`
-- `mod: Binary`
-- `pow: Binary`
-- `unm: Unary`
-- `band: Binary`
-- `bor: Binary`
-- `bxor: Binary`
-- `bnot: Unary`
-- `shl: Binary`
-- `shr: Binary`
-- `eq: Binary`
-- `lt: Binary`
-- `le: Binary`
-- `not: Unary`
-- `len: Unary`
-- `concat: Binary`
-- `jmp: JumpOffset`
-- `compare_branch: CompareBranch`
-- `test_op: Test`
-- `test_set: TestSet`
-- `call: Call`
-- `tail_call: Call`
-- `ret: Return`
-- `vararg: Vararg`
-- `closure: Closure`
-- `close: Register`
-- `check_close: Register`
-- `close_tbc: Register`
-- `for_prep: ForLoop`
-- `for_loop: ForLoop`
-- `tfor_prep: GenericFor`
-- `tfor_call: GenericFor`
-- `tfor_loop: GenericFor`
+```zig
+    load_nil: Register
+    load_bool: LoadBool
+    load_const: LoadConst
+    move: Move
+    get_global: GlobalAccess
+    set_global: GlobalAccess
+    declare_global: GlobalDeclare
+    get_upvalue: UpvalueAccess
+    set_upvalue: UpvalueAccess
+    get_table: TableAccess
+    set_table: TableSet
+    set_array: ArraySet
+    get_field: FieldAccess
+    set_field: FieldSet
+    new_table: NewTable
+    set_list: SetList
+    add: Binary
+    sub: Binary
+    mul: Binary
+    div: Binary
+    idiv: Binary
+    mod: Binary
+    pow: Binary
+    unm: Unary
+    band: Binary
+    bor: Binary
+    bxor: Binary
+    bnot: Unary
+    shl: Binary
+    shr: Binary
+    eq: Binary
+    lt: Binary
+    le: Binary
+    not: Unary
+    len: Unary
+    concat: Binary
+    jmp: JumpOffset
+    compare_branch: CompareBranch
+    test_op: Test
+    test_set: TestSet
+    call: Call
+    tail_call: Call
+    ret: Return
+    vararg: Vararg
+    closure: Closure
+    close: Register
+    check_close: Register
+    close_tbc: Register
+    for_prep: ForLoop
+    for_loop: ForLoop
+    tfor_prep: GenericFor
+    tfor_call: GenericFor
+    tfor_loop: GenericFor
+```
+
 
 <a id="type-loadbool"></a>
 
@@ -209,8 +215,11 @@ pub const LoadBool = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `value: bool`
+```zig
+    dest: Register
+    value: bool
+```
+
 
 <a id="type-loadconst"></a>
 
@@ -222,8 +231,11 @@ pub const LoadConst = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `constant: ConstantIndex`
+```zig
+    dest: Register
+    constant: ConstantIndex
+```
+
 
 <a id="type-move"></a>
 
@@ -235,8 +247,11 @@ pub const Move = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `source: Register`
+```zig
+    dest: Register
+    source: Register
+```
+
 
 <a id="type-globalaccess"></a>
 
@@ -248,8 +263,11 @@ pub const GlobalAccess = struct { ... };
 
 ### Fields
 
-- `register: Register`
-- `name: ConstantIndex`
+```zig
+    register: Register
+    name: ConstantIndex
+```
+
 
 <a id="type-globaldeclare"></a>
 
@@ -261,9 +279,12 @@ pub const GlobalDeclare = struct { ... };
 
 ### Fields
 
-- `table: Register`
-- `value: Register`
-- `name: ConstantIndex`
+```zig
+    table: Register
+    value: Register
+    name: ConstantIndex
+```
+
 
 <a id="type-upvalueaccess"></a>
 
@@ -275,8 +296,11 @@ pub const UpvalueAccess = struct { ... };
 
 ### Fields
 
-- `register: Register`
-- `upvalue: UpvalueIndex`
+```zig
+    register: Register
+    upvalue: UpvalueIndex
+```
+
 
 <a id="type-tableaccess"></a>
 
@@ -288,9 +312,12 @@ pub const TableAccess = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `table: Register`
-- `key: Register`
+```zig
+    dest: Register
+    table: Register
+    key: Register
+```
+
 
 <a id="type-tableset"></a>
 
@@ -302,9 +329,12 @@ pub const TableSet = struct { ... };
 
 ### Fields
 
-- `table: Register`
-- `key: Register`
-- `value: Register`
+```zig
+    table: Register
+    key: Register
+    value: Register
+```
+
 
 <a id="type-arrayset"></a>
 
@@ -316,9 +346,12 @@ pub const ArraySet = struct { ... };
 
 ### Fields
 
-- `table: Register`
-- `index: u32`
-- `value: Register`
+```zig
+    table: Register
+    index: u32
+    value: Register
+```
+
 
 <a id="type-fieldaccess"></a>
 
@@ -330,9 +363,12 @@ pub const FieldAccess = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `table: Register`
-- `name: ConstantIndex`
+```zig
+    dest: Register
+    table: Register
+    name: ConstantIndex
+```
+
 
 <a id="type-fieldset"></a>
 
@@ -344,9 +380,12 @@ pub const FieldSet = struct { ... };
 
 ### Fields
 
-- `table: Register`
-- `name: ConstantIndex`
-- `value: Register`
+```zig
+    table: Register
+    name: ConstantIndex
+    value: Register
+```
+
 
 <a id="type-newtable"></a>
 
@@ -358,9 +397,12 @@ pub const NewTable = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `array_hint: u32 = 0`
-- `hash_hint: u32 = 0`
+```zig
+    dest: Register
+    array_hint: u32 = 0
+    hash_hint: u32 = 0
+```
+
 
 <a id="type-setlist"></a>
 
@@ -372,10 +414,13 @@ pub const SetList = struct { ... };
 
 ### Fields
 
-- `table: Register`
-- `first: Register`
-- `count: u32`
-- `start_index: u32`
+```zig
+    table: Register
+    first: Register
+    count: u32
+    start_index: u32
+```
+
 
 <a id="type-unary"></a>
 
@@ -387,8 +432,11 @@ pub const Unary = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `source: Register`
+```zig
+    dest: Register
+    source: Register
+```
+
 
 <a id="type-binary"></a>
 
@@ -400,9 +448,12 @@ pub const Binary = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `left: Register`
-- `right: Register`
+```zig
+    dest: Register
+    left: Register
+    right: Register
+```
+
 
 <a id="type-comparebranchop"></a>
 
@@ -422,11 +473,14 @@ pub const CompareBranch = struct { ... };
 
 ### Fields
 
-- `left: Register`
-- `right: Register`
-- `op: CompareBranchOp`
-- `jump_if_truthy: bool`
-- `offset: JumpOffset`
+```zig
+    left: Register
+    right: Register
+    op: CompareBranchOp
+    jump_if_truthy: bool
+    offset: JumpOffset
+```
+
 
 <a id="type-test"></a>
 
@@ -438,9 +492,12 @@ pub const Test = struct { ... };
 
 ### Fields
 
-- `register: Register`
-- `jump_if_truthy: bool`
-- `offset: JumpOffset`
+```zig
+    register: Register
+    jump_if_truthy: bool
+    offset: JumpOffset
+```
+
 
 <a id="type-testset"></a>
 
@@ -452,10 +509,13 @@ pub const TestSet = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `source: Register`
-- `jump_if_truthy: bool`
-- `offset: JumpOffset`
+```zig
+    dest: Register
+    source: Register
+    jump_if_truthy: bool
+    offset: JumpOffset
+```
+
 
 <a id="type-call"></a>
 
@@ -467,9 +527,12 @@ pub const Call = struct { ... };
 
 ### Fields
 
-- `base: Register`
-- `arg_count: u16`
-- `return_count: u16`
+```zig
+    base: Register
+    arg_count: u16
+    return_count: u16
+```
+
 
 <a id="type-return"></a>
 
@@ -481,8 +544,11 @@ pub const Return = struct { ... };
 
 ### Fields
 
-- `first: Register`
-- `count: u16`
+```zig
+    first: Register
+    count: u16
+```
+
 
 <a id="type-vararg"></a>
 
@@ -494,8 +560,11 @@ pub const Vararg = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `count: u16`
+```zig
+    dest: Register
+    count: u16
+```
+
 
 <a id="type-closure"></a>
 
@@ -507,8 +576,11 @@ pub const Closure = struct { ... };
 
 ### Fields
 
-- `dest: Register`
-- `proto: ProtoIndex`
+```zig
+    dest: Register
+    proto: ProtoIndex
+```
+
 
 <a id="type-forloop"></a>
 
@@ -520,8 +592,11 @@ pub const ForLoop = struct { ... };
 
 ### Fields
 
-- `base: Register`
-- `offset: JumpOffset`
+```zig
+    base: Register
+    offset: JumpOffset
+```
+
 
 <a id="type-genericfor"></a>
 
@@ -533,7 +608,10 @@ pub const GenericFor = struct { ... };
 
 ### Fields
 
-- `base: Register`
-- `variable_count: u16`
-- `offset: JumpOffset`
+```zig
+    base: Register
+    variable_count: u16
+    offset: JumpOffset
+```
+
 

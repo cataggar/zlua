@@ -53,12 +53,15 @@ pub const Metadata = struct { ... };
 
 ### Fields
 
-- `expect: Expect = .pass`
-- `stage: Stage = .runtime`
-- `feature: []const u8 = "uncategorized"`
-- `normalize: Normalize = .none`
-- `reason: []const u8 = ""`
-- `issue: []const u8 = ""`
+```zig
+    expect: Expect = .pass
+    stage: Stage = .runtime
+    feature: []const u8 = "uncategorized"
+    normalize: Normalize = .none
+    reason: []const u8 = ""
+    issue: []const u8 = ""
+```
+
 
 <a id="fn-parse"></a>
 

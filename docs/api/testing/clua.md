@@ -27,8 +27,11 @@ pub const Discovery = union(enum) { ... };
 
 ### Fields
 
-- `found: []u8`
-- `missing: []u8`
+```zig
+    found: []u8
+    missing: []u8
+```
+
 
 ### Nested Declarations
 

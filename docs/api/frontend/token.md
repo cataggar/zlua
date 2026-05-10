@@ -34,9 +34,12 @@ pub const Token = struct { ... };
 
 ### Fields
 
-- `tag: Tag`
-- `lexeme: []const u8`
-- `span: source.Span`
+```zig
+    tag: Tag
+    lexeme: []const u8
+    span: source.Span
+```
+
 
 <a id="fn-keywordtag"></a>
 

@@ -26,11 +26,14 @@ pub const ProcessResult = struct { ... };
 
 ### Fields
 
-- `stdout: []u8`
-- `stderr: []u8`
-- `exit_code: ?u8`
-- `signal: ?u32`
-- `timed_out: bool`
+```zig
+    stdout: []u8
+    stderr: []u8
+    exit_code: ?u8
+    signal: ?u32
+    timed_out: bool
+```
+
 
 ### Nested Declarations
 
@@ -67,11 +70,14 @@ pub const RunOptions = struct { ... };
 
 ### Fields
 
-- `cwd: ?[]const u8 = null`
-- `timeout_ms: u64 = 5000`
-- `max_output_bytes: usize = 1024 * 1024`
-- `expand_arg0: bool = false`
-- `memory_limit_mb: u64 = 0`
+```zig
+    cwd: ?[]const u8 = null
+    timeout_ms: u64 = 5000
+    max_output_bytes: usize = 1024 * 1024
+    expand_arg0: bool = false
+    memory_limit_mb: u64 = 0
+```
+
 
 <a id="fn-runprocess"></a>
 

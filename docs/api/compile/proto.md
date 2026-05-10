@@ -28,7 +28,10 @@ pub const LineInfo = struct { ... };
 
 ### Fields
 
-- `line: usize`
+```zig
+    line: usize
+```
+
 
 <a id="type-localdebug"></a>
 
@@ -40,11 +43,14 @@ pub const LocalDebug = struct { ... };
 
 ### Fields
 
-- `name: []const u8`
-- `register: bytecode.Register`
-- `start_pc: usize`
-- `end_pc: usize = 0`
-- `to_close: bool = false`
+```zig
+    name: []const u8
+    register: bytecode.Register
+    start_pc: usize
+    end_pc: usize = 0
+    to_close: bool = false
+```
+
 
 <a id="type-upvaluedesc"></a>
 
@@ -56,9 +62,12 @@ pub const UpvalueDesc = struct { ... };
 
 ### Fields
 
-- `name: []const u8`
-- `in_stack: bool`
-- `index: u16`
+```zig
+    name: []const u8
+    in_stack: bool
+    index: u16
+```
+
 
 <a id="type-errorop"></a>
 
@@ -78,13 +87,16 @@ pub const OperandOrigin = union(enum) { ... };
 
 ### Fields
 
-- `local: []const u8`
-- `upvalue: []const u8`
-- `global: []const u8`
-- `field: []const u8`
-- `method: []const u8`
-- `metamethod: []const u8`
-- `constant: []const u8`
+```zig
+    local: []const u8
+    upvalue: []const u8
+    global: []const u8
+    field: []const u8
+    method: []const u8
+    metamethod: []const u8
+    constant: []const u8
+```
+
 
 <a id="type-errorsite"></a>
 
@@ -96,10 +108,13 @@ pub const ErrorSite = struct { ... };
 
 ### Fields
 
-- `line: usize`
-- `op: ErrorOp`
-- `operands: []const OperandOrigin = &.{}`
-- `call_name: ?OperandOrigin = null`
+```zig
+    line: usize
+    op: ErrorOp
+    operands: []const OperandOrigin = &.{}
+    call_name: ?OperandOrigin = null
+```
+
 
 <a id="type-errorsiteentry"></a>
 
@@ -111,8 +126,11 @@ pub const ErrorSiteEntry = struct { ... };
 
 ### Fields
 
-- `pc: usize`
-- `site: ErrorSite`
+```zig
+    pc: usize
+    site: ErrorSite
+```
+
 
 <a id="type-proto"></a>
 
@@ -124,24 +142,27 @@ pub const Proto = struct { ... };
 
 ### Fields
 
-- `allocator: std.mem.Allocator`
-- `arena: std.heap.ArenaAllocator`
-- `constants: std.ArrayList(bytecode.Constant) = .empty`
-- `instructions: std.ArrayList(bytecode.Instruction) = .empty`
-- `line_info: std.ArrayList(LineInfo) = .empty`
-- `locals: std.ArrayList(LocalDebug) = .empty`
-- `upvalues: std.ArrayList(UpvalueDesc) = .empty`
-- `error_sites: std.ArrayList(ErrorSiteEntry) = .empty`
-- `children: std.ArrayList(*Proto) = .empty`
-- `max_registers: u16 = 0`
-- `param_count: u16 = 0`
-- `is_vararg: bool = false`
-- `named_vararg: bool = false`
-- `source_name: []const u8 = "zlua"`
-- `debug_name: ?[]const u8 = null`
-- `defined_line: usize = 0`
-- `last_defined_line: usize = 0`
-- `has_to_close_locals: bool = false`
+```zig
+    allocator: std.mem.Allocator
+    arena: std.heap.ArenaAllocator
+    constants: std.ArrayList(bytecode.Constant) = .empty
+    instructions: std.ArrayList(bytecode.Instruction) = .empty
+    line_info: std.ArrayList(LineInfo) = .empty
+    locals: std.ArrayList(LocalDebug) = .empty
+    upvalues: std.ArrayList(UpvalueDesc) = .empty
+    error_sites: std.ArrayList(ErrorSiteEntry) = .empty
+    children: std.ArrayList(*Proto) = .empty
+    max_registers: u16 = 0
+    param_count: u16 = 0
+    is_vararg: bool = false
+    named_vararg: bool = false
+    source_name: []const u8 = "zlua"
+    debug_name: ?[]const u8 = null
+    defined_line: usize = 0
+    last_defined_line: usize = 0
+    has_to_close_locals: bool = false
+```
+
 
 ### Nested Declarations
 

@@ -125,7 +125,10 @@ pub const LibrarySelection = union(enum) { ... };
 
 ### Fields
 
-- `libraries: LibrarySet`
+```zig
+    libraries: LibrarySet
+```
+
 
 ### Nested Declarations
 
@@ -162,16 +165,19 @@ pub const LibrarySet = struct { ... };
 
 ### Fields
 
-- `base: bool = false`
-- `table: bool = false`
-- `string: bool = false`
-- `math: bool = false`
-- `utf8: bool = false`
-- `coroutine: bool = false`
-- `io: bool = false`
-- `os: bool = false`
-- `debug: bool = false`
-- `package: bool = false`
+```zig
+    base: bool = false
+    table: bool = false
+    string: bool = false
+    math: bool = false
+    utf8: bool = false
+    coroutine: bool = false
+    io: bool = false
+    os: bool = false
+    debug: bool = false
+    package: bool = false
+```
+
 
 ### Nested Declarations
 

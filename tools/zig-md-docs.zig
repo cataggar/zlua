@@ -885,12 +885,15 @@ fn renderDecl(
     if (decl.fields.items.len != 0) {
         try appendHeading(allocator, out, heading_level + 1, "Fields");
         try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "```zig\n");
         for (decl.fields.items) |field| {
-            try out.print(allocator, "- `{s}`", .{field.signature});
-            if (field.doc.len != 0) {
-                try out.appendSlice(allocator, " - ");
-                try appendLinkedMarkdownText(allocator, out, symbols, current_module, field.doc, single_file);
-            }
+            try out.print(allocator, "    {s}\n", .{field.signature});
+        }
+        try out.appendSlice(allocator, "```\n\n");
+        for (decl.fields.items) |field| {
+            if (field.doc.len == 0) continue;
+            try out.print(allocator, "`{s}`: ", .{field.name});
+            try appendLinkedMarkdownText(allocator, out, symbols, current_module, field.doc, single_file);
             try out.append(allocator, '\n');
         }
         try out.append(allocator, '\n');

@@ -39,8 +39,11 @@ pub const ZluaError = union(enum) { ... };
 
 ### Fields
 
-- `diagnostic: Diagnostic`
-- `host: HostError`
+```zig
+    diagnostic: Diagnostic
+    host: HostError
+```
+
 
 <a id="type-hosterror"></a>
 
@@ -60,10 +63,13 @@ pub const Diagnostic = union(enum) { ... };
 
 ### Fields
 
-- `syntax: SyntaxError`
-- `resolve: ResolveError`
-- `compile: CompileError`
-- `argument: ArgumentError`
+```zig
+    syntax: SyntaxError
+    resolve: ResolveError
+    compile: CompileError
+    argument: ArgumentError
+```
+
 
 <a id="type-argumenterror"></a>
 
@@ -75,9 +81,12 @@ pub const ArgumentError = struct { ... };
 
 ### Fields
 
-- `function_name: []const u8`
-- `index: u16`
-- `detail: ArgumentErrorDetail`
+```zig
+    function_name: []const u8
+    index: u16
+    detail: ArgumentErrorDetail
+```
+
 
 <a id="type-argumenterrordetail"></a>
 
@@ -89,11 +98,14 @@ pub const ArgumentErrorDetail = union(enum) { ... };
 
 ### Fields
 
-- `message: []const u8`
-- `expected: struct {
+```zig
+    message: []const u8
+    expected: struct {
         expected: []const u8,
         actual: []const u8,
-    }`
+    }
+```
+
 
 <a id="type-syntaxerror"></a>
 
@@ -105,9 +117,12 @@ pub const SyntaxError = union(enum) { ... };
 
 ### Fields
 
-- `unexpected: UnexpectedSyntax`
-- `expected: ExpectedSyntax`
-- `expected_close: ExpectedClose`
+```zig
+    unexpected: UnexpectedSyntax
+    expected: ExpectedSyntax
+    expected_close: ExpectedClose
+```
+
 
 <a id="type-tokenref"></a>
 
@@ -119,10 +134,13 @@ pub const TokenRef = struct { ... };
 
 ### Fields
 
-- `tag: token_mod.Tag`
-- `lexeme: []const u8`
-- `span: source.Span`
-- `unquoted: bool = false`
+```zig
+    tag: token_mod.Tag
+    lexeme: []const u8
+    span: source.Span
+    unquoted: bool = false
+```
+
 
 <a id="type-unexpectedsyntax"></a>
 
@@ -134,8 +152,11 @@ pub const UnexpectedSyntax = struct { ... };
 
 ### Fields
 
-- `token: TokenRef`
-- `message: SyntaxMessage = .syntax_error`
+```zig
+    token: TokenRef
+    message: SyntaxMessage = .syntax_error
+```
+
 
 <a id="type-syntaxmessage"></a>
 
@@ -155,8 +176,11 @@ pub const ExpectedSyntax = struct { ... };
 
 ### Fields
 
-- `expected: []const u8`
-- `near: TokenRef`
+```zig
+    expected: []const u8
+    near: TokenRef
+```
+
 
 <a id="type-expectedclose"></a>
 
@@ -168,10 +192,13 @@ pub const ExpectedClose = struct { ... };
 
 ### Fields
 
-- `expected: []const u8`
-- `opener: []const u8`
-- `opener_line: usize`
-- `near: TokenRef`
+```zig
+    expected: []const u8
+    opener: []const u8
+    opener_line: usize
+    near: TokenRef
+```
+
 
 <a id="type-resolveerror"></a>
 
@@ -183,16 +210,19 @@ pub const ResolveError = union(enum) { ... };
 
 ### Fields
 
-- `duplicate_label: struct { name: []const u8, span: source.Span, previous_line: usize }`
-- `missing_label: struct { name: []const u8, span: source.Span }`
-- `goto_into_scope: struct { label: []const u8, decl: []const u8, span: source.Span }`
-- `break_outside_loop: source.Span`
-- `assign_const: struct { name: []const u8, span: source.Span }`
-- `undeclared_global: struct { name: []const u8, span: source.Span }`
-- `invalid_close: struct { span: source.Span, global: bool = false, multiple: bool = false }`
-- `unknown_attribute: struct { name: []const u8, span: source.Span }`
-- `invalid_assignment_target: source.Span`
-- `invalid_environment: struct { name: []const u8, span: source.Span }`
+```zig
+    duplicate_label: struct { name: []const u8, span: source.Span, previous_line: usize }
+    missing_label: struct { name: []const u8, span: source.Span }
+    goto_into_scope: struct { label: []const u8, decl: []const u8, span: source.Span }
+    break_outside_loop: source.Span
+    assign_const: struct { name: []const u8, span: source.Span }
+    undeclared_global: struct { name: []const u8, span: source.Span }
+    invalid_close: struct { span: source.Span, global: bool = false, multiple: bool = false }
+    unknown_attribute: struct { name: []const u8, span: source.Span }
+    invalid_assignment_target: source.Span
+    invalid_environment: struct { name: []const u8, span: source.Span }
+```
+
 
 <a id="type-compileerror"></a>
 
@@ -204,12 +234,15 @@ pub const CompileError = union(enum) { ... };
 
 ### Fields
 
-- `too_many_returns: source.Span`
-- `register_overflow: struct { line: usize }`
-- `too_many_local_variables: struct { line: usize }`
-- `too_many_upvalues: struct { line: usize }`
-- `jump_out_of_range: struct { line: usize }`
-- `invalid_ast: struct { line: usize }`
+```zig
+    too_many_returns: source.Span
+    register_overflow: struct { line: usize }
+    too_many_local_variables: struct { line: usize }
+    too_many_upvalues: struct { line: usize }
+    jump_out_of_range: struct { line: usize }
+    invalid_ast: struct { line: usize }
+```
+
 
 <a id="fn-tokenref"></a>
 
