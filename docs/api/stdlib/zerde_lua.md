@@ -11,6 +11,7 @@
 
 - [ensureSupportTables](#fn-ensuresupporttables)
 - [nullValue](#fn-nullvalue)
+- [inputBytes](#fn-inputbytes)
 - [source](#fn-source)
 - [LuaSource](#fn-luasource)
 
@@ -32,6 +33,14 @@ pub fn ensureSupportTables(state: *State) !void
 
 ```zig
 pub fn nullValue(state: *State) !Value
+```
+
+<a id="fn-inputbytes"></a>
+
+## inputBytes
+
+```zig
+pub fn inputBytes(state: *State, value: Value, function_name: []const u8) ![]const u8
 ```
 
 <a id="type-luasink"></a>

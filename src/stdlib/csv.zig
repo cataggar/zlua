@@ -14,7 +14,7 @@ pub fn nullValue(state: *State) !Value {
 }
 
 pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const input = try state.expectArgumentString(thread, op, "csv.read", 0);
+    const input = try zerde_lua.inputBytes(state, runtime.argValue(state, thread, op, 0), "csv.read");
     const options = try csvOptions(state, thread, op, "csv.read");
 
     var reader: std.Io.Reader = .fixed(input);

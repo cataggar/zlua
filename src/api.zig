@@ -2752,6 +2752,50 @@ test "api memory filesystem backs loadfile dofile and require" {
     , .{ .name = "=api-21.6-memory-fs" });
 }
 
+test "api extension readers accept Lua file handles" {
+    const files = [_]MemoryFile{
+        .{ .path = "data.json", .contents = "xx{\"name\":\"Ada\",\"nums\":[1,null]}" },
+        .{ .path = "data.toml", .contents = "name = \"Ada\"\nok = true\nnums = [1, 2]\n" },
+        .{ .path = "data.csv", .contents = "name,age\nAda,37\nBob,\n" },
+    };
+    var lua = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer lua.deinit();
+
+    try lua.doString(
+        \\local jf = assert(io.open('data.json', 'r'))
+        \\assert(jf:read(2) == 'xx')
+        \\local j = json.read(jf)
+        \\assert(j.name == 'Ada' and j.nums[2] == json.null)
+        \\assert(jf:read(0) == nil)
+        \\
+        \\local tf = assert(io.open('data.toml', 'r'))
+        \\local t = toml.read(tf)
+        \\assert(t.name == 'Ada' and t.ok == true and t.nums[2] == 2)
+        \\assert(tf:read(0) == nil)
+        \\
+        \\local cf = assert(io.open('data.csv', 'r'))
+        \\local c = csv.read(cf)
+        \\assert(c[1].name == 'Ada' and c[1].age == '37')
+        \\assert(c[2].age == csv.null)
+        \\assert(cf:read(0) == nil)
+        \\
+        \\local mf = assert(io.tmpfile())
+        \\assert(mf:write(msgpack.write({ name = 'Ada', ok = true, nums = { 1, msgpack.null } })))
+        \\assert(mf:seek('set') == 0)
+        \\local m = msgpack.read(mf)
+        \\assert(m.name == 'Ada' and m.ok == true and m.nums[2] == msgpack.null)
+        \\assert(mf:read(0) == nil)
+        \\
+        \\local closed = assert(io.open('data.json', 'r'))
+        \\assert(closed:close())
+        \\local ok, err = pcall(json.read, closed)
+        \\assert(ok == false and tostring(err):find('json.read'))
+    , .{ .name = "=api-extension-read-file-handles" });
+}
+
 test "api memory filesystem rejects sandbox escape paths" {
     const bad_files = [_]MemoryFile{
         .{ .path = "../secret.lua", .contents = "return 1" },

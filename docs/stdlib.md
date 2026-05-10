@@ -112,7 +112,7 @@ If both `json` and `package` are open, `require("json")` also returns the same t
 
 | Member | Behavior |
 | --- | --- |
-| `json.read(text)` | Parses a JSON document string and returns the Lua representation. Empty or invalid documents raise Lua errors prefixed with `json.read`. |
+| `json.read(text_or_file)` | Parses a JSON document from a string or Lua file handle and returns the Lua representation. File handles are read from their current position to EOF. Empty or invalid documents raise Lua errors prefixed with `json.read`. |
 | `json.write(value[, options])` | Encodes a Lua value and returns a JSON string. Unsupported values raise Lua errors prefixed with `json.write`. |
 | `json.null` | Sentinel value used to represent JSON `null` in decoded data and emitted as `null` when encoded. |
 
@@ -172,7 +172,7 @@ If both `toml` and `package` are open, `require("toml")` also returns the same t
 
 | Member | Behavior |
 | --- | --- |
-| `toml.read(text)` | Parses a TOML document string and returns the Lua representation. Empty or invalid documents raise Lua errors prefixed with `toml.read`. |
+| `toml.read(text_or_file)` | Parses a TOML document from a string or Lua file handle and returns the Lua representation. File handles are read from their current position to EOF. Empty or invalid documents raise Lua errors prefixed with `toml.read`. |
 | `toml.write(value[, options])` | Encodes a Lua table and returns a TOML string. Unsupported values raise Lua errors prefixed with `toml.write`. |
 
 TOML decoding maps values as follows:
@@ -215,7 +215,7 @@ If both `msgpack` and `package` are open, `require("msgpack")` also returns the 
 
 | Member | Behavior |
 | --- | --- |
-| `msgpack.read(bytes)` | Parses one MessagePack value from a Lua string and returns the Lua representation. Invalid documents raise Lua errors prefixed with `msgpack.read`. |
+| `msgpack.read(bytes_or_file)` | Parses one MessagePack value from a Lua string or Lua file handle and returns the Lua representation. File handles are read from their current position to EOF. Invalid documents raise Lua errors prefixed with `msgpack.read`. |
 | `msgpack.write(value)` | Encodes a Lua value and returns a Lua string containing MessagePack bytes. Unsupported values raise Lua errors prefixed with `msgpack.write`. |
 | `msgpack.null` | Sentinel value used to represent MessagePack `nil` in decoded data and emitted as `nil` when encoded. |
 
@@ -267,7 +267,7 @@ If both `csv` and `package` are open, `require("csv")` also returns the same tab
 
 | Member | Behavior |
 | --- | --- |
-| `csv.read(text[, options])` | Parses CSV or TSV text and returns a 1-indexed array of row tables. Invalid documents raise Lua errors prefixed with `csv.read`. |
+| `csv.read(text_or_file[, options])` | Parses CSV or TSV from a string or Lua file handle and returns a 1-indexed array of row tables. File handles are read from their current position to EOF. Invalid documents raise Lua errors prefixed with `csv.read`. |
 | `csv.write(rows[, options])` | Encodes a sequence of row tables and returns a CSV string. Unsupported shapes or values raise Lua errors prefixed with `csv.write`. |
 | `csv.null` | Sentinel value used to represent empty cells in decoded data and emitted as an empty cell when encoded. |
 

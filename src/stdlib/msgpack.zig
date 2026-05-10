@@ -14,7 +14,7 @@ pub fn nullValue(state: *State) !Value {
 }
 
 pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const input = try state.expectArgumentString(thread, op, "msgpack.read", 0);
+    const input = try zerde_lua.inputBytes(state, runtime.argValue(state, thread, op, 0), "msgpack.read");
 
     var reader: std.Io.Reader = .fixed(input);
     var decoder = zerde.msgpack.decoder(&reader, state.allocator);

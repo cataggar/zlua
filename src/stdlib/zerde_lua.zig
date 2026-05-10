@@ -24,6 +24,65 @@ pub fn nullValue(state: *State) !Value {
     return .{ .table = state.zerde_null.? };
 }
 
+pub fn inputBytes(state: *State, value: Value, function_name: []const u8) ![]const u8 {
+    return switch (value) {
+        .string => |string| string,
+        else => if (runtime.isFileValue(value))
+            try remainingFileBytes(state, value.table, function_name)
+        else
+            state.failArgumentType(function_name, 1, "string or FILE*", value),
+    };
+}
+
+fn remainingFileBytes(state: *State, file: *runtime.Table, function_name: []const u8) ![]const u8 {
+    try ensureOpen(state, file, function_name);
+    if (!fileReadable(file)) return state.failArgumentMessage(function_name, 1, "file is not readable");
+    try refreshReadable(state, file);
+
+    const content = try fileString(state, file, "__zlua_file_content");
+    var pos = fileInteger(file, "__zlua_file_pos") orelse 1;
+    if (pos < 1) pos = 1;
+    const start: usize = @intCast(@min(@as(i64, @intCast(content.len)), pos - 1));
+    try setPos(state, file, content.len + 1);
+    return content[start..];
+}
+
+fn ensureOpen(state: *State, file: *runtime.Table, function_name: []const u8) !void {
+    const closed = file.get(.{ .string = "__zlua_file_closed" });
+    if (closed == .boolean and closed.boolean) return state.failArgumentMessage(function_name, 1, "closed file");
+}
+
+fn fileReadable(file: *runtime.Table) bool {
+    const mode = file.get(.{ .string = "__zlua_file_mode" });
+    if (mode != .string or mode.string.len == 0) return false;
+    return mode.string[0] == 'r' or std.mem.indexOfScalar(u8, mode.string, '+') != null;
+}
+
+fn fileString(state: *State, file: *runtime.Table, name: []const u8) ![]const u8 {
+    return state.expectString(file.get(.{ .string = name }));
+}
+
+fn fileInteger(file: *runtime.Table, comptime name: []const u8) ?i64 {
+    return runtime.toInteger(file.get(.{ .string = name }));
+}
+
+fn setPos(state: *State, file: *runtime.Table, pos: usize) !void {
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = @intCast(pos) });
+}
+
+fn refreshReadable(state: *State, file: *runtime.Table) !void {
+    if (!fileReadable(file)) return;
+    const path = try fileString(state, file, "__zlua_file_path");
+    if (std.mem.eql(u8, path, "stdin") or std.mem.eql(u8, path, "stdout") or std.mem.eql(u8, path, "stderr") or isSpecialDevice(path)) return;
+    const contents = state.readFileAlloc(path) catch return;
+    defer state.allocator.free(contents);
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern(contents) });
+}
+
+fn isSpecialDevice(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/dev/null") or std.mem.eql(u8, path, "/dev/full");
+}
+
 fn zerdeMetatable(state: *State, name: []const u8) !*Table {
     const value = try state.newTableWithHints(0, 2);
     const table = value.table;

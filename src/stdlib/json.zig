@@ -14,7 +14,7 @@ pub fn nullValue(state: *State) !Value {
 }
 
 pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const input = try state.expectArgumentString(thread, op, "json.read", 0);
+    const input = try zerde_lua.inputBytes(state, runtime.argValue(state, thread, op, 0), "json.read");
 
     var reader: std.Io.Reader = .fixed(input);
     var decoder = zerde.json.decoder(&reader, state.allocator);

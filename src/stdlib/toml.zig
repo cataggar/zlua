@@ -9,7 +9,7 @@ const State = runtime.State;
 const Thread = runtime.Thread;
 
 pub fn read(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    const input = try state.expectArgumentString(thread, op, "toml.read", 0);
+    const input = try zerde_lua.inputBytes(state, runtime.argValue(state, thread, op, 0), "toml.read");
 
     var reader: std.Io.Reader = .fixed(input);
     var decoder = zerde.toml.decoder(&reader, state.allocator) catch |err| return failTomlError(state, "toml.read", err);
