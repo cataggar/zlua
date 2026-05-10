@@ -12,9 +12,9 @@ zlua separates library selection from host capabilities. Library selection contr
 | --- | --- |
 | `none` | No standard libraries. |
 | `base` | Base globals only. |
-| `safe` | Base, table, string, math, utf8, coroutine, and json. |
+| `safe` | Base, table, string, math, utf8, coroutine, json, toml, and msgpack. |
 | `full` | Safe libraries plus io, os, debug, and package. |
-| Granular set | Any explicit combination of `base`, `table`, `string`, `math`, `utf8`, `coroutine`, `io`, `os`, `debug`, `package`, and `json`. |
+| Granular set | Any explicit combination of `base`, `table`, `string`, `math`, `utf8`, `coroutine`, `io`, `os`, `debug`, `package`, `json`, `toml`, and `msgpack`. |
 
 The command-line interpreter defaults to `full` and host-oriented capabilities. The Zig embedding API defaults to `safe` and sandboxed capabilities.
 
@@ -64,7 +64,7 @@ The base library installs the core globals and `_G` table:
 | `debug` | `debug` | `traceback`, `getinfo`, `getupvalue`, `setupvalue`, `upvalueid`, `upvaluejoin`, `getlocal`, `setlocal`, `getregistry`, `sethook`, `gethook`, `setmetatable`, `setuservalue`, `getuservalue` |
 | `package` | `package` | `loaded`, `preload`, `searchers`, `searchpath`, `path`, `cpath`, `config`; also opens `require`, `loadfile`, and `dofile` globals |
 
-`table.create` is a zlua helper for preallocating table array/hash capacity. The extension library set currently contains only `json`.
+`table.create` is a zlua helper for preallocating table array/hash capacity. The extension library set contains `json`, `toml`, and `msgpack`.
 
 ## Host-Facing Libraries
 
@@ -87,7 +87,7 @@ When `package` is open, zlua installs `require`, `loadfile`, and `dofile` global
 
 | Field | Value |
 | --- | --- |
-| `package.loaded` | Already loaded module table. Opened standard libraries are inserted here. If both `json` and `package` are open, `package.loaded.json` is the json library table. |
+| `package.loaded` | Already loaded module table. Opened standard libraries are inserted here. If an extension and `package` are both open, `package.loaded.<name>` is that extension library table. |
 | `package.preload` | Preload searcher table. |
 | `package.searchers` | Preload searcher followed by Lua file searcher. |
 | `package.path` | Defaults to `./?.lua;./?/init.lua`. |
@@ -152,3 +152,15 @@ Example pretty output:
 ```lua
 print(json.write({ a = 1, b = { 2 } }, { pretty = true, indent = 4 }))
 ```
+
+## MessagePack Extension
+
+The `msgpack` extension is included in `safe` and `full`, and can be selected explicitly with `msgpack` in a granular set.
+
+| Member | Behavior |
+| --- | --- |
+| `msgpack.read(bytes)` | Parses one MessagePack value from a Lua string and returns the Lua representation. Invalid documents raise Lua errors prefixed with `msgpack.read`. |
+| `msgpack.write(value)` | Encodes a Lua value and returns a Lua string containing MessagePack bytes. Unsupported values raise Lua errors prefixed with `msgpack.write`. |
+| `msgpack.null` | Sentinel value used to represent MessagePack `nil` in decoded data and emitted as `nil` when encoded. |
+
+MessagePack `str` and `bin` values decode to Lua strings. Lua strings encode as MessagePack `str` when they contain valid UTF-8 and as MessagePack `bin` otherwise.

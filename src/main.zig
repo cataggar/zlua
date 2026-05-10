@@ -225,6 +225,8 @@ fn parseStdlibLibrary(name: []const u8, libraries: *zlua.stdlib.LibrarySet) !voi
         libraries.json = true;
     } else if (std.mem.eql(u8, name, "toml")) {
         libraries.toml = true;
+    } else if (std.mem.eql(u8, name, "msgpack")) {
+        libraries.msgpack = true;
     } else {
         return error.InvalidStdlibMode;
     }
@@ -637,7 +639,7 @@ test "CLI parser accepts milestone 20 options" {
 }
 
 test "CLI parser accepts granular stdlib libraries" {
-    const args = [_][]const u8{ "zlua", "--stdlib=base,string,json,toml", "-e", "print('ok')" };
+    const args = [_][]const u8{ "zlua", "--stdlib=base,string,json,toml,msgpack", "-e", "print('ok')" };
     var options = try parseCliOptions(std.testing.allocator, &args);
     defer options.deinit(std.testing.allocator);
 
@@ -646,6 +648,7 @@ test "CLI parser accepts granular stdlib libraries" {
     try std.testing.expect(libraries.string);
     try std.testing.expect(libraries.json);
     try std.testing.expect(libraries.toml);
+    try std.testing.expect(libraries.msgpack);
     try std.testing.expect(!libraries.table);
     try std.testing.expect(!libraries.io);
 }

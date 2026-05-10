@@ -73,6 +73,10 @@ pub const LuaSink = struct {
         try self.appendValue(.{ .string = try self.state.intern(value) });
     }
 
+    pub fn emitBytes(self: *LuaSink, value: []const u8) !void {
+        try self.appendValue(.{ .string = try self.state.intern(value) });
+    }
+
     pub fn emitDateTimeRaw(self: *LuaSink, value: []const u8) !void {
         try self.emitString(value);
     }

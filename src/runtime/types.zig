@@ -170,6 +170,8 @@ pub const NativeFn = enum {
     json_write,
     toml_read,
     toml_write,
+    msgpack_read,
+    msgpack_write,
     api_callback_dispatch,
 
     pub fn name(self: NativeFn) []const u8 {
@@ -285,6 +287,8 @@ pub const NativeFn = enum {
             .json_write => "json.write",
             .toml_read => "toml.read",
             .toml_write => "toml.write",
+            .msgpack_read => "msgpack.read",
+            .msgpack_write => "msgpack.write",
             .api_callback_dispatch => "__zlua_api_callback",
         };
     }
