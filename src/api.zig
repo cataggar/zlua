@@ -1647,6 +1647,138 @@ test "api error refs survive forced GC" {
     }
 }
 
+test "api callback argument roots survive forced GC through weak tables" {
+    const Tracker = struct {
+        id: i64,
+    };
+    const Callbacks = struct {
+        fn stress(ctx: *Context) !void {
+            var payload = try ctx.arg(0, Table);
+            defer payload.deinit();
+            var tracker = try ctx.arg(1, Userdata(Tracker));
+            defer tracker.deinit();
+            var check = try ctx.arg(2, Function);
+            defer check.deinit();
+
+            try ctx.state().collect();
+            try std.testing.expectEqualStrings("payload", try payload.get("name", []const u8));
+            try std.testing.expectEqual(@as(i64, 7), (try tracker.ptr()).id);
+
+            const CheckResult = Tuple(&.{ []const u8, bool });
+            var checked = try check.call(.{}, CheckResult);
+            defer checked.deinit();
+            try std.testing.expectEqualStrings("payload", checked.get(0));
+            try std.testing.expectEqual(true, checked.get(1));
+
+            try ctx.state().collect();
+            try ctx.returnValues(.{ try payload.get("name", []const u8), (try tracker.ptr()).id });
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var tracker = try lua.newUserdata(Tracker, .{ .id = 7 }, .{});
+    defer tracker.deinit();
+
+    var stress = try lua.register("stress_roots", Callbacks.stress);
+    defer stress.deinit();
+    try lua.setGlobal("stress_roots", stress);
+
+    var chunk = try lua.loadString(
+        \\local tracker = ...
+        \\local weak = setmetatable({}, { __mode = 'v' })
+        \\local payload = { name = 'payload' }
+        \\weak.payload = payload
+        \\weak.tracker = tracker
+        \\return stress_roots(payload, weak.tracker, function()
+        \\  collectgarbage('collect')
+        \\  return weak.payload.name, weak.tracker ~= nil
+        \\end)
+    , .{ .name = "=api-callback-root-stress" });
+    defer chunk.deinit();
+
+    const Result = Tuple(&.{ []const u8, i64 });
+    var result = try chunk.call(.{tracker}, Result);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("payload", result.get(0));
+    try std.testing.expectEqual(@as(i64, 7), result.get(1));
+}
+
+test "api userdata handles root weak values until finalizers can run" {
+    const Tracker = struct {
+        finalized: *usize,
+
+        fn finalize(self: *@This()) void {
+            self.finalized.* += 1;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var finalized: usize = 0;
+    var tracker = try lua.newUserdata(Tracker, .{ .finalized = &finalized }, .{ .finalizer = Tracker.finalize });
+    try lua.setGlobal("tracker", tracker);
+    try lua.doString(
+        \\weak_trackers = setmetatable({}, { __mode = 'v' })
+        \\weak_trackers.item = tracker
+    , .{ .name = "=api-userdata-root-weak-setup" });
+    try lua.setGlobal("tracker", null);
+
+    try lua.collect();
+    try std.testing.expectEqual(@as(usize, 0), finalized);
+    try lua.doString("assert(weak_trackers.item ~= nil)", .{ .name = "=api-userdata-root-weak-alive" });
+
+    tracker.deinit();
+    try lua.collect();
+    try lua.collect();
+    try std.testing.expectEqual(@as(usize, 1), finalized);
+    try lua.doString("assert(weak_trackers.item == nil)", .{ .name = "=api-userdata-root-weak-collected" });
+}
+
+test "api error value refs root weak-table values through forced GC" {
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var failing = try lua.loadString(
+        \\weak_errors = setmetatable({}, { __mode = 'v' })
+        \\local err = { tag = 'kept' }
+        \\weak_errors.err = err
+        \\error(err, 0)
+    , .{ .name = "=api-error-root-weak" });
+    var err = blk: {
+        const result = try failing.protectedCall(.{}, void);
+        switch (result) {
+            .ok => return error.TestExpectedLuaError,
+            .lua_error => |err_ref| break :blk err_ref,
+        }
+    };
+    failing.deinit();
+
+    if (lua.takeErrorValue()) |last_error_ref| {
+        var last = last_error_ref;
+        last.deinit();
+    }
+    lua.raw_state.last_error = null;
+
+    try lua.collect();
+    var value = try err.value();
+    switch (value) {
+        .table => |table| try std.testing.expectEqualStrings("kept", try table.get("tag", []const u8)),
+        else => return error.TypeMismatch,
+    }
+    value.deinit();
+
+    var check_alive = try lua.loadString("return weak_errors.err and weak_errors.err.tag or 'gone'", .{ .name = "=api-error-root-weak-alive" });
+    defer check_alive.deinit();
+    try std.testing.expectEqualStrings("kept", try check_alive.call(.{}, []const u8));
+
+    err.deinit();
+    try lua.collect();
+    try lua.doString("assert(weak_errors.err == nil)", .{ .name = "=api-error-root-weak-collected" });
+}
+
 test "api released handles remove runtime roots" {
     var lua = try State.init(std.testing.allocator, .{});
     defer lua.deinit();

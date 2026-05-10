@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zlua = .{
-            .url = "git+https://github.com/grant-wade/zlua?ref=v0.1.0#dce547b4844e9b992cd14d526a31eed9b9de6fb2",
-            .hash = "zlua-0.1.0-S9VpHMutFgBhLrUgA7iiDbaoeFfnW8iorgg4m-hJrbKt",
+            .url = "git+https://codeberg.org/gron/zlua?ref=v0.1.1#accb1fed14b3e5eef1b825b3b2fa204f4e3b3e78",
+            .hash = "zlua-0.1.1-S9VpHAgvHAAuVdmUFS8E_lA3z7sdjP1hQRSStWWnHdeZ",
         },
     },
     .paths = .{
