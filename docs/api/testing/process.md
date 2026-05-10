@@ -22,19 +22,14 @@
 ## ProcessResult
 
 ```zig
-pub const ProcessResult = struct { ... };
+pub const ProcessResult = struct {
+    stdout: []u8,
+    stderr: []u8,
+    exit_code: ?u8,
+    signal: ?u32,
+    timed_out: bool,
+};
 ```
-
-### Fields
-
-```zig
-    stdout: []u8
-    stderr: []u8
-    exit_code: ?u8
-    signal: ?u32
-    timed_out: bool
-```
-
 
 ### Nested Declarations
 
@@ -66,19 +61,14 @@ References: [`ProcessResult`](#type-processresult)
 ## RunOptions
 
 ```zig
-pub const RunOptions = struct { ... };
+pub const RunOptions = struct {
+    cwd: ?[]const u8 = null,
+    timeout_ms: u64 = 5000,
+    max_output_bytes: usize = 1024 * 1024,
+    expand_arg0: bool = false,
+    memory_limit_mb: u64 = 0,
+};
 ```
-
-### Fields
-
-```zig
-    cwd: ?[]const u8 = null
-    timeout_ms: u64 = 5000
-    max_output_bytes: usize = 1024 * 1024
-    expand_arg0: bool = false
-    memory_limit_mb: u64 = 0
-```
-
 
 <a id="fn-runprocess"></a>
 

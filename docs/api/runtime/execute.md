@@ -21,16 +21,11 @@
 ## ExecuteOptions
 
 ```zig
-pub const ExecuteOptions = struct { ... };
+pub const ExecuteOptions = struct {
+    collect_after_instruction: bool = false,
+    state: state_mod.StateOptions = .{},
+};
 ```
-
-### Fields
-
-```zig
-    collect_after_instruction: bool = false
-    state: state_mod.StateOptions = .{}
-```
-
 
 <a id="fn-executesource"></a>
 

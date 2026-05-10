@@ -48,20 +48,15 @@ pub const Normalize = enum { ... };
 ## Metadata
 
 ```zig
-pub const Metadata = struct { ... };
+pub const Metadata = struct {
+    expect: Expect = .pass,
+    stage: Stage = .runtime,
+    feature: []const u8 = "uncategorized",
+    normalize: Normalize = .none,
+    reason: []const u8 = "",
+    issue: []const u8 = "",
+};
 ```
-
-### Fields
-
-```zig
-    expect: Expect = .pass
-    stage: Stage = .runtime
-    feature: []const u8 = "uncategorized"
-    normalize: Normalize = .none
-    reason: []const u8 = ""
-    issue: []const u8 = ""
-```
-
 
 <a id="fn-parse"></a>
 

@@ -188,22 +188,17 @@ References: [`runtime.MemoryFilesystem`](runtime.md#alias-memoryfilesystem)
 Host I/O access granted to Lua standard-library operations.
 
 ```zig
-pub const IoCapability = struct { ... };
+pub const IoCapability = struct {
+    /// Optional Zig I/O runtime required by host-backed filesystem, clock, and process operations.
+    runtime: ?std.Io = null,
+    /// Bytes returned by Lua stdin reads when the `io` library is enabled.
+    stdin: []const u8 = "",
+    /// Optional writer used for Lua stdout, including `print` and `io.write`.
+    stdout: ?*std.Io.Writer = null,
+    /// Optional writer used for Lua stderr.
+    stderr: ?*std.Io.Writer = null,
+};
 ```
-
-### Fields
-
-```zig
-    runtime: ?std.Io = null
-    stdin: []const u8 = ""
-    stdout: ?*std.Io.Writer = null
-    stderr: ?*std.Io.Writer = null
-```
-
-`runtime`: Optional Zig I/O runtime required by host-backed filesystem, clock, and process operations.
-`stdin`: Bytes returned by Lua stdin reads when the `io` library is enabled.
-`stdout`: Optional writer used for Lua stdout, including `print` and `io.write`.
-`stderr`: Optional writer used for Lua stderr.
 
 ### Nested Declarations
 
@@ -240,16 +235,11 @@ References: [`runtime.FilesystemCapability`](runtime.md#alias-filesystemcapabili
 Environment-variable access granted to `os.getenv` and enabled child processes.
 
 ```zig
-pub const EnvironmentCapability = union(enum) { ... };
+pub const EnvironmentCapability = union(enum) {
+    /// Use the supplied environment map.
+    map: *const std.process.Environ.Map,
+};
 ```
-
-### Fields
-
-```zig
-    map: *const std.process.Environ.Map
-```
-
-`map`: Use the supplied environment map.
 
 <a id="alias-clockcapability"></a>
 
@@ -282,24 +272,19 @@ References: [`runtime.ProcessCapability`](runtime.md#alias-processcapability)
 Host services Lua code may use when matching standard-library functions are open.
 
 ```zig
-pub const Capabilities = struct { ... };
+pub const Capabilities = struct {
+    /// I/O streams and runtime used by host-facing libraries.
+    io: IoCapability = .disabled,
+    /// Filesystem backend or denial mode.
+    filesystem: FilesystemCapability = .disabled,
+    /// Environment-variable source or denial mode.
+    environment: EnvironmentCapability = .disabled,
+    /// Clock source or denial mode.
+    clock: ClockCapability = .disabled,
+    /// Process execution mode.
+    process: ProcessCapability = .disabled,
+};
 ```
-
-### Fields
-
-```zig
-    io: IoCapability = .disabled
-    filesystem: FilesystemCapability = .disabled
-    environment: EnvironmentCapability = .disabled
-    clock: ClockCapability = .disabled
-    process: ProcessCapability = .disabled
-```
-
-`io`: I/O streams and runtime used by host-facing libraries.
-`filesystem`: Filesystem backend or denial mode.
-`environment`: Environment-variable source or denial mode.
-`clock`: Clock source or denial mode.
-`process`: Process execution mode.
 
 ### Nested Declarations
 
@@ -324,22 +309,17 @@ References: [`Capabilities`](#type-capabilities)
 Resource limits enforced by the state.
 
 ```zig
-pub const Limits = struct { ... };
+pub const Limits = struct {
+    /// Maximum bytes allocated through the state's runtime allocator, or unlimited when null.
+    max_memory: ?usize = null,
+    /// Maximum VM stack values, or the runtime default when null.
+    max_stack_values: ?usize = null,
+    /// Maximum active call frames, or the runtime default when null.
+    max_call_frames: ?usize = null,
+    /// Maximum VM instructions executed since the last budget reset, or unlimited when null.
+    max_instructions: ?u64 = null,
+};
 ```
-
-### Fields
-
-```zig
-    max_memory: ?usize = null
-    max_stack_values: ?usize = null
-    max_call_frames: ?usize = null
-    max_instructions: ?u64 = null
-```
-
-`max_memory`: Maximum bytes allocated through the state's runtime allocator, or unlimited when null.
-`max_stack_values`: Maximum VM stack values, or the runtime default when null.
-`max_call_frames`: Maximum active call frames, or the runtime default when null.
-`max_instructions`: Maximum VM instructions executed since the last budget reset, or unlimited when null.
 
 <a id="type-instructionbudget"></a>
 
@@ -348,20 +328,15 @@ pub const Limits = struct { ... };
 Snapshot of the state's cumulative instruction budget.
 
 ```zig
-pub const InstructionBudget = struct { ... };
+pub const InstructionBudget = struct {
+    /// Configured instruction limit, or null when unlimited.
+    limit: ?u64,
+    /// Number of VM instructions executed since state creation or the last reset.
+    used: u64,
+    /// Remaining instructions before the limit is exhausted, or null when unlimited.
+    remaining: ?u64,
+};
 ```
-
-### Fields
-
-```zig
-    limit: ?u64
-    used: u64
-    remaining: ?u64
-```
-
-`limit`: Configured instruction limit, or null when unlimited.
-`used`: Number of VM instructions executed since state creation or the last reset.
-`remaining`: Remaining instructions before the limit is exhausted, or null when unlimited.
 
 <a id="type-gcoptions"></a>
 
@@ -380,18 +355,13 @@ pub const GcOptions = struct { ... };
 Diagnostics and tracing options intended for development and tests.
 
 ```zig
-pub const DebugOptions = struct { ... };
+pub const DebugOptions = struct {
+    /// Include richer internal error diagnostics where available.
+    errors: bool = false,
+    /// Trace VM execution.
+    trace_vm: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    errors: bool = false
-    trace_vm: bool = false
-```
-
-`errors`: Include richer internal error diagnostics where available.
-`trace_vm`: Trace VM execution.
 
 <a id="type-options"></a>
 
@@ -400,24 +370,19 @@ pub const DebugOptions = struct { ... };
 [State](#type-state) creation options.
 
 ```zig
-pub const Options = struct { ... };
+pub const Options = struct {
+    /// Standard libraries opened during `State.init`.
+    stdlib: Stdlib = .safe,
+    /// Host services made available to opened standard libraries.
+    capabilities: Capabilities = .sandboxed,
+    /// Resource limits for the state.
+    limits: Limits = .{},
+    /// Garbage-collector options.
+    gc: GcOptions = .{},
+    /// Debug and tracing options.
+    debug: DebugOptions = .{},
+};
 ```
-
-### Fields
-
-```zig
-    stdlib: Stdlib = .safe
-    capabilities: Capabilities = .sandboxed
-    limits: Limits = .{}
-    gc: GcOptions = .{}
-    debug: DebugOptions = .{}
-```
-
-`stdlib`: Standard libraries opened during `State.init`.
-`capabilities`: Host services made available to opened standard libraries.
-`limits`: Resource limits for the state.
-`gc`: Garbage-collector options.
-`debug`: Debug and tracing options.
 
 <a id="type-loadmode"></a>
 
@@ -436,20 +401,15 @@ pub const LoadMode = enum { ... };
 [Options](#type-options) for loading a Lua chunk from source or a file.
 
 ```zig
-pub const LoadOptions = struct { ... };
+pub const LoadOptions = struct {
+    /// Optional source name used in diagnostics; use Lua-style `=name` or `@path` when desired.
+    name: ?[]const u8 = null,
+    /// Optional environment table used as the chunk's `_ENV`.
+    environment: ?Table = null,
+    /// Whether source text, binary chunks, or both are accepted.
+    mode: LoadMode = .source_only,
+};
 ```
-
-### Fields
-
-```zig
-    name: ?[]const u8 = null
-    environment: ?Table = null
-    mode: LoadMode = .source_only
-```
-
-`name`: Optional source name used in diagnostics; use Lua-style `=name` or `@path` when desired.
-`environment`: Optional environment table used as the chunk's `_ENV`.
-`mode`: Whether source text, binary chunks, or both are accepted.
 
 <a id="alias-dooptions"></a>
 
@@ -470,16 +430,11 @@ References: [`LoadOptions`](#type-loadoptions)
 [Options](#type-options) for loading zlua bytecode directly.
 
 ```zig
-pub const BytecodeLoadOptions = struct { ... };
+pub const BytecodeLoadOptions = struct {
+    /// Optional environment table used as the loaded function's `_ENV`.
+    environment: ?Table = null,
+};
 ```
-
-### Fields
-
-```zig
-    environment: ?Table = null
-```
-
-`environment`: Optional environment table used as the loaded function's `_ENV`.
 
 <a id="type-bytecodedumpoptions"></a>
 
@@ -488,16 +443,11 @@ pub const BytecodeLoadOptions = struct { ... };
 [Options](#type-options) for dumping a loaded function to zlua bytecode.
 
 ```zig
-pub const BytecodeDumpOptions = struct { ... };
+pub const BytecodeDumpOptions = struct {
+    /// Whether debug/source metadata should be omitted from the dump.
+    strip_debug: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    strip_debug: bool = false
-```
-
-`strip_debug`: Whether debug/source metadata should be omitted from the dump.
 
 <a id="type-tableoptions"></a>
 
@@ -506,18 +456,13 @@ pub const BytecodeDumpOptions = struct { ... };
 Initial capacity hints for a newly created Lua table.
 
 ```zig
-pub const TableOptions = struct { ... };
+pub const TableOptions = struct {
+    /// Expected number of array-part entries.
+    array_hint: u32 = 0,
+    /// Expected number of hash-part entries.
+    hash_hint: u32 = 0,
+};
 ```
-
-### Fields
-
-```zig
-    array_hint: u32 = 0
-    hash_hint: u32 = 0
-```
-
-`array_hint`: Expected number of array-part entries.
-`hash_hint`: Expected number of hash-part entries.
 
 <a id="const-hostfn"></a>
 
@@ -538,16 +483,11 @@ References: [`Context`](#type-context)
 Budget passed to `State.stepGc`.
 
 ```zig
-pub const GcBudget = struct { ... };
+pub const GcBudget = struct {
+    /// Requested number of GC steps; currently reserved because `stepGc` performs a full collection.
+    steps: usize = 0,
+};
 ```
-
-### Fields
-
-```zig
-    steps: usize = 0
-```
-
-`steps`: Requested number of GC steps; currently reserved because `stepGc` performs a full collection.
 
 <a id="type-gcstepresult"></a>
 
@@ -566,21 +506,16 @@ pub const GcStepResult = enum { ... };
 Owns a Lua VM instance and its host-facing API state.
 
 ```zig
-pub const State = struct { ... };
+pub const State = struct {
+    base_allocator: std.mem.Allocator,
+    memory_limit_allocator: ?*MemoryLimitAllocator = null,
+    raw_state: runtime.State,
+    last_error_root: ?usize = null,
+    memory_files: std.ArrayList(MemoryFile) = .empty,
+    memory_file_owned_contents: std.ArrayList(bool) = .empty,
+    callbacks: std.ArrayList(RegisteredCallback) = .empty,
+};
 ```
-
-### Fields
-
-```zig
-    base_allocator: std.mem.Allocator
-    memory_limit_allocator: ?*MemoryLimitAllocator = null
-    raw_state: runtime.State
-    last_error_root: ?usize = null
-    memory_files: std.ArrayList(MemoryFile) = .empty
-    memory_file_owned_contents: std.ArrayList(bool) = .empty
-    callbacks: std.ArrayList(RegisteredCallback) = .empty
-```
-
 
 ### Nested Declarations
 
@@ -975,16 +910,11 @@ References: [`State`](#type-state), [`ErrorRef`](#type-errorref)
 Rooted handle to any Lua value.
 
 ```zig
-pub const Ref = struct { ... };
+pub const Ref = struct {
+    state: *State,
+    index: usize,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    index: usize
-```
-
 
 ### Nested Declarations
 
@@ -1022,15 +952,10 @@ References: [`Ref`](#type-ref), [`Value`](#type-value)
 Rooted handle to a Lua table.
 
 ```zig
-pub const Table = struct { ... };
+pub const Table = struct {
+    ref: Ref,
+};
 ```
-
-### Fields
-
-```zig
-    ref: Ref
-```
-
 
 ### Nested Declarations
 
@@ -1081,15 +1006,10 @@ References: [`Table`](#type-table)
 Rooted handle to a Lua function or loaded chunk.
 
 ```zig
-pub const Function = struct { ... };
+pub const Function = struct {
+    ref: Ref,
+};
 ```
-
-### Fields
-
-```zig
-    ref: Ref
-```
-
 
 ### Nested Declarations
 
@@ -1167,15 +1087,10 @@ pub fn Userdata(comptime T: type) type
 Rooted handle to userdata when the host does not know its Zig payload type.
 
 ```zig
-pub const AnyUserdata = struct { ... };
+pub const AnyUserdata = struct {
+    ref: Ref,
+};
 ```
-
-### Fields
-
-```zig
-    ref: Ref
-```
-
 
 ### Nested Declarations
 
@@ -1210,15 +1125,10 @@ pub fn CallResult(comptime R: type) type
 Rooted handle to a Lua error value.
 
 ```zig
-pub const ErrorRef = struct { ... };
+pub const ErrorRef = struct {
+    ref: Ref,
+};
 ```
-
-### Fields
-
-```zig
-    ref: Ref
-```
-
 
 ### Nested Declarations
 
@@ -1271,28 +1181,23 @@ References: [`ErrorRef`](#type-errorref)
 High-level Lua value union used for dynamic conversion and inspection.
 
 ```zig
-pub const Value = union(enum) { ... };
+pub const Value = union(enum) {
+    /// Lua boolean.
+    boolean: bool,
+    /// Lua integer.
+    integer: i64,
+    /// Lua floating-point number.
+    number: f64,
+    /// Lua string bytes interned in the state.
+    string: []const u8,
+    /// Rooted Lua table handle.
+    table: Table,
+    /// Rooted Lua function handle.
+    function: Function,
+    /// Rooted Lua userdata handle with unknown Zig payload type.
+    userdata: AnyUserdata,
+};
 ```
-
-### Fields
-
-```zig
-    boolean: bool
-    integer: i64
-    number: f64
-    string: []const u8
-    table: Table
-    function: Function
-    userdata: AnyUserdata
-```
-
-`boolean`: Lua boolean.
-`integer`: Lua integer.
-`number`: Lua floating-point number.
-`string`: Lua string bytes interned in the state.
-`table`: Rooted Lua table handle.
-`function`: Rooted Lua function handle.
-`userdata`: Rooted Lua userdata handle with unknown Zig payload type.
 
 ### Nested Declarations
 
@@ -1327,16 +1232,11 @@ pub fn Tuple(comptime types: []const type) type
 Host-callback context passed to functions registered with `State.register`.
 
 ```zig
-pub const Context = struct { ... };
+pub const Context = struct {
+    lua: *State,
+    raw: *runtime.ApiCallbackContext,
+};
 ```
-
-### Fields
-
-```zig
-    lua: *State
-    raw: *runtime.ApiCallbackContext
-```
-
 
 ### Nested Declarations
 

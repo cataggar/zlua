@@ -39,18 +39,13 @@ pub fn nullValue(state: *State) !Value
 ## LuaSink
 
 ```zig
-pub const LuaSink = struct { ... };
+pub const LuaSink = struct {
+    state: *State,
+    stack: std.ArrayList(Frame) = .empty,
+    root: Value = .nil,
+    has_root: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    stack: std.ArrayList(Frame) = .empty
-    root: Value = .nil
-    has_root: bool = false
-```
-
 
 ### Nested Declarations
 

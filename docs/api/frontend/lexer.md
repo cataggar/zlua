@@ -21,21 +21,16 @@
 ## Lexer
 
 ```zig
-pub const Lexer = struct { ... };
+pub const Lexer = struct {
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    error_diagnostic: ?*?errors.Diagnostic = null,
+    index: usize = 0,
+    line: usize = 1,
+    column: usize = 1,
+    diagnostics: std.ArrayList(diagnostic.Diagnostic) = .empty,
+};
 ```
-
-### Fields
-
-```zig
-    allocator: std.mem.Allocator
-    source: []const u8
-    error_diagnostic: ?*?errors.Diagnostic = null
-    index: usize = 0
-    line: usize = 1
-    column: usize = 1
-    diagnostics: std.ArrayList(diagnostic.Diagnostic) = .empty
-```
-
 
 ### Nested Declarations
 

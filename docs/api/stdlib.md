@@ -147,15 +147,10 @@ pub const msgpack = @import("stdlib/msgpack.zig");
 ## LibrarySelection
 
 ```zig
-pub const LibrarySelection = union(enum) { ... };
+pub const LibrarySelection = union(enum) {
+    libraries: LibrarySet,
+};
 ```
-
-### Fields
-
-```zig
-    libraries: LibrarySet
-```
-
 
 ### Nested Declarations
 
@@ -187,27 +182,22 @@ References: [`LibrarySelection`](#type-libraryselection)
 ## LibrarySet
 
 ```zig
-pub const LibrarySet = struct { ... };
+pub const LibrarySet = struct {
+    base: bool = false,
+    table: bool = false,
+    string: bool = false,
+    math: bool = false,
+    utf8: bool = false,
+    coroutine: bool = false,
+    io: bool = false,
+    os: bool = false,
+    debug: bool = false,
+    package: bool = false,
+    json: bool = false,
+    toml: bool = false,
+    msgpack: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    base: bool = false
-    table: bool = false
-    string: bool = false
-    math: bool = false
-    utf8: bool = false
-    coroutine: bool = false
-    io: bool = false
-    os: bool = false
-    debug: bool = false
-    package: bool = false
-    json: bool = false
-    toml: bool = false
-    msgpack: bool = false
-```
-
 
 ### Nested Declarations
 

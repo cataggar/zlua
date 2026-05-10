@@ -115,18 +115,13 @@ pub const multret_count: u16 = std.math.maxInt(u16);
 ## Constant
 
 ```zig
-pub const Constant = union(enum) { ... };
+pub const Constant = union(enum) {
+    boolean: bool,
+    integer: []const u8,
+    number: []const u8,
+    string: []const u8,
+};
 ```
-
-### Fields
-
-```zig
-    boolean: bool
-    integer: []const u8
-    number: []const u8
-    string: []const u8
-```
-
 
 <a id="fn-constanteql"></a>
 
@@ -143,317 +138,237 @@ References: [`Constant`](#type-constant)
 ## Instruction
 
 ```zig
-pub const Instruction = union(enum) { ... };
+pub const Instruction = union(enum) {
+    load_nil: Register,
+    load_bool: LoadBool,
+    load_const: LoadConst,
+    move: Move,
+    get_global: GlobalAccess,
+    set_global: GlobalAccess,
+    declare_global: GlobalDeclare,
+    get_upvalue: UpvalueAccess,
+    set_upvalue: UpvalueAccess,
+    get_table: TableAccess,
+    set_table: TableSet,
+    set_array: ArraySet,
+    get_field: FieldAccess,
+    set_field: FieldSet,
+    new_table: NewTable,
+    set_list: SetList,
+    add: Binary,
+    sub: Binary,
+    mul: Binary,
+    div: Binary,
+    idiv: Binary,
+    mod: Binary,
+    pow: Binary,
+    unm: Unary,
+    band: Binary,
+    bor: Binary,
+    bxor: Binary,
+    bnot: Unary,
+    shl: Binary,
+    shr: Binary,
+    eq: Binary,
+    lt: Binary,
+    le: Binary,
+    not: Unary,
+    len: Unary,
+    concat: Binary,
+    jmp: JumpOffset,
+    compare_branch: CompareBranch,
+    test_op: Test,
+    test_set: TestSet,
+    call: Call,
+    tail_call: Call,
+    ret: Return,
+    vararg: Vararg,
+    closure: Closure,
+    close: Register,
+    check_close: Register,
+    close_tbc: Register,
+    for_prep: ForLoop,
+    for_loop: ForLoop,
+    tfor_prep: GenericFor,
+    tfor_call: GenericFor,
+    tfor_loop: GenericFor,
+};
 ```
-
-### Fields
-
-```zig
-    load_nil: Register
-    load_bool: LoadBool
-    load_const: LoadConst
-    move: Move
-    get_global: GlobalAccess
-    set_global: GlobalAccess
-    declare_global: GlobalDeclare
-    get_upvalue: UpvalueAccess
-    set_upvalue: UpvalueAccess
-    get_table: TableAccess
-    set_table: TableSet
-    set_array: ArraySet
-    get_field: FieldAccess
-    set_field: FieldSet
-    new_table: NewTable
-    set_list: SetList
-    add: Binary
-    sub: Binary
-    mul: Binary
-    div: Binary
-    idiv: Binary
-    mod: Binary
-    pow: Binary
-    unm: Unary
-    band: Binary
-    bor: Binary
-    bxor: Binary
-    bnot: Unary
-    shl: Binary
-    shr: Binary
-    eq: Binary
-    lt: Binary
-    le: Binary
-    not: Unary
-    len: Unary
-    concat: Binary
-    jmp: JumpOffset
-    compare_branch: CompareBranch
-    test_op: Test
-    test_set: TestSet
-    call: Call
-    tail_call: Call
-    ret: Return
-    vararg: Vararg
-    closure: Closure
-    close: Register
-    check_close: Register
-    close_tbc: Register
-    for_prep: ForLoop
-    for_loop: ForLoop
-    tfor_prep: GenericFor
-    tfor_call: GenericFor
-    tfor_loop: GenericFor
-```
-
 
 <a id="type-loadbool"></a>
 
 ## LoadBool
 
 ```zig
-pub const LoadBool = struct { ... };
+pub const LoadBool = struct {
+    dest: Register,
+    value: bool,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    value: bool
-```
-
 
 <a id="type-loadconst"></a>
 
 ## LoadConst
 
 ```zig
-pub const LoadConst = struct { ... };
+pub const LoadConst = struct {
+    dest: Register,
+    constant: ConstantIndex,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    constant: ConstantIndex
-```
-
 
 <a id="type-move"></a>
 
 ## Move
 
 ```zig
-pub const Move = struct { ... };
+pub const Move = struct {
+    dest: Register,
+    source: Register,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    source: Register
-```
-
 
 <a id="type-globalaccess"></a>
 
 ## GlobalAccess
 
 ```zig
-pub const GlobalAccess = struct { ... };
+pub const GlobalAccess = struct {
+    register: Register,
+    name: ConstantIndex,
+};
 ```
-
-### Fields
-
-```zig
-    register: Register
-    name: ConstantIndex
-```
-
 
 <a id="type-globaldeclare"></a>
 
 ## GlobalDeclare
 
 ```zig
-pub const GlobalDeclare = struct { ... };
+pub const GlobalDeclare = struct {
+    table: Register,
+    value: Register,
+    name: ConstantIndex,
+};
 ```
-
-### Fields
-
-```zig
-    table: Register
-    value: Register
-    name: ConstantIndex
-```
-
 
 <a id="type-upvalueaccess"></a>
 
 ## UpvalueAccess
 
 ```zig
-pub const UpvalueAccess = struct { ... };
+pub const UpvalueAccess = struct {
+    register: Register,
+    upvalue: UpvalueIndex,
+};
 ```
-
-### Fields
-
-```zig
-    register: Register
-    upvalue: UpvalueIndex
-```
-
 
 <a id="type-tableaccess"></a>
 
 ## TableAccess
 
 ```zig
-pub const TableAccess = struct { ... };
+pub const TableAccess = struct {
+    dest: Register,
+    table: Register,
+    key: Register,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    table: Register
-    key: Register
-```
-
 
 <a id="type-tableset"></a>
 
 ## TableSet
 
 ```zig
-pub const TableSet = struct { ... };
+pub const TableSet = struct {
+    table: Register,
+    key: Register,
+    value: Register,
+};
 ```
-
-### Fields
-
-```zig
-    table: Register
-    key: Register
-    value: Register
-```
-
 
 <a id="type-arrayset"></a>
 
 ## ArraySet
 
 ```zig
-pub const ArraySet = struct { ... };
+pub const ArraySet = struct {
+    table: Register,
+    index: u32,
+    value: Register,
+};
 ```
-
-### Fields
-
-```zig
-    table: Register
-    index: u32
-    value: Register
-```
-
 
 <a id="type-fieldaccess"></a>
 
 ## FieldAccess
 
 ```zig
-pub const FieldAccess = struct { ... };
+pub const FieldAccess = struct {
+    dest: Register,
+    table: Register,
+    name: ConstantIndex,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    table: Register
-    name: ConstantIndex
-```
-
 
 <a id="type-fieldset"></a>
 
 ## FieldSet
 
 ```zig
-pub const FieldSet = struct { ... };
+pub const FieldSet = struct {
+    table: Register,
+    name: ConstantIndex,
+    value: Register,
+};
 ```
-
-### Fields
-
-```zig
-    table: Register
-    name: ConstantIndex
-    value: Register
-```
-
 
 <a id="type-newtable"></a>
 
 ## NewTable
 
 ```zig
-pub const NewTable = struct { ... };
+pub const NewTable = struct {
+    dest: Register,
+    array_hint: u32 = 0,
+    hash_hint: u32 = 0,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    array_hint: u32 = 0
-    hash_hint: u32 = 0
-```
-
 
 <a id="type-setlist"></a>
 
 ## SetList
 
 ```zig
-pub const SetList = struct { ... };
+pub const SetList = struct {
+    table: Register,
+    first: Register,
+    count: u32,
+    start_index: u32,
+};
 ```
-
-### Fields
-
-```zig
-    table: Register
-    first: Register
-    count: u32
-    start_index: u32
-```
-
 
 <a id="type-unary"></a>
 
 ## Unary
 
 ```zig
-pub const Unary = struct { ... };
+pub const Unary = struct {
+    dest: Register,
+    source: Register,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    source: Register
-```
-
 
 <a id="type-binary"></a>
 
 ## Binary
 
 ```zig
-pub const Binary = struct { ... };
+pub const Binary = struct {
+    dest: Register,
+    left: Register,
+    right: Register,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    left: Register
-    right: Register
-```
-
 
 <a id="type-comparebranchop"></a>
 
@@ -468,150 +383,105 @@ pub const CompareBranchOp = enum { ... };
 ## CompareBranch
 
 ```zig
-pub const CompareBranch = struct { ... };
+pub const CompareBranch = struct {
+    left: Register,
+    right: Register,
+    op: CompareBranchOp,
+    jump_if_truthy: bool,
+    offset: JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    left: Register
-    right: Register
-    op: CompareBranchOp
-    jump_if_truthy: bool
-    offset: JumpOffset
-```
-
 
 <a id="type-test"></a>
 
 ## Test
 
 ```zig
-pub const Test = struct { ... };
+pub const Test = struct {
+    register: Register,
+    jump_if_truthy: bool,
+    offset: JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    register: Register
-    jump_if_truthy: bool
-    offset: JumpOffset
-```
-
 
 <a id="type-testset"></a>
 
 ## TestSet
 
 ```zig
-pub const TestSet = struct { ... };
+pub const TestSet = struct {
+    dest: Register,
+    source: Register,
+    jump_if_truthy: bool,
+    offset: JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    source: Register
-    jump_if_truthy: bool
-    offset: JumpOffset
-```
-
 
 <a id="type-call"></a>
 
 ## Call
 
 ```zig
-pub const Call = struct { ... };
+pub const Call = struct {
+    base: Register,
+    arg_count: u16,
+    return_count: u16,
+};
 ```
-
-### Fields
-
-```zig
-    base: Register
-    arg_count: u16
-    return_count: u16
-```
-
 
 <a id="type-return"></a>
 
 ## Return
 
 ```zig
-pub const Return = struct { ... };
+pub const Return = struct {
+    first: Register,
+    count: u16,
+};
 ```
-
-### Fields
-
-```zig
-    first: Register
-    count: u16
-```
-
 
 <a id="type-vararg"></a>
 
 ## Vararg
 
 ```zig
-pub const Vararg = struct { ... };
+pub const Vararg = struct {
+    dest: Register,
+    count: u16,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    count: u16
-```
-
 
 <a id="type-closure"></a>
 
 ## Closure
 
 ```zig
-pub const Closure = struct { ... };
+pub const Closure = struct {
+    dest: Register,
+    proto: ProtoIndex,
+};
 ```
-
-### Fields
-
-```zig
-    dest: Register
-    proto: ProtoIndex
-```
-
 
 <a id="type-forloop"></a>
 
 ## ForLoop
 
 ```zig
-pub const ForLoop = struct { ... };
+pub const ForLoop = struct {
+    base: Register,
+    offset: JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    base: Register
-    offset: JumpOffset
-```
-
 
 <a id="type-genericfor"></a>
 
 ## GenericFor
 
 ```zig
-pub const GenericFor = struct { ... };
+pub const GenericFor = struct {
+    base: Register,
+    variable_count: u16,
+    offset: JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    base: Register
-    variable_count: u16
-    offset: JumpOffset
-```
-
 

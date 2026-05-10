@@ -20,15 +20,10 @@
 ## Registry
 
 ```zig
-pub const Registry = struct { ... };
+pub const Registry = struct {
+    failures: std.StringHashMap([]u8),
+};
 ```
-
-### Fields
-
-```zig
-    failures: std.StringHashMap([]u8)
-```
-
 
 ### Nested Declarations
 

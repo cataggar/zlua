@@ -25,15 +25,10 @@ pub const Code = enum { ... };
 ## Diagnostic
 
 ```zig
-pub const Diagnostic = struct { ... };
+pub const Diagnostic = struct {
+    code: Code,
+    span: source.Span,
+    message: []const u8,
+};
 ```
-
-### Fields
-
-```zig
-    code: Code
-    span: source.Span
-    message: []const u8
-```
-
 

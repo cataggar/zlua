@@ -69,26 +69,21 @@ pub const RuntimeError =...;
 ## Value
 
 ```zig
-pub const Value = union(enum) { ... };
+pub const Value = union(enum) {
+    boolean: bool,
+    integer: i64,
+    number: f64,
+    string: []const u8,
+    table: *Table,
+    userdata: *Userdata,
+    closure: *Closure,
+    c_closure: *CClosure,
+    thread: *Thread,
+    coroutine_wrapper: *Thread,
+    gmatch_iterator: *Table,
+    native: NativeFn,
+};
 ```
-
-### Fields
-
-```zig
-    boolean: bool
-    integer: i64
-    number: f64
-    string: []const u8
-    table: *Table
-    userdata: *Userdata
-    closure: *Closure
-    c_closure: *CClosure
-    thread: *Thread
-    coroutine_wrapper: *Thread
-    gmatch_iterator: *Table
-    native: NativeFn
-```
-
 
 <a id="type-nativefn"></a>
 
@@ -133,16 +128,11 @@ pub const UserdataDeinit = *const fn (std.mem.Allocator, *anyopaque) void;
 ## ProtectedCallResult
 
 ```zig
-pub const ProtectedCallResult = union(enum) { ... };
+pub const ProtectedCallResult = union(enum) {
+    success: []Value,
+    failure: Value,
+};
 ```
-
-### Fields
-
-```zig
-    success: []Value
-    failure: Value
-```
-
 
 <a id="const-apicallbackdispatchfn"></a>
 
@@ -197,42 +187,32 @@ pub const DebugHookEvent = enum { ... };
 ## CDebugHookContext
 
 ```zig
-pub const CDebugHookContext = struct { ... };
+pub const CDebugHookContext = struct {
+    state: *State,
+    thread: *Thread,
+    event: DebugHookEvent,
+    currentline: ?usize = null,
+    ftransfer: i64 = 0,
+    ntransfer: usize = 0,
+    user_data: ?*anyopaque,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    thread: *Thread
-    event: DebugHookEvent
-    currentline: ?usize = null
-    ftransfer: i64 = 0
-    ntransfer: usize = 0
-    user_data: ?*anyopaque
-```
-
 
 <a id="type-cclosurecontext"></a>
 
 ## CClosureContext
 
 ```zig
-pub const CClosureContext = struct { ... };
+pub const CClosureContext = struct {
+    state: *State,
+    thread: *Thread,
+    op: bytecode.Call,
+    closure: *CClosure,
+    user_data: ?*anyopaque,
+    returns: std.ArrayList(Value) = .empty,
+    error_value: ?Value = null,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    thread: *Thread
-    op: bytecode.Call
-    closure: *CClosure
-    user_data: ?*anyopaque
-    returns: std.ArrayList(Value) = .empty
-    error_value: ?Value = null
-```
-
 
 ### Nested Declarations
 
@@ -308,20 +288,15 @@ References: [`CClosureContext`](#type-cclosurecontext), [`Value`](#type-value)
 ## CClosureResumeContext
 
 ```zig
-pub const CClosureResumeContext = struct { ... };
+pub const CClosureResumeContext = struct {
+    state: *State,
+    thread: *Thread,
+    args: []const Value,
+    user_data: ?*anyopaque,
+    returns: std.ArrayList(Value) = .empty,
+    error_value: ?Value = null,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    thread: *Thread
-    args: []const Value
-    user_data: ?*anyopaque
-    returns: std.ArrayList(Value) = .empty
-    error_value: ?Value = null
-```
-
 
 ### Nested Declarations
 
@@ -375,22 +350,17 @@ References: [`CClosureResumeContext`](#type-cclosureresumecontext), [`Value`](#t
 ## ApiCallbackContext
 
 ```zig
-pub const ApiCallbackContext = struct { ... };
+pub const ApiCallbackContext = struct {
+    state: *State,
+    thread: *Thread,
+    op: bytecode.Call,
+    callback_id: usize,
+    user_data: ?*anyopaque,
+    function_name: []const u8 = "host callback",
+    returns: std.ArrayList(Value) = .empty,
+    error_value: ?Value = null,
+};
 ```
-
-### Fields
-
-```zig
-    state: *State
-    thread: *Thread
-    op: bytecode.Call
-    callback_id: usize
-    user_data: ?*anyopaque
-    function_name: []const u8 = "host callback"
-    returns: std.ArrayList(Value) = .empty
-    error_value: ?Value = null
-```
-
 
 ### Nested Declarations
 
@@ -499,17 +469,12 @@ References: [`ApiCallbackContext`](#type-apicallbackcontext), [`Value`](#type-va
 ## RuntimeErrorPayload
 
 ```zig
-pub const RuntimeErrorPayload = union(enum) { ... };
+pub const RuntimeErrorPayload = union(enum) {
+    diagnostic: []const u8,
+    argument: errors.ArgumentError,
+    lua_value: Value,
+};
 ```
-
-### Fields
-
-```zig
-    diagnostic: []const u8
-    argument: errors.ArgumentError
-    lua_value: Value
-```
-
 
 ### Nested Declarations
 
@@ -530,21 +495,16 @@ References: [`RuntimeErrorPayload`](#type-runtimeerrorpayload), [`Value`](#type-
 ## ProtectedCallContext
 
 ```zig
-pub const ProtectedCallContext = struct { ... };
+pub const ProtectedCallContext = struct {
+    frame_count: usize,
+    relative_base: bytecode.Register,
+    absolute_base: usize,
+    stack_len: usize,
+    last_result_base: usize,
+    last_result_count: usize,
+    last_error: ?RuntimeErrorPayload,
+};
 ```
-
-### Fields
-
-```zig
-    frame_count: usize
-    relative_base: bytecode.Register
-    absolute_base: usize
-    stack_len: usize
-    last_result_base: usize
-    last_result_count: usize
-    last_error: ?RuntimeErrorPayload
-```
-
 
 <a id="type-protectedcontinuationkind"></a>
 
@@ -559,209 +519,149 @@ pub const ProtectedContinuationKind = enum { ... };
 ## ProtectedContinuation
 
 ```zig
-pub const ProtectedContinuation = struct { ... };
+pub const ProtectedContinuation = struct {
+    context: ProtectedCallContext,
+    base: bytecode.Register,
+    return_count: u16,
+    kind: ProtectedContinuationKind,
+    handler: Value = .nil,
+    handler_depth: usize = 0,
+};
 ```
-
-### Fields
-
-```zig
-    context: ProtectedCallContext
-    base: bytecode.Register
-    return_count: u16
-    kind: ProtectedContinuationKind
-    handler: Value = .nil
-    handler_depth: usize = 0
-```
-
 
 <a id="type-genericforcontinuation"></a>
 
 ## GenericForContinuation
 
 ```zig
-pub const GenericForContinuation = struct { ... };
+pub const GenericForContinuation = struct {
+    frame_count: usize,
+    op: bytecode.GenericFor,
+    jump_on_nil: bool,
+};
 ```
-
-### Fields
-
-```zig
-    frame_count: usize
-    op: bytecode.GenericFor
-    jump_on_nil: bool
-```
-
 
 <a id="type-branchcontinuation"></a>
 
 ## BranchContinuation
 
 ```zig
-pub const BranchContinuation = struct { ... };
+pub const BranchContinuation = struct {
+    jump_if_truthy: bool,
+    offset: bytecode.JumpOffset,
+};
 ```
-
-### Fields
-
-```zig
-    jump_if_truthy: bool
-    offset: bytecode.JumpOffset
-```
-
 
 <a id="type-tailcallcontinuation"></a>
 
 ## TailCallContinuation
 
 ```zig
-pub const TailCallContinuation = struct { ... };
+pub const TailCallContinuation = struct {
+    frame_count: usize,
+    base: bytecode.Register,
+    return_count: u16,
+};
 ```
-
-### Fields
-
-```zig
-    frame_count: usize
-    base: bytecode.Register
-    return_count: u16
-```
-
 
 <a id="type-callonecontinuationresult"></a>
 
 ## CallOneContinuationResult
 
 ```zig
-pub const CallOneContinuationResult = union(enum) { ... };
+pub const CallOneContinuationResult = union(enum) {
+    value: usize,
+    truthy: usize,
+    inverted_truthy: usize,
+    branch_truthy: BranchContinuation,
+    branch_inverted_truthy: BranchContinuation,
+};
 ```
-
-### Fields
-
-```zig
-    value: usize
-    truthy: usize
-    inverted_truthy: usize
-    branch_truthy: BranchContinuation
-    branch_inverted_truthy: BranchContinuation
-```
-
 
 <a id="type-callonecontinuation"></a>
 
 ## CallOneContinuation
 
 ```zig
-pub const CallOneContinuation = struct { ... };
+pub const CallOneContinuation = struct {
+    frame_count: usize,
+    result: CallOneContinuationResult,
+};
 ```
-
-### Fields
-
-```zig
-    frame_count: usize
-    result: CallOneContinuationResult
-```
-
 
 <a id="type-coroutineresumeresult"></a>
 
 ## CoroutineResumeResult
 
 ```zig
-pub const CoroutineResumeResult = union(enum) { ... };
+pub const CoroutineResumeResult = union(enum) {
+    success: []Value,
+    failure: Value,
+};
 ```
-
-### Fields
-
-```zig
-    success: []Value
-    failure: Value
-```
-
 
 <a id="type-closure"></a>
 
 ## Closure
 
 ```zig
-pub const Closure = struct { ... };
+pub const Closure = struct {
+    proto: *const proto_mod.Proto,
+    upvalues: []*Upvalue,
+    constants: ?[]?Value = null,
+    stripped_debug: bool = false,
+    marked: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    proto: *const proto_mod.Proto
-    upvalues: []*Upvalue
-    constants: ?[]?Value = null
-    stripped_debug: bool = false
-    marked: bool = false
-```
-
 
 <a id="type-cclosure"></a>
 
 ## CClosure
 
 ```zig
-pub const CClosure = struct { ... };
+pub const CClosure = struct {
+    function_id: usize,
+    upvalues: []*CUpvalue,
+    marked: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    function_id: usize
-    upvalues: []*CUpvalue
-    marked: bool = false
-```
-
 
 <a id="type-cupvalue"></a>
 
 ## CUpvalue
 
 ```zig
-pub const CUpvalue = struct { ... };
+pub const CUpvalue = struct {
+    value: Value = .nil,
+    marked: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    value: Value = .nil
-    marked: bool = false
-```
-
 
 <a id="type-upvalue"></a>
 
 ## Upvalue
 
 ```zig
-pub const Upvalue = struct { ... };
+pub const Upvalue = struct {
+    owner: *Thread,
+    stack_index: usize,
+    closed: Value = .nil,
+    is_open: bool = true,
+    next: ?*Upvalue = null,
+    marked: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    owner: *Thread
-    stack_index: usize
-    closed: Value = .nil
-    is_open: bool = true
-    next: ?*Upvalue = null
-    marked: bool = false
-```
-
 
 <a id="type-tableentry"></a>
 
 ## TableEntry
 
 ```zig
-pub const TableEntry = struct { ... };
+pub const TableEntry = struct {
+    key: Value,
+    value: Value,
+};
 ```
-
-### Fields
-
-```zig
-    key: Value
-    value: Value
-```
-
 
 <a id="const-tableentryindex"></a>
 
@@ -778,23 +678,18 @@ References: [`Value`](#type-value)
 ## Table
 
 ```zig
-pub const Table = struct { ... };
+pub const Table = struct {
+    array: std.ArrayList(Value) = .empty,
+    entries: std.ArrayList(TableEntry) = .empty,
+    entry_index: TableEntryIndex,
+    metatable: ?*Table = null,
+    metatable_prev: ?*Table = null,
+    metatable_next: ?*Table = null,
+    counts_for_gc_count: bool = true,
+    marked: bool = false,
+    finalized: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    array: std.ArrayList(Value) = .empty
-    entries: std.ArrayList(TableEntry) = .empty
-    entry_index: TableEntryIndex
-    metatable: ?*Table = null
-    metatable_prev: ?*Table = null
-    metatable_next: ?*Table = null
-    counts_for_gc_count: bool = true
-    marked: bool = false
-    finalized: bool = false
-```
-
 
 ### Nested Declarations
 
@@ -903,83 +798,73 @@ References: [`Table`](#type-table)
 ## Userdata
 
 ```zig
-pub const Userdata = struct { ... };
+pub const Userdata = struct {
+    ptr: *anyopaque,
+    type_id: usize,
+    type_name: []const u8,
+    metatable: ?*Table = null,
+    finalizer: ?UserdataFinalizer = null,
+    finalizer_data: ?*const anyopaque = null,
+    deinit_fn: ?UserdataDeinit = null,
+    marked: bool = false,
+    finalized: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    ptr: *anyopaque
-    type_id: usize
-    type_name: []const u8
-    metatable: ?*Table = null
-    finalizer: ?UserdataFinalizer = null
-    finalizer_data: ?*const anyopaque = null
-    deinit_fn: ?UserdataDeinit = null
-    marked: bool = false
-    finalized: bool = false
-```
-
 
 <a id="type-thread"></a>
 
 ## Thread
 
 ```zig
-pub const Thread = struct { ... };
+pub const Thread = struct {
+    stack: std.ArrayList(Value) = .empty,
+    frames: std.ArrayList(CallFrame) = .empty,
+    yield_values: std.ArrayList(Value) = .empty,
+    protected_continuations: std.ArrayList(ProtectedContinuation) = .empty,
+    generic_for_continuations: std.ArrayList(GenericForContinuation) = .empty,
+    tail_call_continuations: std.ArrayList(TailCallContinuation) = .empty,
+    call_one_continuations: std.ArrayList(CallOneContinuation) = .empty,
+    open_upvalues: ?*Upvalue = null,
+    hook: Value = .nil,
+    hook_call: bool = false,
+    hook_line: bool = false,
+    hook_return: bool = false,
+    hook_count: u32 = 0,
+    hook_count_remaining: u32 = 0,
+    hook_running: bool = false,
+    hook_return_name: ?[]const u8 = null,
+    hook_level2_func: Value = .nil,
+    hook_transfer_index_base: i64 = 0,
+    hook_transfer_stack_base: usize = 0,
+    hook_transfer_count: usize = 0,
+    hook_transfer_values: []const Value = &.{},
+    next_call_name: ?[]const u8 = null,
+    next_call_namewhat: ?[]const u8 = null,
+    pending_yield_hook_return: bool = false,
+    last_result_base: usize = 0,
+    last_result_count: usize = 0,
+    last_transfer_base: usize = 0,
+    last_transfer_count: usize = 0,
+    yield_result_base: usize = 0,
+    yield_result_count: u16 = 0,
+    native_call_depth: usize = 0,
+    traceback_native_name: ?[]const u8 = null,
+    protected_close_depth: usize = 0,
+    close_error_value: ?Value = null,
+    error_traceback: ?[]const u8 = null,
+    pending_unwind_error: ?Value = null,
+    pending_unwind_resume_frame_count: usize = 0,
+    pending_unwind_target_frame_count: usize = 0,
+    pending_c_continuation: bool = false,
+    resume_parent: ?*Thread = null,
+    entry: Value = .nil,
+    marked: bool = false,
+    started: bool = false,
+    is_main: bool = false,
+    closing: bool = false,
+    status: ThreadStatus = .suspended,
+};
 ```
-
-### Fields
-
-```zig
-    stack: std.ArrayList(Value) = .empty
-    frames: std.ArrayList(CallFrame) = .empty
-    yield_values: std.ArrayList(Value) = .empty
-    protected_continuations: std.ArrayList(ProtectedContinuation) = .empty
-    generic_for_continuations: std.ArrayList(GenericForContinuation) = .empty
-    tail_call_continuations: std.ArrayList(TailCallContinuation) = .empty
-    call_one_continuations: std.ArrayList(CallOneContinuation) = .empty
-    open_upvalues: ?*Upvalue = null
-    hook: Value = .nil
-    hook_call: bool = false
-    hook_line: bool = false
-    hook_return: bool = false
-    hook_count: u32 = 0
-    hook_count_remaining: u32 = 0
-    hook_running: bool = false
-    hook_return_name: ?[]const u8 = null
-    hook_level2_func: Value = .nil
-    hook_transfer_index_base: i64 = 0
-    hook_transfer_stack_base: usize = 0
-    hook_transfer_count: usize = 0
-    hook_transfer_values: []const Value = &.{}
-    next_call_name: ?[]const u8 = null
-    next_call_namewhat: ?[]const u8 = null
-    pending_yield_hook_return: bool = false
-    last_result_base: usize = 0
-    last_result_count: usize = 0
-    last_transfer_base: usize = 0
-    last_transfer_count: usize = 0
-    yield_result_base: usize = 0
-    yield_result_count: u16 = 0
-    native_call_depth: usize = 0
-    traceback_native_name: ?[]const u8 = null
-    protected_close_depth: usize = 0
-    close_error_value: ?Value = null
-    error_traceback: ?[]const u8 = null
-    pending_unwind_error: ?Value = null
-    pending_unwind_resume_frame_count: usize = 0
-    pending_unwind_target_frame_count: usize = 0
-    pending_c_continuation: bool = false
-    resume_parent: ?*Thread = null
-    entry: Value = .nil
-    marked: bool = false
-    started: bool = false
-    is_main: bool = false
-    closing: bool = false
-    status: ThreadStatus = .suspended
-```
-
 
 ### Nested Declarations
 
@@ -1041,28 +926,23 @@ pub const ThreadStatus = enum { ... };
 ## CallFrame
 
 ```zig
-pub const CallFrame = struct { ... };
+pub const CallFrame = struct {
+    closure: *Closure,
+    proto: *const proto_mod.Proto,
+    base: usize,
+    pc: usize,
+    return_start: usize,
+    return_count: u16,
+    varargs: []const Value,
+    owns_varargs: bool = false,
+    vararg_table_local: Value = .nil,
+    last_hook_line: ?usize = null,
+    debug_name_override: ?[]const u8 = null,
+    debug_namewhat_override: ?[]const u8 = null,
+    is_tail_call: bool = false,
+    pending_returns: ?[]Value = null,
+};
 ```
-
-### Fields
-
-```zig
-    closure: *Closure
-    proto: *const proto_mod.Proto
-    base: usize
-    pc: usize
-    return_start: usize
-    return_count: u16
-    varargs: []const Value
-    owns_varargs: bool = false
-    vararg_table_local: Value = .nil
-    last_hook_line: ?usize = null
-    debug_name_override: ?[]const u8 = null
-    debug_namewhat_override: ?[]const u8 = null
-    is_tail_call: bool = false
-    pending_returns: ?[]Value = null
-```
-
 
 ### Nested Declarations
 
@@ -1083,16 +963,11 @@ References: [`CallFrame`](#type-callframe)
 ## StringAllocation
 
 ```zig
-pub const StringAllocation = struct { ... };
+pub const StringAllocation = struct {
+    bytes: []const u8,
+    marked: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    bytes: []const u8
-    marked: bool = false
-```
-
 
 <a id="const-pointerallocationindex"></a>
 
@@ -1137,20 +1012,15 @@ pub const GcParam = enum { ... };
 ## GcParams
 
 ```zig
-pub const GcParams = struct { ... };
+pub const GcParams = struct {
+    minormul: i64 = 20,
+    majorminor: i64 = 50,
+    minormajor: i64 = 70,
+    pause: i64 = 250,
+    stepmul: i64 = 200,
+    stepsize: i64 = 200,
+};
 ```
-
-### Fields
-
-```zig
-    minormul: i64 = 20
-    majorminor: i64 = 50
-    minormajor: i64 = 70
-    pause: i64 = 250
-    stepmul: i64 = 200
-    stepsize: i64 = 200
-```
-
 
 ### Nested Declarations
 
@@ -1182,36 +1052,26 @@ References: [`GcParams`](#type-gcparams), [`GcParam`](#type-gcparam)
 ## WeakMode
 
 ```zig
-pub const WeakMode = struct { ... };
+pub const WeakMode = struct {
+    keys: bool = false,
+    values: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    keys: bool = false
-    values: bool = false
-```
-
 
 <a id="type-runtimeallocationstats"></a>
 
 ## RuntimeAllocationStats
 
 ```zig
-pub const RuntimeAllocationStats = struct { ... };
+pub const RuntimeAllocationStats = struct {
+    strings: usize,
+    tables: usize,
+    closures: usize,
+    upvalues: usize,
+    threads: usize,
+    bytes: usize,
+};
 ```
-
-### Fields
-
-```zig
-    strings: usize
-    tables: usize
-    closures: usize
-    upvalues: usize
-    threads: usize
-    bytes: usize
-```
-
 
 ### Nested Declarations
 
