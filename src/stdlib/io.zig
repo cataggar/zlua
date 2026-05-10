@@ -97,6 +97,7 @@ pub fn lines(state: *State, thread: *Thread, op: bytecode.Call) !void {
 
 pub fn tmpfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const path = try tmpPath(state);
+    defer state.allocator.free(path);
     const parsed = parseMode("w+").?;
     try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, "w+", "", parsed)});
 }

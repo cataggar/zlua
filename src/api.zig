@@ -2030,18 +2030,38 @@ test "api full stdlib still denies ambient host access by default" {
         \\assert(os.getenv('ZLUA_API_ENV') == nil)
         \\local ok, err = pcall(os.execute, 'true')
         \\assert(ok == false and tostring(err):find('process access disabled'))
+        \\local ok_time, time_err = pcall(os.time)
+        \\assert(ok_time == false and tostring(time_err):find('clock access disabled'))
+        \\local ok_date, date_err = pcall(os.date)
+        \\assert(ok_date == false and tostring(date_err):find('clock access disabled'))
         \\local file = io.open('missing.lua', 'r')
         \\assert(file == nil)
+        \\local ok_write, write_err = pcall(io.open, 'blocked.lua', 'w')
+        \\assert(ok_write == false and tostring(write_err):find('filesystem write access disabled'))
+        \\local ok_append, append_err = pcall(io.open, 'blocked.lua', 'a')
+        \\assert(ok_append == false and tostring(append_err):find('filesystem write access disabled'))
+        \\local ok_input, input_err = pcall(io.input, 'missing.lua')
+        \\assert(ok_input == false and tostring(input_err):find('cannot open file'))
+        \\local tmp = assert(io.tmpfile())
+        \\local ok_tmp_close, tmp_close_err = pcall(function() return tmp:close() end)
+        \\assert(ok_tmp_close == false and tostring(tmp_close_err):find('filesystem write access disabled'))
         \\local loaded, load_err = loadfile('missing.lua')
         \\assert(loaded == nil and load_err == 'cannot open file')
         \\local ok_file, file_err = pcall(dofile, 'missing.lua')
         \\assert(ok_file == false and tostring(file_err):find('filesystem access disabled'))
         \\local ok_require, require_err = pcall(require, 'missing')
         \\assert(ok_require == false and tostring(require_err):find("module 'missing' not found"))
+        \\package.path = '/tmp/?.lua;../?.lua'
+        \\local ok_escape_require, escape_require_err = pcall(require, 'missing')
+        \\assert(ok_escape_require == false and tostring(escape_require_err):find("module 'missing' not found"))
         \\local found, search_err = package.searchpath('missing', '?.lua')
         \\assert(found == nil and tostring(search_err):find("missing.lua"))
         \\local ok_lines, lines_err = pcall(io.lines, 'missing.lua')
         \\assert(ok_lines == false and tostring(lines_err):find('cannot open file'))
+        \\local removed, remove_err = os.remove('missing.lua')
+        \\assert(removed == nil and tostring(remove_err):find('filesystem write access disabled'))
+        \\local renamed, rename_err = os.rename('missing.lua', 'other.lua')
+        \\assert(renamed == nil and tostring(rename_err):find('filesystem write access disabled'))
     , .{ .name = "=api-21.6-safe-host-access" });
 }
 
@@ -2172,6 +2192,21 @@ test "api memory filesystem rejects sandbox escape paths" {
     defer lua.deinit();
     try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("/tmp/plugin.lua", "return 1"));
     try std.testing.expectError(error.InvalidPath, lua.addMemoryFile("plugins/../secret.lua", "return 1"));
+
+    const files = [_]MemoryFile{
+        .{ .path = "plugins/safe.lua", .contents = "return true" },
+    };
+    var sandboxed = try State.init(std.testing.allocator, .{
+        .stdlib = .full,
+        .capabilities = .{ .filesystem = .{ .memory = &files } },
+    });
+    defer sandboxed.deinit();
+    try sandboxed.setPackagePath("../?.lua;/tmp/?.lua;plugins/?.lua");
+    try sandboxed.doString(
+        \\local ok, err = pcall(require, 'secret')
+        \\assert(ok == false and tostring(err):find("module 'secret' not found"))
+        \\assert(require('safe') == true)
+    , .{ .name = "=api-memory-require-sandbox-paths" });
 }
 
 test "api environment and fixed clock capabilities are explicit" {
