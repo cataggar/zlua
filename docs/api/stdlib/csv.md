@@ -1,10 +1,10 @@
-# stdlib.msgpack
+# stdlib.csv
 
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [stdlib.toml](../stdlib/toml.md)
-- Next: [stdlib.csv](../stdlib/csv.md)
+- Previous: [stdlib.msgpack](../stdlib/msgpack.md)
+- Next: [runtime.vm](../runtime/vm.md)
 - Parent: [stdlib](../stdlib.md)
 
 ## Functions

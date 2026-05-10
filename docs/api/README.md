@@ -47,6 +47,7 @@ Generated Markdown API documentation.
 - [stdlib.zerde_lua](stdlib/zerde_lua.md)
 - [stdlib.toml](stdlib/toml.md)
 - [stdlib.msgpack](stdlib/msgpack.md)
+- [stdlib.csv](stdlib/csv.md)
 - [runtime.vm](runtime/vm.md)
 - [runtime.tests](runtime/tests.md)
 - [runtime.internal](runtime/internal.md)

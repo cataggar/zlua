@@ -1,4 +1,5 @@
 const std = @import("std");
+const zerde = @import("zerde");
 const runtime = @import("../runtime.zig");
 
 const State = runtime.State;
@@ -204,7 +205,7 @@ pub fn LuaSource(comptime Encoder: type) type {
                     try self.visiting.put(table, {});
                     defer _ = self.visiting.remove(table);
 
-                    try self.encoder.beginStruct(void, field_count);
+                    try zerde.events.beginStruct(self.encoder, field_count);
                     for (table.entries.items) |entry| {
                         if (entry.value == .nil) continue;
                         const name = switch (entry.key) {

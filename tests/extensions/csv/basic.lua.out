@@ -1,0 +1,5 @@
+table	nil	nil
+2	Ada	37	true
+name,age,active
+Ada,37,true
+Bob,,false

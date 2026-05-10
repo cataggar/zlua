@@ -15,6 +15,7 @@ pub const os = @import("stdlib/os.zig");
 pub const json = @import("stdlib/json.zig");
 pub const toml = @import("stdlib/toml.zig");
 pub const msgpack = @import("stdlib/msgpack.zig");
+pub const csv = @import("stdlib/csv.zig");
 
 const bytecode = compile.bytecode;
 const State = runtime.State;
@@ -57,6 +58,7 @@ pub const LibrarySet = struct {
     json: bool = false,
     toml: bool = false,
     msgpack: bool = false,
+    csv: bool = false,
 
     pub fn safe() LibrarySet {
         return .{
@@ -69,6 +71,7 @@ pub const LibrarySet = struct {
             .json = true,
             .toml = true,
             .msgpack = true,
+            .csv = true,
         };
     }
 
@@ -82,7 +85,7 @@ pub const LibrarySet = struct {
     }
 
     pub fn isEmpty(self: LibrarySet) bool {
-        return !self.base and !self.table and !self.string and !self.math and !self.utf8 and !self.coroutine and !self.io and !self.os and !self.debug and !self.package and !self.json and !self.toml and !self.msgpack;
+        return !self.base and !self.table and !self.string and !self.math and !self.utf8 and !self.coroutine and !self.io and !self.os and !self.debug and !self.package and !self.json and !self.toml and !self.msgpack and !self.csv;
     }
 };
 
@@ -100,6 +103,7 @@ pub fn openLibraries(state: *State, selection: LibrarySelection) !void {
     if (libraries.json) try openJson(state);
     if (libraries.toml) try openToml(state);
     if (libraries.msgpack) try openMsgpack(state);
+    if (libraries.csv) try openCsv(state);
     if (libraries.package) try openPackage(state, libraries);
 }
 
@@ -320,6 +324,14 @@ fn openMsgpack(state: *State) !void {
     try state.globals.put(try state.intern("msgpack"), msgpack_lib);
 }
 
+fn openCsv(state: *State) !void {
+    const csv_lib = try state.newTableWithHints(0, 3);
+    try setField(state, csv_lib, "read", .{ .native = .csv_read });
+    try setField(state, csv_lib, "write", .{ .native = .csv_write });
+    try setField(state, csv_lib, "null", try csv.nullValue(state));
+    try state.globals.put(try state.intern("csv"), csv_lib);
+}
+
 fn openPackage(state: *State, libraries: LibrarySet) !void {
     try state.globals.put(try state.intern("loadfile"), .{ .native = .loadfile });
     try state.globals.put(try state.intern("dofile"), .{ .native = .dofile });
@@ -342,6 +354,7 @@ fn openPackage(state: *State, libraries: LibrarySet) !void {
     if (libraries.json) try setField(state, loaded, "json", state.getGlobal("json"));
     if (libraries.toml) try setField(state, loaded, "toml", state.getGlobal("toml"));
     if (libraries.msgpack) try setField(state, loaded, "msgpack", state.getGlobal("msgpack"));
+    if (libraries.csv) try setField(state, loaded, "csv", state.getGlobal("csv"));
     try setField(state, loaded, "package", package_lib);
     try setField(state, package_lib, "loaded", loaded);
     try setField(state, package_lib, "preload", preload);
@@ -497,6 +510,8 @@ pub fn callNative(state: *State, native: NativeFn, thread: *Thread, op: bytecode
         .toml_write => try toml.write(state, thread, op),
         .msgpack_read => try msgpack.read(state, thread, op),
         .msgpack_write => try msgpack.write(state, thread, op),
+        .csv_read => try csv.read(state, thread, op),
+        .csv_write => try csv.write(state, thread, op),
         .api_callback_dispatch => try state.callApiCallbackDispatch(thread, op),
     }
 }
@@ -515,4 +530,5 @@ test {
     _ = json;
     _ = toml;
     _ = msgpack;
+    _ = csv;
 }

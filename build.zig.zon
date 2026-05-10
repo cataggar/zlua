@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zerde = .{
-            .url = "git+https://codeberg.org/gron/zerde?ref=v0.2.1#78aa14cdf2468cc55993b7bf771f6d5c78ab8c79",
-            .hash = "zerde-0.2.1-r7zGa8SbCQDjPO0JlURRdswXd1W-xCzNK85YxovyVthn",
+            .url = "git+https://codeberg.org/gron/zerde?ref=v0.2.4#859eec1f391181edba83b9c745488365272daef2",
+            .hash = "zerde-0.2.4-r7zGa-VLCgCGlklcdkqLjD_vEpSK2FFVGyQiHQdH1l2o",
         },
     },
     .paths = .{
