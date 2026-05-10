@@ -306,6 +306,9 @@ pub fn markRoots(comptime State: type, self: *State) void {
     if (self.number_metatable) |metatable| if (isTrackedTable(State, self, metatable)) markTable(State, self, metatable);
     if (self.boolean_metatable) |metatable| if (isTrackedTable(State, self, metatable)) markTable(State, self, metatable);
     if (self.nil_metatable) |metatable| if (isTrackedTable(State, self, metatable)) markTable(State, self, metatable);
+    if (self.zerde_null) |table| if (isTrackedTable(State, self, table)) markTable(State, self, table);
+    if (self.zerde_array_metatable) |table| if (isTrackedTable(State, self, table)) markTable(State, self, table);
+    if (self.zerde_object_metatable) |table| if (isTrackedTable(State, self, table)) markTable(State, self, table);
 }
 
 pub fn markValue(comptime State: type, self: *State, value: Value) void {

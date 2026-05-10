@@ -6,6 +6,7 @@ Use this index to jump to the document that owns each topic.
 | --- | --- |
 | [Architecture](architecture.md) | Source layout, execution pipeline, runtime model, embedding boundary, and C API layer. |
 | [zlua API](api/README.md) | Generated API docs from the Zig sources of zlua. |
+| [Lua Standard Library and Extensions](stdlib.md) | Lua-visible standard libraries, selection modes, host-facing behavior, and zlua extensions. |
 | [Commands](commands.md) | `just` recipes, `zig build` steps, zlua CLI options, and harness arguments. |
 | [Development](development.md) | Project shape, commands, source conventions, and local workflow. |
 | [Testing](testing.md) | Unit tests, CLua differential fixtures, official Lua 5.5 dashboard, C API fixtures, and CI policy. |

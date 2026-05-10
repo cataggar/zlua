@@ -3,7 +3,7 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [testing.normalizer](../testing/normalizer.md)
+- Previous: [testing.extension_runner](../testing/extension_runner.md)
 - Parent: [testing](../testing.md)
 
 ## Functions

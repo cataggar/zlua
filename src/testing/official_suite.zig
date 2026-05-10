@@ -250,7 +250,9 @@ fn runOfficialFile(
     defer argv.deinit(allocator);
     try argv.append(allocator, exe);
     if (runner == .zlua and options.debug_errors) try argv.append(allocator, "--debug-errors");
-    try argv.appendSlice(allocator, &.{ "-e", prelude, std.fs.path.basename(file) });
+    const script_arg = try std.fmt.allocPrint(allocator, "./{s}", .{std.fs.path.basename(file)});
+    defer allocator.free(script_arg);
+    try argv.appendSlice(allocator, &.{ "-e", prelude, script_arg });
     return process.runProcess(allocator, io, argv.items, .{
         .cwd = options.suite_path,
         .timeout_ms = options.timeout_ms,

@@ -322,92 +322,85 @@ pub const GcParam = types.GcParam;
 ## StateOptions
 
 ```zig
-pub const StateOptions = struct { ... };
+pub const StateOptions = struct {
+    stdlib: StdlibMode = .full,
+    io: ?std.Io = null,
+    stdout: ?*std.Io.Writer = null,
+    stderr: ?*std.Io.Writer = null,
+    filesystem: FilesystemCapability = .disabled,
+    environment: ?*const std.process.Environ.Map = null,
+    clock: ClockCapability = .system,
+    process: ProcessCapability = .disabled,
+    stdin: []const u8 = "",
+    max_memory: ?usize = null,
+    max_stack_values: ?usize = null,
+    max_call_frames: ?usize = null,
+    max_instructions: ?u64 = null,
+    debug_errors: bool = false,
+    trace_vm: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    stdlib: StdlibMode = .full
-    io: ?std.Io = null
-    stdout: ?*std.Io.Writer = null
-    stderr: ?*std.Io.Writer = null
-    filesystem: FilesystemCapability = .disabled
-    environment: ?*const std.process.Environ.Map = null
-    clock: ClockCapability = .system
-    process: ProcessCapability = .disabled
-    stdin: []const u8 = ""
-    max_memory: ?usize = null
-    max_stack_values: ?usize = null
-    max_call_frames: ?usize = null
-    max_instructions: ?u64 = null
-    debug_errors: bool = false
-    trace_vm: bool = false
-```
-
 
 <a id="type-state"></a>
 
 ## State
 
 ```zig
-pub const State = struct { ... };
+pub const State = struct {
+    allocator: std.mem.Allocator,
+    globals: std.StringHashMap(Value),
+    global_table: ?*Table = null,
+    strings: std.StringHashMap([]const u8),
+    string_allocations: std.ArrayList(StringAllocation) = .empty,
+    string_allocation_index: PointerAllocationIndex,
+    table_allocations: std.ArrayList(*Table) = .empty,
+    table_allocation_index: PointerAllocationIndex,
+    table_metatable_head: ?*Table = null,
+    table_metatable_count: usize = 0,
+    userdata_allocations: std.ArrayList(*Userdata) = .empty,
+    closure_allocations: std.ArrayList(*Closure) = .empty,
+    c_closure_allocations: std.ArrayList(*CClosure) = .empty,
+    upvalue_allocations: std.ArrayList(*Upvalue) = .empty,
+    c_upvalue_allocations: std.ArrayList(*CUpvalue) = .empty,
+    thread_allocations: std.ArrayList(*Thread) = .empty,
+    proto_allocations: std.ArrayList(*proto_mod.Proto) = .empty,
+    source_allocations: std.ArrayList([]const u8) = .empty,
+    api_roots: std.ArrayList(Value) = .empty,
+    stdout: std.ArrayList(u8) = .empty,
+    stderr: std.ArrayList(u8) = .empty,
+    options: StateOptions,
+    stdin_pos: usize = 0,
+    last_error: ?RuntimeErrorPayload = null,
+    last_error_in_close: bool = false,
+    traceback_error_in_close: bool = false,
+    current_thread: ?*Thread = null,
+    api_callback_dispatch: ?ApiCallbackDispatchFn = null,
+    api_callback_user_data: ?*anyopaque = null,
+    c_closure_dispatch: ?CClosureDispatchFn = null,
+    c_closure_resume_dispatch: ?CClosureResumeDispatchFn = null,
+    c_debug_hook_dispatch: ?CDebugHookDispatchFn = null,
+    c_closure_user_data: ?*anyopaque = null,
+    coroutine_close_depth: usize = 0,
+    string_metatable: ?*Table = null,
+    number_metatable: ?*Table = null,
+    boolean_metatable: ?*Table = null,
+    nil_metatable: ?*Table = null,
+    zerde_null: ?*Table = null,
+    zerde_array_metatable: ?*Table = null,
+    zerde_object_metatable: ?*Table = null,
+    is_collecting: bool = false,
+    collect_after_instruction: bool = false,
+    gc_running: bool = true,
+    gc_mode: GcMode = .generational,
+    gc_params: GcParams = .{},
+    gc_next_total: usize = 0,
+    gc_known_total: usize = 0,
+    mark_all_stack_registers: bool = false,
+    conservative_gc_depth: usize = 0,
+    random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 },
+    instruction_count: u64 = 0,
+};
 ```
-
-### Fields
-
-```zig
-    allocator: std.mem.Allocator
-    globals: std.StringHashMap(Value)
-    global_table: ?*Table = null
-    strings: std.StringHashMap([]const u8)
-    string_allocations: std.ArrayList(StringAllocation) = .empty
-    string_allocation_index: PointerAllocationIndex
-    table_allocations: std.ArrayList(*Table) = .empty
-    table_allocation_index: PointerAllocationIndex
-    table_metatable_head: ?*Table = null
-    table_metatable_count: usize = 0
-    userdata_allocations: std.ArrayList(*Userdata) = .empty
-    closure_allocations: std.ArrayList(*Closure) = .empty
-    c_closure_allocations: std.ArrayList(*CClosure) = .empty
-    upvalue_allocations: std.ArrayList(*Upvalue) = .empty
-    c_upvalue_allocations: std.ArrayList(*CUpvalue) = .empty
-    thread_allocations: std.ArrayList(*Thread) = .empty
-    proto_allocations: std.ArrayList(*proto_mod.Proto) = .empty
-    source_allocations: std.ArrayList([]const u8) = .empty
-    api_roots: std.ArrayList(Value) = .empty
-    stdout: std.ArrayList(u8) = .empty
-    stderr: std.ArrayList(u8) = .empty
-    options: StateOptions
-    stdin_pos: usize = 0
-    last_error: ?RuntimeErrorPayload = null
-    last_error_in_close: bool = false
-    traceback_error_in_close: bool = false
-    current_thread: ?*Thread = null
-    api_callback_dispatch: ?ApiCallbackDispatchFn = null
-    api_callback_user_data: ?*anyopaque = null
-    c_closure_dispatch: ?CClosureDispatchFn = null
-    c_closure_resume_dispatch: ?CClosureResumeDispatchFn = null
-    c_debug_hook_dispatch: ?CDebugHookDispatchFn = null
-    c_closure_user_data: ?*anyopaque = null
-    coroutine_close_depth: usize = 0
-    string_metatable: ?*Table = null
-    number_metatable: ?*Table = null
-    boolean_metatable: ?*Table = null
-    nil_metatable: ?*Table = null
-    is_collecting: bool = false
-    collect_after_instruction: bool = false
-    gc_running: bool = true
-    gc_mode: GcMode = .generational
-    gc_params: GcParams = .{}
-    gc_next_total: usize = 0
-    gc_known_total: usize = 0
-    mark_all_stack_registers: bool = false
-    conservative_gc_depth: usize = 0
-    random_state: [4]u64 = .{ 0x123456789abcdef0, 0xff, 0xfedcba9876543210, 0 }
-    instruction_count: u64 = 0
-```
-
 
 ### Nested Declarations
 
@@ -2906,7 +2899,7 @@ References: [`State`](#type-state), [`Value`](#alias-value)
 ## CompareOp
 
 ```zig
-pub const CompareOp = enum { ... };
+pub const CompareOp = enum {};
 ```
 
 <a id="fn-valuesequal"></a>

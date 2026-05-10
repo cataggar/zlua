@@ -20,34 +20,24 @@
 ## MemoryFile
 
 ```zig
-pub const MemoryFile = struct { ... };
+pub const MemoryFile = struct {
+    path: []const u8,
+    contents: []const u8,
+};
 ```
-
-### Fields
-
-```zig
-    path: []const u8
-    contents: []const u8
-```
-
 
 <a id="type-memoryfilesystem"></a>
 
 ## MemoryFilesystem
 
 ```zig
-pub const MemoryFilesystem = struct { ... };
+pub const MemoryFilesystem = struct {
+    allocator: std.mem.Allocator,
+    files: std.ArrayList(MemoryFile) = .empty,
+    options: Options = .{},
+    bytes_used: usize = 0,
+};
 ```
-
-### Fields
-
-```zig
-    allocator: std.mem.Allocator
-    files: std.ArrayList(MemoryFile) = .empty
-    options: Options = .{}
-    bytes_used: usize = 0
-```
-
 
 ### Nested Declarations
 
@@ -77,16 +67,11 @@ pub const default_max_path_len: usize = 4096;
 ### MemoryFilesystem.Options
 
 ```zig
-pub const Options = struct { ... };
+pub const Options = struct {
+    max_path_len: usize = default_max_path_len,
+    max_bytes: ?usize = null,
+};
 ```
-
-#### Fields
-
-```zig
-    max_path_len: usize = default_max_path_len
-    max_bytes: ?usize = null
-```
-
 
 <a id="fn-memoryfilesystem-init"></a>
 
@@ -191,37 +176,27 @@ pub fn normalizePathAlloc(allocator: std.mem.Allocator, path: []const u8, max_pa
 ## FilesystemCapability
 
 ```zig
-pub const FilesystemCapability = union(enum) { ... };
+pub const FilesystemCapability = union(enum) {
+    memory: []const MemoryFile,
+    memory_rw: *MemoryFilesystem,
+};
 ```
-
-### Fields
-
-```zig
-    memory: []const MemoryFile
-    memory_rw: *MemoryFilesystem
-```
-
 
 <a id="type-clockcapability"></a>
 
 ## ClockCapability
 
 ```zig
-pub const ClockCapability = union(enum) { ... };
+pub const ClockCapability = union(enum) {
+    fixed: i64,
+};
 ```
-
-### Fields
-
-```zig
-    fixed: i64
-```
-
 
 <a id="type-processcapability"></a>
 
 ## ProcessCapability
 
 ```zig
-pub const ProcessCapability = enum { ... };
+pub const ProcessCapability = enum {};
 ```
 

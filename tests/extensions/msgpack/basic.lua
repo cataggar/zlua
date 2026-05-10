@@ -1,0 +1,14 @@
+print(type(msgpack), type(import), type(package))
+
+local value = msgpack.read(string.char(
+    0x84,
+    0xa4, 0x6e, 0x61, 0x6d, 0x65, 0xa3, 0x41, 0x64, 0x61,
+    0xa4, 0x6e, 0x75, 0x6d, 0x73, 0x93, 0x01, 0x02, 0xc0,
+    0xa2, 0x6f, 0x6b, 0xc3,
+    0xa3, 0x62, 0x69, 0x6e, 0xc4, 0x03, 0x00, 0xff, 0x41
+))
+
+print(value.name, value.ok, value.nums[3] == msgpack.null)
+print(#value.bin, string.byte(value.bin, 1), string.byte(value.bin, 2), string.byte(value.bin, 3))
+print(string.byte(msgpack.write(nil)), string.byte(msgpack.write(true)), string.byte(msgpack.write(false)))
+print(string.byte(msgpack.write(value.bin), 1, 5))

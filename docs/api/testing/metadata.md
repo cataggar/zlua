@@ -24,7 +24,7 @@
 ## Expect
 
 ```zig
-pub const Expect = enum { ... };
+pub const Expect = enum {};
 ```
 
 <a id="type-stage"></a>
@@ -32,7 +32,7 @@ pub const Expect = enum { ... };
 ## Stage
 
 ```zig
-pub const Stage = enum { ... };
+pub const Stage = enum {};
 ```
 
 <a id="type-normalize"></a>
@@ -40,7 +40,7 @@ pub const Stage = enum { ... };
 ## Normalize
 
 ```zig
-pub const Normalize = enum { ... };
+pub const Normalize = enum {};
 ```
 
 <a id="type-metadata"></a>
@@ -48,20 +48,15 @@ pub const Normalize = enum { ... };
 ## Metadata
 
 ```zig
-pub const Metadata = struct { ... };
+pub const Metadata = struct {
+    expect: Expect = .pass,
+    stage: Stage = .runtime,
+    feature: []const u8 = "uncategorized",
+    normalize: Normalize = .none,
+    reason: []const u8 = "",
+    issue: []const u8 = "",
+};
 ```
-
-### Fields
-
-```zig
-    expect: Expect = .pass
-    stage: Stage = .runtime
-    feature: []const u8 = "uncategorized"
-    normalize: Normalize = .none
-    reason: []const u8 = ""
-    issue: []const u8 = ""
-```
-
 
 <a id="fn-parse"></a>
 

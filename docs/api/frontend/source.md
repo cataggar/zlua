@@ -17,33 +17,23 @@
 ## Position
 
 ```zig
-pub const Position = struct { ... };
+pub const Position = struct {
+    offset: usize = 0,
+    line: usize = 1,
+    column: usize = 1,
+};
 ```
-
-### Fields
-
-```zig
-    offset: usize = 0
-    line: usize = 1
-    column: usize = 1
-```
-
 
 <a id="type-span"></a>
 
 ## Span
 
 ```zig
-pub const Span = struct { ... };
+pub const Span = struct {
+    start: Position,
+    end: Position,
+};
 ```
-
-### Fields
-
-```zig
-    start: Position
-    end: Position
-```
-
 
 ### Nested Declarations
 

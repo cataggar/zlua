@@ -5,7 +5,7 @@
 - [API Index](README.md)
 - Previous: [runtime.host](runtime/host.md)
 - Next: [stdlib.base](stdlib/base.md)
-- Submodules: [stdlib.base](stdlib/base.md), [stdlib.table](stdlib/table.md), [stdlib.string](stdlib/string.md), [stdlib.math](stdlib/math.md), [stdlib.utf8](stdlib/utf8.md), [stdlib.coroutine](stdlib/coroutine.md), [stdlib.debug](stdlib/debug.md), [stdlib.package](stdlib/package.md), [stdlib.io](stdlib/io.md), [stdlib.os](stdlib/os.md)
+- Submodules: [stdlib.base](stdlib/base.md), [stdlib.table](stdlib/table.md), [stdlib.string](stdlib/string.md), [stdlib.math](stdlib/math.md), [stdlib.utf8](stdlib/utf8.md), [stdlib.coroutine](stdlib/coroutine.md), [stdlib.debug](stdlib/debug.md), [stdlib.package](stdlib/package.md), [stdlib.io](stdlib/io.md), [stdlib.os](stdlib/os.md), [stdlib.json](stdlib/json.md), [stdlib.zerde_lua](stdlib/zerde_lua.md), [stdlib.toml](stdlib/toml.md), [stdlib.msgpack](stdlib/msgpack.md), [stdlib.csv](stdlib/csv.md)
 
 ## Functions
 
@@ -34,6 +34,10 @@
 - [package](#import-package) `@import("stdlib/package.zig")`
 - [io](#import-io) `@import("stdlib/io.zig")`
 - [os](#import-os) `@import("stdlib/os.zig")`
+- [json](#import-json) `@import("stdlib/json.zig")`
+- [toml](#import-toml) `@import("stdlib/toml.zig")`
+- [msgpack](#import-msgpack) `@import("stdlib/msgpack.zig")`
+- [csv](#import-csv) `@import("stdlib/csv.zig")`
 
 <a id="import-base"></a>
 
@@ -115,20 +119,47 @@ pub const io = @import("stdlib/io.zig");
 pub const os = @import("stdlib/os.zig");
 ```
 
+<a id="import-json"></a>
+
+## json
+
+```zig
+pub const json = @import("stdlib/json.zig");
+```
+
+<a id="import-toml"></a>
+
+## toml
+
+```zig
+pub const toml = @import("stdlib/toml.zig");
+```
+
+<a id="import-msgpack"></a>
+
+## msgpack
+
+```zig
+pub const msgpack = @import("stdlib/msgpack.zig");
+```
+
+<a id="import-csv"></a>
+
+## csv
+
+```zig
+pub const csv = @import("stdlib/csv.zig");
+```
+
 <a id="type-libraryselection"></a>
 
 ## LibrarySelection
 
 ```zig
-pub const LibrarySelection = union(enum) { ... };
+pub const LibrarySelection = union(enum) {
+    libraries: LibrarySet,
+};
 ```
-
-### Fields
-
-```zig
-    libraries: LibrarySet
-```
-
 
 ### Nested Declarations
 
@@ -160,24 +191,23 @@ References: [`LibrarySelection`](#type-libraryselection)
 ## LibrarySet
 
 ```zig
-pub const LibrarySet = struct { ... };
+pub const LibrarySet = struct {
+    base: bool = false,
+    table: bool = false,
+    string: bool = false,
+    math: bool = false,
+    utf8: bool = false,
+    coroutine: bool = false,
+    io: bool = false,
+    os: bool = false,
+    debug: bool = false,
+    package: bool = false,
+    json: bool = false,
+    toml: bool = false,
+    msgpack: bool = false,
+    csv: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    base: bool = false
-    table: bool = false
-    string: bool = false
-    math: bool = false
-    utf8: bool = false
-    coroutine: bool = false
-    io: bool = false
-    os: bool = false
-    debug: bool = false
-    package: bool = false
-```
-
 
 ### Nested Declarations
 

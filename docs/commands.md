@@ -140,7 +140,7 @@ The CLI initializes a full standard-library state with host filesystem, environm
 | `--` | Stop option parsing. The following argument is treated as the script path if present. |
 | `-` | Read the script from stdin. |
 
-`--stdlib` accepts the presets `none`, `base`, `safe`, and `full`. It also accepts a comma- or plus-separated library list using names from `base`, `table`, `string`, `math`, `utf8`, `coroutine`, `io`, `os`, `debug`, and `package`.
+`--stdlib` accepts the presets `none`, `base`, `safe`, and `full`. It also accepts a comma- or plus-separated library list using names from `base`, `table`, `string`, `math`, `utf8`, `coroutine`, `io`, `os`, `debug`, `package`, `json`, `toml`, and `msgpack`.
 
 Input handling:
 

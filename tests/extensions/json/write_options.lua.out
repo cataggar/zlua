@@ -1,0 +1,11 @@
+{"name":"Ada","nums":[1,2,3]}
+{
+  "a": 1,
+  "b": [
+    2
+  ]
+}
+false	true
+false	true
+false	true
+false	true

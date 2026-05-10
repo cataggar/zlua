@@ -21,7 +21,7 @@
 ## Tag
 
 ```zig
-pub const Tag = enum { ... };
+pub const Tag = enum {};
 ```
 
 <a id="type-token"></a>
@@ -29,17 +29,12 @@ pub const Tag = enum { ... };
 ## Token
 
 ```zig
-pub const Token = struct { ... };
+pub const Token = struct {
+    tag: Tag,
+    lexeme: []const u8,
+    span: source.Span,
+};
 ```
-
-### Fields
-
-```zig
-    tag: Tag
-    lexeme: []const u8
-    span: source.Span
-```
-
 
 <a id="fn-keywordtag"></a>
 

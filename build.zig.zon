@@ -1,9 +1,14 @@
 .{
     .name = .zlua,
-    .version = "0.1.1",
+    .version = "0.2.0",
     .fingerprint = 0xcf671dd1c69d54b,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zerde = .{
+            .url = "git+https://codeberg.org/gron/zerde?ref=v0.2.4#859eec1f391181edba83b9c745488365272daef2",
+            .hash = "zerde-0.2.4-r7zGa-VLCgCGlklcdkqLjD_vEpSK2FFVGyQiHQdH1l2o",
+        },
+    },
     .paths = .{
         "README.md",
         "LICENSE",

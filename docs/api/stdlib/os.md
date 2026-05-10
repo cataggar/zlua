@@ -4,7 +4,7 @@
 
 - [API Index](../README.md)
 - Previous: [stdlib.io](../stdlib/io.md)
-- Next: [runtime.vm](../runtime/vm.md)
+- Next: [stdlib.json](../stdlib/json.md)
 - Parent: [stdlib](../stdlib.md)
 
 ## Functions

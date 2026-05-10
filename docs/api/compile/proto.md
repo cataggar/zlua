@@ -23,58 +23,43 @@
 ## LineInfo
 
 ```zig
-pub const LineInfo = struct { ... };
+pub const LineInfo = struct {
+    line: usize,
+};
 ```
-
-### Fields
-
-```zig
-    line: usize
-```
-
 
 <a id="type-localdebug"></a>
 
 ## LocalDebug
 
 ```zig
-pub const LocalDebug = struct { ... };
+pub const LocalDebug = struct {
+    name: []const u8,
+    register: bytecode.Register,
+    start_pc: usize,
+    end_pc: usize = 0,
+    to_close: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    name: []const u8
-    register: bytecode.Register
-    start_pc: usize
-    end_pc: usize = 0
-    to_close: bool = false
-```
-
 
 <a id="type-upvaluedesc"></a>
 
 ## UpvalueDesc
 
 ```zig
-pub const UpvalueDesc = struct { ... };
+pub const UpvalueDesc = struct {
+    name: []const u8,
+    in_stack: bool,
+    index: u16,
+};
 ```
-
-### Fields
-
-```zig
-    name: []const u8
-    in_stack: bool
-    index: u16
-```
-
 
 <a id="type-errorop"></a>
 
 ## ErrorOp
 
 ```zig
-pub const ErrorOp = enum { ... };
+pub const ErrorOp = enum {};
 ```
 
 <a id="type-operandorigin"></a>
@@ -82,87 +67,67 @@ pub const ErrorOp = enum { ... };
 ## OperandOrigin
 
 ```zig
-pub const OperandOrigin = union(enum) { ... };
+pub const OperandOrigin = union(enum) {
+    local: []const u8,
+    upvalue: []const u8,
+    global: []const u8,
+    field: []const u8,
+    method: []const u8,
+    metamethod: []const u8,
+    constant: []const u8,
+};
 ```
-
-### Fields
-
-```zig
-    local: []const u8
-    upvalue: []const u8
-    global: []const u8
-    field: []const u8
-    method: []const u8
-    metamethod: []const u8
-    constant: []const u8
-```
-
 
 <a id="type-errorsite"></a>
 
 ## ErrorSite
 
 ```zig
-pub const ErrorSite = struct { ... };
+pub const ErrorSite = struct {
+    line: usize,
+    op: ErrorOp,
+    operands: []const OperandOrigin = &.{},
+    call_name: ?OperandOrigin = null,
+};
 ```
-
-### Fields
-
-```zig
-    line: usize
-    op: ErrorOp
-    operands: []const OperandOrigin = &.{}
-    call_name: ?OperandOrigin = null
-```
-
 
 <a id="type-errorsiteentry"></a>
 
 ## ErrorSiteEntry
 
 ```zig
-pub const ErrorSiteEntry = struct { ... };
+pub const ErrorSiteEntry = struct {
+    pc: usize,
+    site: ErrorSite,
+};
 ```
-
-### Fields
-
-```zig
-    pc: usize
-    site: ErrorSite
-```
-
 
 <a id="type-proto"></a>
 
 ## Proto
 
 ```zig
-pub const Proto = struct { ... };
+pub const Proto = struct {
+    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    constants: std.ArrayList(bytecode.Constant) = .empty,
+    instructions: std.ArrayList(bytecode.Instruction) = .empty,
+    line_info: std.ArrayList(LineInfo) = .empty,
+    locals: std.ArrayList(LocalDebug) = .empty,
+    upvalues: std.ArrayList(UpvalueDesc) = .empty,
+    error_sites: std.ArrayList(ErrorSiteEntry) = .empty,
+    children: std.ArrayList(*Proto) = .empty,
+    max_registers: u16 = 0,
+    param_count: u16 = 0,
+    is_vararg: bool = false,
+    named_vararg: bool = false,
+    source_name: []const u8 = "zlua",
+    debug_name: ?[]const u8 = null,
+    defined_line: usize = 0,
+    last_defined_line: usize = 0,
+    has_to_close_locals: bool = false,
+};
 ```
-
-### Fields
-
-```zig
-    allocator: std.mem.Allocator
-    arena: std.heap.ArenaAllocator
-    constants: std.ArrayList(bytecode.Constant) = .empty
-    instructions: std.ArrayList(bytecode.Instruction) = .empty
-    line_info: std.ArrayList(LineInfo) = .empty
-    locals: std.ArrayList(LocalDebug) = .empty
-    upvalues: std.ArrayList(UpvalueDesc) = .empty
-    error_sites: std.ArrayList(ErrorSiteEntry) = .empty
-    children: std.ArrayList(*Proto) = .empty
-    max_registers: u16 = 0
-    param_count: u16 = 0
-    is_vararg: bool = false
-    named_vararg: bool = false
-    source_name: []const u8 = "zlua"
-    debug_name: ?[]const u8 = null
-    defined_line: usize = 0
-    last_defined_line: usize = 0
-    has_to_close_locals: bool = false
-```
-
 
 ### Nested Declarations
 

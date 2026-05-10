@@ -3,7 +3,7 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [stdlib.os](../stdlib/os.md)
+- Previous: [stdlib.csv](../stdlib/csv.md)
 - Next: [runtime.tests](../runtime/tests.md)
 - Parent: [runtime](../runtime.md)
 

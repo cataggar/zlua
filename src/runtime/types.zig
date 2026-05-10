@@ -166,6 +166,14 @@ pub const NativeFn = enum {
     debug_setmetatable,
     debug_setuservalue,
     debug_getuservalue,
+    json_read,
+    json_write,
+    toml_read,
+    toml_write,
+    msgpack_read,
+    msgpack_write,
+    csv_read,
+    csv_write,
     api_callback_dispatch,
 
     pub fn name(self: NativeFn) []const u8 {
@@ -277,6 +285,14 @@ pub const NativeFn = enum {
             .debug_setmetatable => "debug.setmetatable",
             .debug_setuservalue => "debug.setuservalue",
             .debug_getuservalue => "debug.getuservalue",
+            .json_read => "json.read",
+            .json_write => "json.write",
+            .toml_read => "toml.read",
+            .toml_write => "toml.write",
+            .msgpack_read => "msgpack.read",
+            .msgpack_write => "msgpack.write",
+            .csv_read => "csv.read",
+            .csv_write => "csv.write",
             .api_callback_dispatch => "__zlua_api_callback",
         };
     }

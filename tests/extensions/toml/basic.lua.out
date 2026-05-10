@@ -1,0 +1,19 @@
+table	nil	nil
+Ada	true	2
+Grace	2026-05-09
+name = "Ada"
+ok = true
+nums = [1, 2, 3]
+name = "app"
+
+[database]
+host = "localhost"
+port = 5432
+
+[[servers]]
+host = "one"
+port = 1
+
+[[servers]]
+host = "two"
+port = 2

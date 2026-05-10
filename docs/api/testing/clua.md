@@ -22,16 +22,11 @@
 ## Discovery
 
 ```zig
-pub const Discovery = union(enum) { ... };
+pub const Discovery = union(enum) {
+    found: []u8,
+    missing: []u8,
+};
 ```
-
-### Fields
-
-```zig
-    found: []u8
-    missing: []u8
-```
-
 
 ### Nested Declarations
 

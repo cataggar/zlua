@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) void {
     const example_filters = b.args orelse &[_][]const u8{};
 
     const lua_deps_step = addFetchLuaStep(b);
+    const zerde_dep = b.dependency("zerde", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zerde_mod = zerde_dep.module("zerde");
 
     const clua_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
     const clua_exe = addClua(b, target, clua_optimize, lua_deps_step);
@@ -26,12 +31,19 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "zerde", .module = zerde_mod }},
     });
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const zerde_bench_dep = b.dependency("zerde", .{
+        .target = target,
+        .optimize = bench_optimize,
+    });
+    const zerde_bench_mod = zerde_bench_dep.module("zerde");
     const bench_mod = b.addModule("zlua-bench-release-fast", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = bench_optimize,
+        .imports = &.{.{ .name = "zerde", .module = zerde_bench_mod }},
     });
 
     const zlua_c_lib = b.addLibrary(.{
@@ -41,6 +53,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "zerde", .module = zerde_mod }},
         }),
     });
     zlua_c_lib.step.dependOn(lua_deps_step);
@@ -80,6 +93,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(diff_exe);
+
+    const extensions_exe = b.addExecutable(.{
+        .name = "zlua-test-extensions",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_extensions_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zlua", .module = mod }},
+        }),
+    });
+    b.installArtifact(extensions_exe);
 
     const official_exe = b.addExecutable(.{
         .name = "zlua-test-official",
@@ -164,6 +188,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_diff_cmd.addArgs(args);
     run_diff_step.dependOn(&run_diff_cmd.step);
 
+    const run_extensions_step = b.step("run-test-extensions", "Run zlua extension fixture harness");
+    const run_extensions_cmd = b.addRunArtifact(extensions_exe);
+    run_extensions_cmd.step.dependOn(b.getInstallStep());
+    run_extensions_cmd.addArg("--zlua");
+    run_extensions_cmd.addArtifactArg(exe);
+    if (b.args) |args| run_extensions_cmd.addArgs(args);
+    run_extensions_step.dependOn(&run_extensions_cmd.step);
+
     const run_official_step = b.step("run-test-official", "Run official Lua 5.5 suite harness");
     const run_official_cmd = b.addRunArtifact(official_exe);
     run_official_cmd.step.dependOn(b.getInstallStep());
@@ -219,6 +251,14 @@ pub fn build(b: *std.Build) void {
     diff_cmd.addArtifactArg(clua_exe);
     diff_step.dependOn(&diff_cmd.step);
 
+    const extensions_step = b.step("test-extensions", "Run zlua extension tests");
+    const extensions_cmd = b.addRunArtifact(extensions_exe);
+    extensions_cmd.step.dependOn(b.getInstallStep());
+    extensions_cmd.addArg("--zlua");
+    extensions_cmd.addArtifactArg(exe);
+    if (b.args) |args| extensions_cmd.addArgs(args);
+    extensions_step.dependOn(&extensions_cmd.step);
+
     const official_step = b.step("test-official", "Run full official Lua 5.5 suite dashboard under a memory cap");
     const official_cmd = b.addRunArtifact(official_exe);
     official_cmd.step.dependOn(b.getInstallStep());
@@ -234,6 +274,7 @@ pub fn build(b: *std.Build) void {
     const ci_step = b.step("ci", "Run CI checks");
     ci_step.dependOn(test_step);
     ci_step.dependOn(examples_step);
+    ci_step.dependOn(extensions_step);
     ci_step.dependOn(diff_step);
     ci_step.dependOn(official_step);
     ci_step.dependOn(ci_c_api_step);
@@ -261,12 +302,11 @@ pub fn build(b: *std.Build) void {
     });
     const run_md_docgen = b.addRunArtifact(md_docgen);
     run_md_docgen.addArgs(&.{
-        "--root", "src/root.zig",
-        "--out", "docs/api",
+        "--root",         "src/root.zig",
+        "--out",          "docs/api",
         "--project-root", ".",
-        "--name", "zlua",
-        "--emit-index",
-        "--follow-imports",
+        "--name",         "zlua",
+        "--emit-index",   "--follow-imports",
     });
 
     const docs_md_step = b.step("docs-md", "Generate Markdown API documentation");
