@@ -153,9 +153,65 @@ Example pretty output:
 print(json.write({ a = 1, b = { 2 } }, { pretty = true, indent = 4 }))
 ```
 
+## TOML Extension
+
+The `toml` extension is included in `safe` and `full`, and can be selected explicitly with `toml` in a granular set.
+
+Use the `toml` global whenever the toml library is open:
+
+```lua
+local value = toml.read([[name = "Ada"
+ok = true
+nums = [1, 2, 3]
+]])
+print(value.name, value.ok, value.nums[2])
+print(toml.write(value))
+```
+
+If both `toml` and `package` are open, `require("toml")` also returns the same table through `package.loaded.toml`.
+
+| Member | Behavior |
+| --- | --- |
+| `toml.read(text)` | Parses a TOML document string and returns the Lua representation. Empty or invalid documents raise Lua errors prefixed with `toml.read`. |
+| `toml.write(value[, options])` | Encodes a Lua table and returns a TOML string. Unsupported values raise Lua errors prefixed with `toml.write`. |
+
+TOML decoding maps values as follows:
+
+| TOML | Lua |
+| --- | --- |
+| booleans | booleans |
+| integers | integers when they fit zlua integer range |
+| floats | numbers |
+| strings | strings |
+| dates and datetimes | strings containing the TOML token text |
+| arrays | 1-indexed tables |
+| tables and inline tables | string-keyed tables |
+
+TOML encoding maps Lua values through the same table-shape rules as `json.write`: sequential positive-integer-keyed tables become arrays, and string-keyed tables become TOML tables. `toml.write` rejects cyclic tables, non-finite numbers, unsupported runtime values, sparse arrays with nil holes, mixed array/object tables, and object tables with non-string keys.
+
+`toml.write` accepts an optional options table:
+
+| Option | Type | Meaning |
+| --- | --- | --- |
+| `layout` | string | `"inline_tables"`/`"inline"` writes nested tables inline; `"sections"` writes nested object tables as TOML sections where possible. |
+
 ## MessagePack Extension
 
 The `msgpack` extension is included in `safe` and `full`, and can be selected explicitly with `msgpack` in a granular set.
+
+Use the `msgpack` global whenever the msgpack library is open:
+
+```lua
+local bytes = msgpack.write({
+  name = "Ada",
+  nums = {1, 2, msgpack.null},
+  ok = true,
+})
+local value = msgpack.read(bytes)
+print(value.name, value.ok, value.nums[3] == msgpack.null)
+```
+
+If both `msgpack` and `package` are open, `require("msgpack")` also returns the same table through `package.loaded.msgpack`.
 
 | Member | Behavior |
 | --- | --- |
@@ -163,4 +219,29 @@ The `msgpack` extension is included in `safe` and `full`, and can be selected ex
 | `msgpack.write(value)` | Encodes a Lua value and returns a Lua string containing MessagePack bytes. Unsupported values raise Lua errors prefixed with `msgpack.write`. |
 | `msgpack.null` | Sentinel value used to represent MessagePack `nil` in decoded data and emitted as `nil` when encoded. |
 
-MessagePack `str` and `bin` values decode to Lua strings. Lua strings encode as MessagePack `str` when they contain valid UTF-8 and as MessagePack `bin` otherwise.
+MessagePack decoding maps values as follows:
+
+| MessagePack | Lua |
+| --- | --- |
+| `nil` | `msgpack.null` |
+| booleans | booleans |
+| integers | integers when they fit zlua integer range |
+| floats | numbers |
+| `str` | strings |
+| `bin` | strings, preserving raw bytes |
+| arrays | 1-indexed tables |
+| maps | string-keyed tables |
+
+MessagePack encoding maps values as follows:
+
+| Lua | MessagePack |
+| --- | --- |
+| `nil` or `msgpack.null` | `nil` |
+| booleans | booleans |
+| finite integers and numbers | integers or floats |
+| UTF-8 strings | `str` |
+| non-UTF-8 strings | `bin` |
+| sequential positive-integer-keyed tables | arrays |
+| string-keyed tables | maps |
+
+`msgpack.read` expects exactly one complete root value and rejects trailing bytes after that value. `msgpack.write` rejects cyclic tables, non-finite numbers, unsupported runtime values, sparse arrays with nil holes, mixed array/object tables, and object tables with non-string keys.
