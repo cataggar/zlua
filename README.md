@@ -15,7 +15,7 @@ The Zig embedding API is the main public surface. Runtime internals, zlua binary
 1. Add zlua to your Zig package dependencies:
 
 ```sh
-zig fetch --save git+https://codeberg.org/gron/zlua#v0.1.1
+zig fetch --save git+https://codeberg.org/gron/zlua#v0.2.0
 ```
 
 2. Wire the dependency into your executable in `build.zig`:
