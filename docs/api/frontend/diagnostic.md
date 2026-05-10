@@ -3,8 +3,8 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [frontend.source](../frontend/source.md)
-- Next: [frontend.token](../frontend/token.md)
+- Previous: [frontend.token](../frontend/token.md)
+- Next: [frontend.lexer](../frontend/lexer.md)
 - Parent: [frontend](../frontend.md)
 
 ## Types

@@ -3,9 +3,9 @@
 ## Navigation
 
 - [API Index](README.md)
-- Previous: [stdlib.os](stdlib/os.md)
+- Previous: [runtime.internal](runtime/internal.md)
 - Next: [testing.clua](testing/clua.md)
-- Submodules: [testing.clua](testing/clua.md), [testing.bench_runner](testing/bench_runner.md), [testing.c_api_runner](testing/c_api_runner.md), [testing.diff_runner](testing/diff_runner.md), [testing.expected_failures](testing/expected_failures.md), [testing.metadata](testing/metadata.md), [testing.normalizer](testing/normalizer.md), [testing.official_suite](testing/official_suite.md), [testing.process](testing/process.md)
+- Submodules: [testing.process](testing/process.md), [testing.clua](testing/clua.md), [testing.bench_runner](testing/bench_runner.md), [testing.c_api_runner](testing/c_api_runner.md), [testing.diff_runner](testing/diff_runner.md), [testing.expected_failures](testing/expected_failures.md), [testing.metadata](testing/metadata.md), [testing.normalizer](testing/normalizer.md), [testing.official_suite](testing/official_suite.md)
 
 ## Imports
 

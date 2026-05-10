@@ -3,8 +3,8 @@
 ## Navigation
 
 - [API Index](README.md)
-- Previous: [compile.disasm](compile/disasm.md)
-- Next: [api](api.md)
+- Previous: [frontend](frontend.md)
+- Next: [frontend.source](frontend/source.md)
 
 ## Functions
 

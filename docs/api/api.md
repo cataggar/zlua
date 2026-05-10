@@ -3,7 +3,7 @@
 ## Navigation
 
 - [API Index](README.md)
-- Previous: [errors](errors.md)
+- Previous: [compile.disasm](compile/disasm.md)
 - Next: [runtime](runtime.md)
 
 ## Functions

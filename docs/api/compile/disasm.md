@@ -4,7 +4,7 @@
 
 - [API Index](../README.md)
 - Previous: [compile.compiler](../compile/compiler.md)
-- Next: [errors](../errors.md)
+- Next: [api](../api.md)
 - Parent: [compile](../compile.md)
 
 ## Functions

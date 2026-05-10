@@ -3,7 +3,7 @@
 ## Navigation
 
 - [API Index](README.md)
-- Previous: [runtime](runtime.md)
+- Previous: [runtime.host](runtime/host.md)
 - Next: [stdlib.base](stdlib/base.md)
 - Submodules: [stdlib.base](stdlib/base.md), [stdlib.table](stdlib/table.md), [stdlib.string](stdlib/string.md), [stdlib.math](stdlib/math.md), [stdlib.utf8](stdlib/utf8.md), [stdlib.coroutine](stdlib/coroutine.md), [stdlib.debug](stdlib/debug.md), [stdlib.package](stdlib/package.md), [stdlib.io](stdlib/io.md), [stdlib.os](stdlib/os.md)
 

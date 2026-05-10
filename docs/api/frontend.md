@@ -4,8 +4,8 @@
 
 - [API Index](README.md)
 - Previous: [root](root.md)
-- Next: [frontend.source](frontend/source.md)
-- Submodules: [frontend.source](frontend/source.md), [frontend.diagnostic](frontend/diagnostic.md), [frontend.token](frontend/token.md), [frontend.lexer](frontend/lexer.md), [frontend.ast](frontend/ast.md), [frontend.parser](frontend/parser.md)
+- Next: [errors](errors.md)
+- Submodules: [frontend.source](frontend/source.md), [frontend.token](frontend/token.md), [frontend.diagnostic](frontend/diagnostic.md), [frontend.lexer](frontend/lexer.md), [frontend.ast](frontend/ast.md), [frontend.parser](frontend/parser.md)
 
 ## Functions
 

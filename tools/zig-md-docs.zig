@@ -1,8 +1,8 @@
-//! zig-md-docs - source-based Markdown API docs for Zig 0.16 projects.
+//! docs-md - source-based Markdown API docs for Zig 0.16 projects.
 //!
 //! Usage:
 //!
-//!     zig run tools/zig-md-docs.zig -- \
+//!     zig run tools/docs-md.zig -- \
 //!       --root src/root.zig \
 //!       --out docs/api \
 //!       --project-root . \
@@ -13,8 +13,8 @@
 //! Build integration example:
 //!
 //!     const docgen = b.addExecutable(.{
-//!         .name = "zig-md-docs",
-//!         .root_source_file = b.path("tools/zig-md-docs.zig"),
+//!         .name = "docs-md",
+//!         .root_source_file = b.path("tools/docs-md.zig"),
 //!         .target = b.graph.host,
 //!     });
 //!
@@ -35,6 +35,28 @@
 //! - It does not evaluate comptime code or fully resolve aliases.
 //! - Import strings with escapes are not decoded beyond simple quoted paths.
 //! - Complex signatures are rendered as useful approximations instead of failing.
+//!
+//! MIT License
+//!
+//! Copyright (c) 2026 Grant Wade <grant@wade.software>
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
 const std = @import("std");
 
@@ -163,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
     for (raw_args, 0..) |arg, i| args[i] = arg;
 
     const exit_code = run(allocator, io, args) catch |err| {
-        std.debug.print("zig-md-docs: {s}\n", .{@errorName(err)});
+        std.debug.print("docs-md: {s}\n", .{@errorName(err)});
         return err;
     };
     std.process.exit(exit_code);
@@ -172,13 +194,13 @@ pub fn main(init: std.process.Init) !void {
 fn run(allocator: Allocator, io: std.Io, args: []const []const u8) !u8 {
     var config = parseArgs(args) catch |err| {
         printUsage();
-        std.debug.print("zig-md-docs: {s}\n", .{@errorName(err)});
+        std.debug.print("docs-md: {s}\n", .{@errorName(err)});
         return 2;
     };
     if (config.name.len == 0) config.name = "package";
 
     if (config.verbose) {
-        std.debug.print("zig-md-docs: parsing {s}\n", .{config.root});
+        std.debug.print("docs-md: parsing {s}\n", .{config.root});
     }
 
     const project_root_abs = try std.fs.path.resolve(allocator, &.{config.project_root});
@@ -267,7 +289,7 @@ fn parseArgs(args: []const []const u8) !Config {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: zig-md-docs --root src/root.zig --out docs/api [options]
+        \\Usage: docs-md --root src/root.zig --out docs/api [options]
         \\
         \\Options:
         \\  --project-root DIR   Project root used to constrain followed imports (default: .)
@@ -292,7 +314,7 @@ fn addModule(
     requested_name: []const u8,
 ) !void {
     if (!isInsidePath(project_root_abs, path_abs)) {
-        if (config.verbose) std.debug.print("zig-md-docs: skipping outside project: {s}\n", .{path_abs});
+        if (config.verbose) std.debug.print("docs-md: skipping outside project: {s}\n", .{path_abs});
         return;
     }
 
@@ -306,7 +328,7 @@ fn addModule(
     else
         try moduleNameFromPath(allocator, project_root_abs, path_abs, requested_name);
 
-    if (config.verbose) std.debug.print("zig-md-docs: module {s}\n", .{module_name});
+    if (config.verbose) std.debug.print("docs-md: module {s}\n", .{module_name});
 
     const module = try parseModule(allocator, io, config, project_root_abs, path_abs, module_name);
     try docs.modules.append(allocator, module);
@@ -341,7 +363,7 @@ fn parseModule(
     defer tree.deinit(allocator);
 
     if (tree.errors.len != 0) {
-        std.debug.print("zig-md-docs: warning: {s}: parsed with {d} syntax error(s)\n", .{ path_abs, tree.errors.len });
+        std.debug.print("docs-md: warning: {s}: parsed with {d} syntax error(s)\n", .{ path_abs, tree.errors.len });
     }
 
     var module = ModuleDocs{
@@ -387,7 +409,6 @@ fn collectDecls(
 
         if (tree.fullVarDecl(node)) |var_decl| {
             const is_public = var_decl.visib_token != null;
-            if (!is_public and !config.include_private) continue;
             const name_token = var_decl.ast.mut_token + 1;
             if (tree.tokenTag(name_token) != .identifier) continue;
             const name = tree.tokenSlice(name_token);
@@ -398,6 +419,17 @@ fn collectDecls(
                 try resolveLocalImport(allocator, project_root_abs, source_path_abs, import_text)
             else
                 null;
+
+            if (import_path) |import_text| {
+                try imports.append(allocator, .{
+                    .name = try allocator.dupe(u8, name),
+                    .import_path = try allocator.dupe(u8, import_text),
+                    .resolved_path = resolved_import,
+                    .public = is_public,
+                });
+            }
+
+            if (!is_public and !config.include_private) continue;
 
             var kind: DeclKind = if (mut == .keyword_var) .variable else .constant;
             if (init_node) |init| {
@@ -429,15 +461,6 @@ fn collectDecls(
             }
 
             try decls.append(allocator, decl);
-
-            if (import_path) |import_text| {
-                try imports.append(allocator, .{
-                    .name = try allocator.dupe(u8, name),
-                    .import_path = try allocator.dupe(u8, import_text),
-                    .resolved_path = resolved_import,
-                    .public = is_public,
-                });
-            }
             continue;
         }
     }
@@ -556,7 +579,10 @@ fn isAliasExpr(tree: Ast, node: Ast.Node.Index) bool {
 
 fn importPathFromNode(tree: Ast, node: Ast.Node.Index) ?[]const u8 {
     var buffer: [2]Ast.Node.Index = undefined;
-    const params = tree.builtinCallParams(&buffer, node) orelse return null;
+    const params = tree.builtinCallParams(&buffer, node) orelse return switch (tree.nodeTag(node)) {
+        .field_access, .unwrap_optional => importPathFromNode(tree, tree.nodeData(node).node_and_token[0]),
+        else => null,
+    };
     if (params.len == 0) return null;
     if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@import")) return null;
 
@@ -734,6 +760,8 @@ fn renderModuleBody(
     try out.append(allocator, '\n');
     try renderModuleNavigation(allocator, out, docs, module, heading_level + 1, single_file);
     if (module.doc.len != 0) {
+        try appendHeading(allocator, out, heading_level + 1, "Overview");
+        try out.append(allocator, '\n');
         try appendLinkedMarkdownText(allocator, out, symbols, module.name, module.doc, single_file);
         try out.appendSlice(allocator, "\n\n");
     }
@@ -792,7 +820,6 @@ fn renderModuleNavigation(
     }
     if (wrote_submodules) try out.append(allocator, '\n');
     try out.append(allocator, '\n');
-
 }
 
 fn findModuleIndex(docs: *const PackageDocs, module_name: []const u8) ?usize {
@@ -874,14 +901,14 @@ fn renderDecl(
     try out.print(allocator, "<a id=\"{s}\"></a>\n\n", .{anchor});
     try appendHeading(allocator, out, heading_level, display_name);
     try out.append(allocator, '\n');
-    try out.appendSlice(allocator, "```zig\n");
-    try out.appendSlice(allocator, decl.signature);
-    try out.appendSlice(allocator, "\n```\n\n");
-    try appendSignatureReferences(allocator, out, symbols, current_module, decl.signature, anchor, single_file);
     if (decl.doc.len != 0) {
         try appendLinkedMarkdownText(allocator, out, symbols, current_module, decl.doc, single_file);
         try out.appendSlice(allocator, "\n\n");
     }
+    try out.appendSlice(allocator, "```zig\n");
+    try out.appendSlice(allocator, decl.signature);
+    try out.appendSlice(allocator, "\n```\n\n");
+    try appendSignatureReferences(allocator, out, symbols, current_module, decl.signature, anchor, single_file);
     if (decl.fields.items.len != 0) {
         try appendHeading(allocator, out, heading_level + 1, "Fields");
         try out.append(allocator, '\n');
@@ -1122,17 +1149,19 @@ fn isIgnoredReference(reference: []const u8) bool {
     if (reference.len == 0) return true;
     if (std.mem.eql(u8, reference, "Self")) return true;
     inline for (.{
-        "addrspace", "align", "allowzero", "and", "anyerror", "anyframe", "anyopaque", "anytype",
-        "asm", "bool", "break", "callconv", "catch", "comptime", "const", "continue", "defer",
-        "else", "enum", "errdefer", "error", "export", "extern", "false", "fn", "for", "if",
-        "inline", "isize", "linksection", "noalias", "noinline", "noreturn", "nosuspend", "null",
-        "opaque", "or", "orelse", "packed", "pub", "resume", "return", "struct", "suspend",
-        "switch", "test", "threadlocal", "true", "try", "type", "undefined", "union", "unreachable",
-        "usize", "var", "void", "volatile", "while",
-        "u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u16", "u24", "u32", "u64", "u128",
-        "i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8", "i16", "i24", "i32", "i64", "i128",
-        "f16", "f32", "f64", "f80", "f128", "c_char", "c_short", "c_ushort", "c_int", "c_uint",
-        "c_long", "c_ulong", "c_longlong", "c_ulonglong", "c_longdouble",
+        "addrspace",  "align",       "allowzero",    "and",      "anyerror",    "anyframe",    "anyopaque",   "anytype",
+        "asm",        "bool",        "break",        "callconv", "catch",       "comptime",    "const",       "continue",
+        "defer",      "else",        "enum",         "errdefer", "error",       "export",      "extern",      "false",
+        "fn",         "for",         "if",           "inline",   "isize",       "linksection", "noalias",     "noinline",
+        "noreturn",   "nosuspend",   "null",         "opaque",   "or",          "orelse",      "packed",      "pub",
+        "resume",     "return",      "struct",       "suspend",  "switch",      "test",        "threadlocal", "true",
+        "try",        "type",        "undefined",    "union",    "unreachable", "usize",       "var",         "void",
+        "volatile",   "while",       "u1",           "u2",       "u3",          "u4",          "u5",          "u6",
+        "u7",         "u8",          "u16",          "u24",      "u32",         "u64",         "u128",        "i1",
+        "i2",         "i3",          "i4",           "i5",       "i6",          "i7",          "i8",          "i16",
+        "i24",        "i32",         "i64",          "i128",     "f16",         "f32",         "f64",         "f80",
+        "f128",       "c_char",      "c_short",      "c_ushort", "c_int",       "c_uint",      "c_long",      "c_ulong",
+        "c_longlong", "c_ulonglong", "c_longdouble",
     }) |word| {
         if (std.mem.eql(u8, reference, word)) return true;
     }
@@ -1230,13 +1259,13 @@ fn writeOrCheck(allocator: Allocator, io: std.Io, path: []const u8, content: []c
     if (check) {
         const existing = Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size)) catch |err| switch (err) {
             error.FileNotFound => {
-                std.debug.print("zig-md-docs: would create {s}\n", .{path});
+                std.debug.print("docs-md: would create {s}\n", .{path});
                 return true;
             },
             else => |e| return e,
         };
         if (!std.mem.eql(u8, existing, content)) {
-            std.debug.print("zig-md-docs: differs {s}\n", .{path});
+            std.debug.print("docs-md: differs {s}\n", .{path});
             return true;
         }
         return false;

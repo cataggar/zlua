@@ -3,7 +3,7 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [frontend.token](../frontend/token.md)
+- Previous: [frontend.diagnostic](../frontend/diagnostic.md)
 - Next: [frontend.ast](../frontend/ast.md)
 - Parent: [frontend](../frontend.md)
 

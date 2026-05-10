@@ -3,8 +3,8 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [frontend.diagnostic](../frontend/diagnostic.md)
-- Next: [frontend.lexer](../frontend/lexer.md)
+- Previous: [frontend.source](../frontend/source.md)
+- Next: [frontend.diagnostic](../frontend/diagnostic.md)
 - Parent: [frontend](../frontend.md)
 
 ## Functions

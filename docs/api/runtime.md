@@ -4,7 +4,8 @@
 
 - [API Index](README.md)
 - Previous: [api](api.md)
-- Next: [stdlib](stdlib.md)
+- Next: [runtime.chunk](runtime/chunk.md)
+- Submodules: [runtime.chunk](runtime/chunk.md), [runtime.types](runtime/types.md), [runtime.value](runtime/value.md), [runtime.execute](runtime/execute.md), [runtime.state](runtime/state.md), [runtime.call](runtime/call.md), [runtime.coroutine](runtime/coroutine.md), [runtime.debug](runtime/debug.md), [runtime.gc](runtime/gc.md), [runtime.host](runtime/host.md), [runtime.vm](runtime/vm.md), [runtime.tests](runtime/tests.md), [runtime.internal](runtime/internal.md)
 
 ## Aliases
 
@@ -75,6 +76,8 @@
 pub const RuntimeError = types.RuntimeError;
 ```
 
+References: [`types.RuntimeError`](runtime/types.md#const-runtimeerror)
+
 <a id="alias-binary_chunk_signature"></a>
 
 ## binary_chunk_signature
@@ -115,6 +118,8 @@ pub const StateOptions = state_mod.StateOptions;
 pub const Value = types.Value;
 ```
 
+References: [`types.Value`](runtime/types.md#type-value)
+
 <a id="alias-nativefn"></a>
 
 ## NativeFn
@@ -122,6 +127,8 @@ pub const Value = types.Value;
 ```zig
 pub const NativeFn = types.NativeFn;
 ```
+
+References: [`types.NativeFn`](runtime/types.md#type-nativefn)
 
 <a id="alias-userdatafinalizer"></a>
 
@@ -131,6 +138,8 @@ pub const NativeFn = types.NativeFn;
 pub const UserdataFinalizer = types.UserdataFinalizer;
 ```
 
+References: [`types.UserdataFinalizer`](runtime/types.md#const-userdatafinalizer)
+
 <a id="alias-userdatadeinit"></a>
 
 ## UserdataDeinit
@@ -138,6 +147,8 @@ pub const UserdataFinalizer = types.UserdataFinalizer;
 ```zig
 pub const UserdataDeinit = types.UserdataDeinit;
 ```
+
+References: [`types.UserdataDeinit`](runtime/types.md#const-userdatadeinit)
 
 <a id="alias-protectedcallresult"></a>
 
@@ -147,6 +158,8 @@ pub const UserdataDeinit = types.UserdataDeinit;
 pub const ProtectedCallResult = types.ProtectedCallResult;
 ```
 
+References: [`types.ProtectedCallResult`](runtime/types.md#type-protectedcallresult)
+
 <a id="alias-apicallbackdispatchfn"></a>
 
 ## ApiCallbackDispatchFn
@@ -154,6 +167,8 @@ pub const ProtectedCallResult = types.ProtectedCallResult;
 ```zig
 pub const ApiCallbackDispatchFn = types.ApiCallbackDispatchFn;
 ```
+
+References: [`types.ApiCallbackDispatchFn`](runtime/types.md#const-apicallbackdispatchfn)
 
 <a id="alias-cclosuredispatchfn"></a>
 
@@ -163,6 +178,8 @@ pub const ApiCallbackDispatchFn = types.ApiCallbackDispatchFn;
 pub const CClosureDispatchFn = types.CClosureDispatchFn;
 ```
 
+References: [`types.CClosureDispatchFn`](runtime/types.md#const-cclosuredispatchfn)
+
 <a id="alias-cclosureresumedispatchfn"></a>
 
 ## CClosureResumeDispatchFn
@@ -170,6 +187,8 @@ pub const CClosureDispatchFn = types.CClosureDispatchFn;
 ```zig
 pub const CClosureResumeDispatchFn = types.CClosureResumeDispatchFn;
 ```
+
+References: [`types.CClosureResumeDispatchFn`](runtime/types.md#const-cclosureresumedispatchfn)
 
 <a id="alias-cdebughookdispatchfn"></a>
 
@@ -179,6 +198,8 @@ pub const CClosureResumeDispatchFn = types.CClosureResumeDispatchFn;
 pub const CDebugHookDispatchFn = types.CDebugHookDispatchFn;
 ```
 
+References: [`types.CDebugHookDispatchFn`](runtime/types.md#const-cdebughookdispatchfn)
+
 <a id="alias-debughookevent"></a>
 
 ## DebugHookEvent
@@ -186,6 +207,8 @@ pub const CDebugHookDispatchFn = types.CDebugHookDispatchFn;
 ```zig
 pub const DebugHookEvent = types.DebugHookEvent;
 ```
+
+References: [`types.DebugHookEvent`](runtime/types.md#type-debughookevent)
 
 <a id="alias-cdebughookcontext"></a>
 
@@ -195,6 +218,8 @@ pub const DebugHookEvent = types.DebugHookEvent;
 pub const CDebugHookContext = types.CDebugHookContext;
 ```
 
+References: [`types.CDebugHookContext`](runtime/types.md#type-cdebughookcontext)
+
 <a id="alias-cclosurecontext"></a>
 
 ## CClosureContext
@@ -202,6 +227,8 @@ pub const CDebugHookContext = types.CDebugHookContext;
 ```zig
 pub const CClosureContext = types.CClosureContext;
 ```
+
+References: [`types.CClosureContext`](runtime/types.md#type-cclosurecontext)
 
 <a id="alias-cclosureresumecontext"></a>
 
@@ -211,6 +238,8 @@ pub const CClosureContext = types.CClosureContext;
 pub const CClosureResumeContext = types.CClosureResumeContext;
 ```
 
+References: [`types.CClosureResumeContext`](runtime/types.md#type-cclosureresumecontext)
+
 <a id="alias-apicallbackcontext"></a>
 
 ## ApiCallbackContext
@@ -219,6 +248,8 @@ pub const CClosureResumeContext = types.CClosureResumeContext;
 pub const ApiCallbackContext = types.ApiCallbackContext;
 ```
 
+References: [`types.ApiCallbackContext`](runtime/types.md#type-apicallbackcontext)
+
 <a id="alias-runtimeerrorpayload"></a>
 
 ## RuntimeErrorPayload
@@ -226,6 +257,8 @@ pub const ApiCallbackContext = types.ApiCallbackContext;
 ```zig
 pub const RuntimeErrorPayload = types.RuntimeErrorPayload;
 ```
+
+References: [`types.RuntimeErrorPayload`](runtime/types.md#type-runtimeerrorpayload)
 
 <a id="alias-appendbinarychunkheader"></a>
 
@@ -251,6 +284,8 @@ pub const dumpClosureBinary = chunk_mod.dumpClosureBinary;
 pub const Closure = types.Closure;
 ```
 
+References: [`types.Closure`](runtime/types.md#type-closure)
+
 <a id="alias-cclosure"></a>
 
 ## CClosure
@@ -258,6 +293,8 @@ pub const Closure = types.Closure;
 ```zig
 pub const CClosure = types.CClosure;
 ```
+
+References: [`types.CClosure`](runtime/types.md#type-cclosure)
 
 <a id="alias-cupvalue"></a>
 
@@ -267,6 +304,8 @@ pub const CClosure = types.CClosure;
 pub const CUpvalue = types.CUpvalue;
 ```
 
+References: [`types.CUpvalue`](runtime/types.md#type-cupvalue)
+
 <a id="alias-upvalue"></a>
 
 ## Upvalue
@@ -274,6 +313,8 @@ pub const CUpvalue = types.CUpvalue;
 ```zig
 pub const Upvalue = types.Upvalue;
 ```
+
+References: [`types.Upvalue`](runtime/types.md#type-upvalue)
 
 <a id="alias-table"></a>
 
@@ -283,6 +324,8 @@ pub const Upvalue = types.Upvalue;
 pub const Table = types.Table;
 ```
 
+References: [`types.Table`](runtime/types.md#type-table)
+
 <a id="alias-userdata"></a>
 
 ## Userdata
@@ -290,6 +333,8 @@ pub const Table = types.Table;
 ```zig
 pub const Userdata = types.Userdata;
 ```
+
+References: [`types.Userdata`](runtime/types.md#type-userdata)
 
 <a id="alias-thread"></a>
 
@@ -299,6 +344,8 @@ pub const Userdata = types.Userdata;
 pub const Thread = types.Thread;
 ```
 
+References: [`types.Thread`](runtime/types.md#type-thread)
+
 <a id="alias-gcmode"></a>
 
 ## GcMode
@@ -307,6 +354,8 @@ pub const Thread = types.Thread;
 pub const GcMode = types.GcMode;
 ```
 
+References: [`types.GcMode`](runtime/types.md#type-gcmode)
+
 <a id="alias-gcparam"></a>
 
 ## GcParam
@@ -314,6 +363,8 @@ pub const GcMode = types.GcMode;
 ```zig
 pub const GcParam = types.GcParam;
 ```
+
+References: [`types.GcParam`](runtime/types.md#type-gcparam)
 
 <a id="alias-stdlibmode"></a>
 
@@ -331,6 +382,8 @@ pub const StdlibMode = state_mod.StdlibMode;
 pub const MemoryFile = host.MemoryFile;
 ```
 
+References: [`host.MemoryFile`](runtime/host.md#type-memoryfile)
+
 <a id="alias-memoryfilesystem"></a>
 
 ## MemoryFilesystem
@@ -338,6 +391,8 @@ pub const MemoryFile = host.MemoryFile;
 ```zig
 pub const MemoryFilesystem = host.MemoryFilesystem;
 ```
+
+References: [`host.MemoryFilesystem`](runtime/host.md#type-memoryfilesystem)
 
 <a id="alias-filesystemcapability"></a>
 
@@ -347,6 +402,8 @@ pub const MemoryFilesystem = host.MemoryFilesystem;
 pub const FilesystemCapability = host.FilesystemCapability;
 ```
 
+References: [`host.FilesystemCapability`](runtime/host.md#type-filesystemcapability)
+
 <a id="alias-clockcapability"></a>
 
 ## ClockCapability
@@ -355,6 +412,8 @@ pub const FilesystemCapability = host.FilesystemCapability;
 pub const ClockCapability = host.ClockCapability;
 ```
 
+References: [`host.ClockCapability`](runtime/host.md#type-clockcapability)
+
 <a id="alias-processcapability"></a>
 
 ## ProcessCapability
@@ -362,6 +421,8 @@ pub const ClockCapability = host.ClockCapability;
 ```zig
 pub const ProcessCapability = host.ProcessCapability;
 ```
+
+References: [`host.ProcessCapability`](runtime/host.md#type-processcapability)
 
 <a id="alias-compareop"></a>
 
