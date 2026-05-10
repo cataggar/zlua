@@ -4,11 +4,10 @@ This document tracks remaining work only. `tests/fixtures/expected_failures.toml
 
 ## Embedding Sandbox And Limits
 
-1. Keep adding negative sandbox tests as new `io`, `os`, `debug`, `package`, module-loading, filesystem, memory-file, environment, process, and clock behavior changes.
-2. Decide whether `io.tmpfile` and `os.tmpname` should remain synthetic helpers in sandboxed embeddings or become capability-gated.
-3. Extend low-limit and sandbox-denial coverage into official and differential harness modes once the public semantics stop changing.
-4. Document stream-only guidance for hosts that do not want captured stdout/stderr buffers counted against state memory.
-5. Consider CLI flags for sandboxed execution and explicit memory/instruction limits.
+1. Decide whether `io.tmpfile` and `os.tmpname` should remain synthetic helpers in sandboxed embeddings or become capability-gated.
+2. Extend low-limit and sandbox-denial coverage into official and differential harness modes once the public semantics stop changing.
+3. Document stream-only guidance for hosts that do not want captured stdout/stderr buffers counted against state memory.
+4. Consider CLI flags for sandboxed execution and explicit memory/instruction limits.
 
 ## Performance
 
