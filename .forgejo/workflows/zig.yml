@@ -1,0 +1,31 @@
+name: Zig
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: zig-ci
+
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Set up Zig
+        uses: https://codeberg.org/mlugg/setup-zig@v2.2.1
+        with:
+          use-cache: true
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Cache Lua dependencies
+        uses: https://code.forgejo.org/actions/cache@v5
+        with:
+          path: .zlua-deps
+          key: ${{ runner.os }}-lua-5.5.0-${{ hashFiles('tools/fetch-lua.sh') }}
+
+      - name: Build and test
+        run: zig build ci
