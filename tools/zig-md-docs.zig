@@ -924,7 +924,11 @@ fn renderDecl(
 fn appendDeclSignatureCodeBlock(allocator: Allocator, out: *std.ArrayList(u8), decl: *const DeclDocs) !void {
     try out.appendSlice(allocator, "```zig\n");
     if (decl.fields.items.len == 0) {
-        try out.appendSlice(allocator, decl.signature);
+        if (decl.children.items.len == 0) {
+            try appendEmptyContainerSignature(allocator, out, decl.signature);
+        } else {
+            try out.appendSlice(allocator, decl.signature);
+        }
     } else if (std.mem.indexOf(u8, decl.signature, "{ ... }")) |marker_index| {
         const prefix_end = marker_index + 1;
         const suffix_start = marker_index + "{ ... }".len;
@@ -937,6 +941,19 @@ fn appendDeclSignatureCodeBlock(allocator: Allocator, out: *std.ArrayList(u8), d
         try out.appendSlice(allocator, decl.signature);
     }
     try out.appendSlice(allocator, "\n```\n\n");
+}
+
+fn appendEmptyContainerSignature(allocator: Allocator, out: *std.ArrayList(u8), signature: []const u8) !void {
+    const marker = "{ ... }";
+    const marker_index = std.mem.indexOf(u8, signature, marker) orelse {
+        try out.appendSlice(allocator, signature);
+        return;
+    };
+    const prefix_end = marker_index + 1;
+    const suffix_start = marker_index + marker.len;
+    try out.appendSlice(allocator, std.mem.trimEnd(u8, signature[0..prefix_end], &std.ascii.whitespace));
+    try out.append(allocator, '}');
+    try out.appendSlice(allocator, std.mem.trimStart(u8, signature[suffix_start..], &std.ascii.whitespace));
 }
 
 fn appendFieldSignature(allocator: Allocator, out: *std.ArrayList(u8), field: FieldDocs, indent: usize) !void {
@@ -1357,6 +1374,30 @@ test "type field signatures render inline with docs" {
         \\    /// Lua integer.
         \\    integer: i64,
         \\};
+        \\```
+        \\
+        \\
+    , out.items);
+}
+
+test "empty type signatures omit ellipsis" {
+    const allocator = std.testing.allocator;
+    const decl = DeclDocs{
+        .name = "GcOptions",
+        .kind = .type,
+        .visibility = .public,
+        .doc = "",
+        .signature = "pub const GcOptions = struct { ... };",
+        .line = 1,
+    };
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    try appendDeclSignatureCodeBlock(allocator, &out, &decl);
+
+    try std.testing.expectEqualStrings(
+        \\```zig
+        \\pub const GcOptions = struct {};
         \\```
         \\
         \\

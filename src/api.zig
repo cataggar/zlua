@@ -321,12 +321,19 @@ pub const GcStepResult = enum {
 
 /// Owns a Lua VM instance and its host-facing API state.
 pub const State = struct {
+    /// Allocator originally supplied by the host for state-owned storage.
     base_allocator: std.mem.Allocator,
+    /// Optional bounded allocator state used when `Limits.max_memory` is configured.
     memory_limit_allocator: ?*MemoryLimitAllocator = null,
+    /// Underlying Lua runtime state.
     raw_state: runtime.State,
+    /// Registry root for the last captured Lua error value.
     last_error_root: ?usize = null,
+    /// Owned memory-file entries visible to the configured memory filesystem.
     memory_files: std.ArrayList(MemoryFile) = .empty,
+    /// Tracks whether each memory-file entry owns its contents slice.
     memory_file_owned_contents: std.ArrayList(bool) = .empty,
+    /// Host callbacks registered through the high-level API dispatcher.
     callbacks: std.ArrayList(RegisteredCallback) = .empty,
 
     /// Creates a new Lua state using `state_allocator` and the supplied options.

@@ -17,7 +17,7 @@
 ## Code
 
 ```zig
-pub const Code = enum { ... };
+pub const Code = enum {};
 ```
 
 <a id="type-diagnostic"></a>

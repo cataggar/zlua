@@ -154,7 +154,7 @@ pub fn UserdataPtrOptions(comptime T: type) type
 Standard-library selection used when creating or opening a state.
 
 ```zig
-pub const Stdlib = enum { ... };
+pub const Stdlib = enum {};
 ```
 
 <a id="alias-memoryfile"></a>
@@ -345,7 +345,7 @@ pub const InstructionBudget = struct {
 Garbage-collector tuning options, reserved for future API expansion.
 
 ```zig
-pub const GcOptions = struct { ... };
+pub const GcOptions = struct {};
 ```
 
 <a id="type-debugoptions"></a>
@@ -391,7 +391,7 @@ pub const Options = struct {
 Accepted chunk kinds for `loadString` and `loadFile`.
 
 ```zig
-pub const LoadMode = enum { ... };
+pub const LoadMode = enum {};
 ```
 
 <a id="type-loadoptions"></a>
@@ -496,7 +496,7 @@ pub const GcBudget = struct {
 Result of an incremental garbage-collection step.
 
 ```zig
-pub const GcStepResult = enum { ... };
+pub const GcStepResult = enum {};
 ```
 
 <a id="type-state"></a>
@@ -507,12 +507,19 @@ Owns a Lua VM instance and its host-facing API state.
 
 ```zig
 pub const State = struct {
+    /// Allocator originally supplied by the host for state-owned storage.
     base_allocator: std.mem.Allocator,
+    /// Optional bounded allocator state used when `Limits.max_memory` is configured.
     memory_limit_allocator: ?*MemoryLimitAllocator = null,
+    /// Underlying Lua runtime state.
     raw_state: runtime.State,
+    /// Registry root for the last captured Lua error value.
     last_error_root: ?usize = null,
+    /// Owned memory-file entries visible to the configured memory filesystem.
     memory_files: std.ArrayList(MemoryFile) = .empty,
+    /// Tracks whether each memory-file entry owns its contents slice.
     memory_file_owned_contents: std.ArrayList(bool) = .empty,
+    /// Host callbacks registered through the high-level API dispatcher.
     callbacks: std.ArrayList(RegisteredCallback) = .empty,
 };
 ```
@@ -1341,6 +1348,6 @@ References: [`Context`](#type-context)
 Opaque placeholder for future high-level coroutine/thread handles.
 
 ```zig
-pub const Thread = opaque { ... };
+pub const Thread = opaque {};
 ```
 

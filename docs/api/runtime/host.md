@@ -197,6 +197,6 @@ pub const ClockCapability = union(enum) {
 ## ProcessCapability
 
 ```zig
-pub const ProcessCapability = enum { ... };
+pub const ProcessCapability = enum {};
 ```
 

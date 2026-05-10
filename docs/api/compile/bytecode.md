@@ -375,7 +375,7 @@ pub const Binary = struct {
 ## CompareBranchOp
 
 ```zig
-pub const CompareBranchOp = enum { ... };
+pub const CompareBranchOp = enum {};
 ```
 
 <a id="type-comparebranch"></a>

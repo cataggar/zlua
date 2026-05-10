@@ -45,7 +45,7 @@ pub const ZluaError = union(enum) {
 ## HostError
 
 ```zig
-pub const HostError = union(enum) { ... };
+pub const HostError = union(enum) {};
 ```
 
 <a id="type-diagnostic"></a>
@@ -128,7 +128,7 @@ pub const UnexpectedSyntax = struct {
 ## SyntaxMessage
 
 ```zig
-pub const SyntaxMessage = enum { ... };
+pub const SyntaxMessage = enum {};
 ```
 
 <a id="type-expectedsyntax"></a>

@@ -442,7 +442,7 @@ pub const MethodCallExpr = struct {
 ## UnaryOp
 
 ```zig
-pub const UnaryOp = enum { ... };
+pub const UnaryOp = enum {};
 ```
 
 <a id="type-unaryexpr"></a>
@@ -462,7 +462,7 @@ pub const UnaryExpr = struct {
 ## BinaryOp
 
 ```zig
-pub const BinaryOp = enum { ... };
+pub const BinaryOp = enum {};
 ```
 
 <a id="type-binaryexpr"></a>

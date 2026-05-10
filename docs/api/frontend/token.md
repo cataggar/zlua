@@ -21,7 +21,7 @@
 ## Tag
 
 ```zig
-pub const Tag = enum { ... };
+pub const Tag = enum {};
 ```
 
 <a id="type-token"></a>

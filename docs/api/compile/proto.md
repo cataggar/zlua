@@ -59,7 +59,7 @@ pub const UpvalueDesc = struct {
 ## ErrorOp
 
 ```zig
-pub const ErrorOp = enum { ... };
+pub const ErrorOp = enum {};
 ```
 
 <a id="type-operandorigin"></a>

@@ -179,7 +179,7 @@ References: [`CDebugHookContext`](#type-cdebughookcontext)
 ## DebugHookEvent
 
 ```zig
-pub const DebugHookEvent = enum { ... };
+pub const DebugHookEvent = enum {};
 ```
 
 <a id="type-cdebughookcontext"></a>
@@ -511,7 +511,7 @@ pub const ProtectedCallContext = struct {
 ## ProtectedContinuationKind
 
 ```zig
-pub const ProtectedContinuationKind = enum { ... };
+pub const ProtectedContinuationKind = enum {};
 ```
 
 <a id="type-protectedcontinuation"></a>
@@ -918,7 +918,7 @@ References: [`Thread`](#type-thread)
 ## ThreadStatus
 
 ```zig
-pub const ThreadStatus = enum { ... };
+pub const ThreadStatus = enum {};
 ```
 
 <a id="type-callframe"></a>
@@ -1004,7 +1004,7 @@ References: [`GcMode`](#type-gcmode)
 ## GcParam
 
 ```zig
-pub const GcParam = enum { ... };
+pub const GcParam = enum {};
 ```
 
 <a id="type-gcparams"></a>

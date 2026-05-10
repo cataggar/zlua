@@ -2899,7 +2899,7 @@ References: [`State`](#type-state), [`Value`](#alias-value)
 ## CompareOp
 
 ```zig
-pub const CompareOp = enum { ... };
+pub const CompareOp = enum {};
 ```
 
 <a id="fn-valuesequal"></a>
