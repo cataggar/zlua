@@ -3,9 +3,70 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [testing.process](../testing/process.md)
-- Next: [runtime.call](../runtime/call.md)
 - Parent: [runtime](../runtime.md)
+
+<details>
+<summary>All documents</summary>
+
+- [root](../root.md)
+- [frontend](../frontend.md)
+- [errors](../errors.md)
+- [frontend.source](../frontend/source.md)
+- [frontend.token](../frontend/token.md)
+- [frontend.diagnostic](../frontend/diagnostic.md)
+- [frontend.lexer](../frontend/lexer.md)
+- [frontend.ast](../frontend/ast.md)
+- [frontend.parser](../frontend/parser.md)
+- [compile](../compile.md)
+- [compile.resolver](../compile/resolver.md)
+- [compile.bytecode](../compile/bytecode.md)
+- [compile.proto](../compile/proto.md)
+- [compile.compiler](../compile/compiler.md)
+- [compile.disasm](../compile/disasm.md)
+- [api](../api.md)
+- [runtime](../runtime.md)
+- [runtime.chunk](../runtime/chunk.md)
+- [runtime.types](../runtime/types.md)
+- [runtime.value](../runtime/value.md)
+- [runtime.execute](../runtime/execute.md)
+- [testing.process](../testing/process.md)
+- [runtime.state](../runtime/state.md)
+- [runtime.call](../runtime/call.md)
+- [runtime.coroutine](../runtime/coroutine.md)
+- [runtime.debug](../runtime/debug.md)
+- [runtime.gc](../runtime/gc.md)
+- [runtime.host](../runtime/host.md)
+- [stdlib](../stdlib.md)
+- [stdlib.base](../stdlib/base.md)
+- [stdlib.table](../stdlib/table.md)
+- [stdlib.string](../stdlib/string.md)
+- [stdlib.math](../stdlib/math.md)
+- [stdlib.utf8](../stdlib/utf8.md)
+- [stdlib.coroutine](../stdlib/coroutine.md)
+- [stdlib.debug](../stdlib/debug.md)
+- [stdlib.package](../stdlib/package.md)
+- [stdlib.io](../stdlib/io.md)
+- [stdlib.os](../stdlib/os.md)
+- [stdlib.json](../stdlib/json.md)
+- [stdlib.zerde_lua](../stdlib/zerde_lua.md)
+- [stdlib.toml](../stdlib/toml.md)
+- [stdlib.msgpack](../stdlib/msgpack.md)
+- [stdlib.csv](../stdlib/csv.md)
+- [runtime.vm](../runtime/vm.md)
+- [runtime.tests](../runtime/tests.md)
+- [runtime.internal](../runtime/internal.md)
+- [testing](../testing.md)
+- [testing.clua](../testing/clua.md)
+- [testing.bench_runner](../testing/bench_runner.md)
+- [testing.c_api_runner](../testing/c_api_runner.md)
+- [testing.diff_runner](../testing/diff_runner.md)
+- [testing.expected_failures](../testing/expected_failures.md)
+- [testing.metadata](../testing/metadata.md)
+- [testing.normalizer](../testing/normalizer.md)
+- [testing.extension_runner](../testing/extension_runner.md)
+- [testing.official_suite](../testing/official_suite.md)
+
+</details>
 
 ## Functions
 
@@ -404,232 +465,234 @@ pub const State = struct {
 
 ### Nested Declarations
 
-- [init](#fn-state-init)
-- [initWithOptions](#fn-state-initwithoptions)
-- [stackValueLimit](#fn-state-stackvaluelimit)
-- [callFrameLimit](#fn-state-callframelimit)
-- [fileMetatable](#fn-state-filemetatable)
-- [deinit](#fn-state-deinit)
-- [execute](#fn-state-execute)
-- [callLoadedClosure](#fn-state-callloadedclosure)
-- [protectedCallLoadedClosure](#fn-state-protectedcallloadedclosure)
-- [executeSourceChunk](#fn-state-executesourcechunk)
-- [executeSourceChunkNamed](#fn-state-executesourcechunknamed)
-- [runThreadUntil](#fn-state-runthreaduntil)
-- [checkExecutionLimits](#fn-state-checkexecutionlimits)
-- [noteAllocation](#fn-state-noteallocation)
-- [noteAllocationFreed](#fn-state-noteallocationfreed)
-- [refreshAllocationTotal](#fn-state-refreshallocationtotal)
-- [currentAllocationTotal](#fn-state-currentallocationtotal)
-- [tableCapacityBytes](#fn-state-tablecapacitybytes)
-- [tableGcBytes](#fn-state-tablegcbytes)
-- [noteTableCapacityDelta](#fn-state-notetablecapacitydelta)
-- [getGlobal](#fn-state-getglobal)
-- [currentLine](#fn-state-currentline)
-- [currentExtraArgs](#fn-state-currentextraargs)
-- [currentWhat](#fn-state-currentwhat)
-- [currentFunctionName](#fn-state-currentfunctionname)
-- [currentFunctionNameWhat](#fn-state-currentfunctionnamewhat)
-- [setThreadHook](#fn-state-setthreadhook)
-- [threadHookMask](#fn-state-threadhookmask)
-- [callHook](#fn-state-callhook)
-- [putGlobal](#fn-state-putglobal)
-- [rootValue](#fn-state-rootvalue)
-- [unrootValue](#fn-state-unrootvalue)
-- [rootedValue](#fn-state-rootedvalue)
-- [activeRootCount](#fn-state-activerootcount)
-- [setApiCallbackDispatch](#fn-state-setapicallbackdispatch)
-- [setCClosureDispatch](#fn-state-setcclosuredispatch)
-- [setCClosureResumeDispatch](#fn-state-setcclosureresumedispatch)
-- [setCDebugHookDispatch](#fn-state-setcdebughookdispatch)
-- [newCClosure](#fn-state-newcclosure)
-- [newCoroutine](#fn-state-newcoroutine)
-- [resumeThread](#fn-state-resumethread)
-- [closeThread](#fn-state-closethread)
-- [threadWasYielded](#fn-state-threadwasyielded)
-- [callCClosureDispatch](#fn-state-callcclosuredispatch)
-- [resumeCClosureDispatch](#fn-state-resumecclosuredispatch)
-- [callApiCallbackDispatch](#fn-state-callapicallbackdispatch)
-- [readFileAlloc](#fn-state-readfilealloc)
-- [writeStdout](#fn-state-writestdout)
-- [writeStderr](#fn-state-writestderr)
-- [flushStdout](#fn-state-flushstdout)
-- [flushStderr](#fn-state-flushstderr)
-- [writeFile](#fn-state-writefile)
-- [removeFile](#fn-state-removefile)
-- [renameFile](#fn-state-renamefile)
-- [getenv](#fn-state-getenv)
-- [currentTime](#fn-state-currenttime)
-- [requireIo](#fn-state-requireio)
-- [processEnabled](#fn-state-processenabled)
-- [readStdin](#fn-state-readstdin)
-- [loadSourceAsClosure](#fn-state-loadsourceasclosure)
-- [loadSourceAsClosureNamed](#fn-state-loadsourceasclosurenamed)
-- [loadSourceAsClosureNamedEnv](#fn-state-loadsourceasclosurenamedenv)
-- [loadBinaryDump](#fn-state-loadbinarydump)
-- [loadFileAsClosure](#fn-state-loadfileasclosure)
-- [loadFileAsClosureNamed](#fn-state-loadfileasclosurenamed)
-- [callCollect](#fn-state-callcollect)
-- [intern](#fn-state-intern)
-- [allocateString](#fn-state-allocatestring)
-- [newTableWithHints](#fn-state-newtablewithhints)
-- [newUserdata](#fn-state-newuserdata)
-- [closeUpvalues](#fn-state-closeupvalues)
-- [closeFramesTo](#fn-state-closeframesto)
-- [getTableValue](#fn-state-gettablevalue)
-- [getTableFromThread](#fn-state-gettablefromthread)
-- [setTableValue](#fn-state-settablevalue)
-- [setTableFromThread](#fn-state-settablefromthread)
-- [lengthOf](#fn-state-lengthof)
-- [invokeValue](#fn-state-invokevalue)
-- [callOneResult](#fn-state-calloneresult)
-- [callOneResultWithContinuation](#fn-state-calloneresultwithcontinuation)
-- [callOneMetamethodWithContinuation](#fn-state-callonemetamethodwithcontinuation)
-- [callOneMetamethod](#fn-state-callonemetamethod)
-- [metamethodDebugName](#fn-state-metamethoddebugname)
-- [callOneResultMaybeContinuation](#fn-state-calloneresultmaybecontinuation)
-- [pushCallOneContinuation](#fn-state-pushcallonecontinuation)
-- [readyCallOneContinuationIndex](#fn-state-readycallonecontinuationindex)
-- [completeReadyCallOneContinuation](#fn-state-completereadycallonecontinuation)
-- [protectedCall](#fn-state-protectedcall)
-- [protectedCallContext](#fn-state-protectedcallcontext)
-- [protectedCallContextWithErrors](#fn-state-protectedcallcontextwitherrors)
-- [runProtectedCall](#fn-state-runprotectedcall)
-- [restoreProtectedCall](#fn-state-restoreprotectedcall)
-- [pushProtectedContinuation](#fn-state-pushprotectedcontinuation)
-- [readyProtectedContinuationIndex](#fn-state-readyprotectedcontinuationindex)
-- [errorProtectedContinuationIndex](#fn-state-errorprotectedcontinuationindex)
-- [completeReadyProtectedContinuation](#fn-state-completereadyprotectedcontinuation)
-- [completeProtectedContinuationError](#fn-state-completeprotectedcontinuationerror)
-- [returnProtectedContinuationSuccess](#fn-state-returnprotectedcontinuationsuccess)
-- [returnProtectedContinuationFailure](#fn-state-returnprotectedcontinuationfailure)
-- [valueToString](#fn-state-valuetostring)
-- [setDebugMetatableValue](#fn-state-setdebugmetatablevalue)
-- [getMetamethod](#fn-state-getmetamethod)
-- [setTableMetatableRaw](#fn-state-settablemetatableraw)
-- [noteTableMetatableChanged](#fn-state-notetablemetatablechanged)
-- [unlinkTableMetatable](#fn-state-unlinktablemetatable)
-- [luaTypeNameForError](#fn-state-luatypenameforerror)
-- [jumpIfBranchResult](#fn-state-jumpifbranchresult)
-- [compareValues](#fn-state-comparevalues)
-- [returnValues](#fn-state-returnvalues)
-- [prepareClosureFrame](#fn-state-prepareclosureframe)
-- [captureVarargs](#fn-state-capturevarargs)
-- [namedVarargTable](#fn-state-namedvarargtable)
-- [resolveReturnCount](#fn-state-resolvereturncount)
-- [returnXpcallFailure](#fn-state-returnxpcallfailure)
-- [returnXpcallFailureFromDepth](#fn-state-returnxpcallfailurefromdepth)
-- [snapshotCoroutineErrorTraceback](#fn-state-snapshotcoroutineerrortraceback)
-- [coroutineCreate](#fn-state-coroutinecreate)
-- [coroutineResume](#fn-state-coroutineresume)
-- [coroutineYield](#fn-state-coroutineyield)
-- [coroutineStatus](#fn-state-coroutinestatus)
-- [coroutineRunning](#fn-state-coroutinerunning)
-- [coroutineIsYieldable](#fn-state-coroutineisyieldable)
-- [coroutineClose](#fn-state-coroutineclose)
-- [coroutineWrap](#fn-state-coroutinewrap)
-- [callCoroutineWrapper](#fn-state-callcoroutinewrapper)
-- [callCoroutineWrapperWithArgs](#fn-state-callcoroutinewrapperwithargs)
-- [newCoroutineThread](#fn-state-newcoroutinethread)
-- [closeCoroutine](#fn-state-closecoroutine)
-- [resumeCoroutine](#fn-state-resumecoroutine)
-- [startCoroutine](#fn-state-startcoroutine)
-- [callableEntryClosure](#fn-state-callableentryclosure)
-- [setCoroutineResumeValues](#fn-state-setcoroutineresumevalues)
-- [returnCoroutineResumeResult](#fn-state-returncoroutineresumeresult)
-- [copyValues](#fn-state-copyvalues)
-- [copyStackSlice](#fn-state-copystackslice)
-- [collectArgs](#fn-state-collectargs)
-- [returnProtectedResult](#fn-state-returnprotectedresult)
-- [expectTable](#fn-state-expecttable)
-- [expectString](#fn-state-expectstring)
-- [expectThread](#fn-state-expectthread)
-- [collectGarbageValue](#fn-state-collectgarbagevalue)
-- [collectGarbageParam](#fn-state-collectgarbageparam)
-- [collectGarbageStep](#fn-state-collectgarbagestep)
-- [collectGarbage](#fn-state-collectgarbage)
-- [collectGarbageStepPublic](#fn-state-collectgarbagesteppublic)
-- [allocationByteCount](#fn-state-allocationbytecount)
-- [gcIsRunning](#fn-state-gcisrunning)
-- [stopGc](#fn-state-stopgc)
-- [restartGc](#fn-state-restartgc)
-- [switchGcMode](#fn-state-switchgcmode)
-- [gcParam](#fn-state-gcparam)
-- [setGcParam](#fn-state-setgcparam)
-- [collectGarbageConservatively](#fn-state-collectgarbageconservatively)
-- [collectGarbageWithFinalizers](#fn-state-collectgarbagewithfinalizers)
-- [collectGarbageWithFinalizersMode](#fn-state-collectgarbagewithfinalizersmode)
-- [shouldRunAutoGc](#fn-state-shouldrunautogc)
-- [resetAutoGcThreshold](#fn-state-resetautogcthreshold)
-- [resetMarks](#fn-state-resetmarks)
-- [markRoots](#fn-state-markroots)
-- [markValue](#fn-state-markvalue)
-- [markRuntimeErrorPayload](#fn-state-markruntimeerrorpayload)
-- [markString](#fn-state-markstring)
-- [markTable](#fn-state-marktable)
-- [markUserdata](#fn-state-markuserdata)
-- [markWeakTableStrings](#fn-state-markweaktablestrings)
-- [markWeakString](#fn-state-markweakstring)
-- [markClosure](#fn-state-markclosure)
-- [markCClosure](#fn-state-markcclosure)
-- [markUpvalue](#fn-state-markupvalue)
-- [markCUpvalue](#fn-state-markcupvalue)
-- [markThread](#fn-state-markthread)
-- [markThreadStack](#fn-state-markthreadstack)
-- [markStackRange](#fn-state-markstackrange)
-- [weakMode](#fn-state-weakmode)
-- [hasWeakTables](#fn-state-hasweaktables)
-- [markEphemeronValues](#fn-state-markephemeronvalues)
-- [convergeEphemerons](#fn-state-convergeephemerons)
-- [markValueChanged](#fn-state-markvaluechanged)
-- [valueIsMarked](#fn-state-valueismarked)
-- [valueIsWeaklyCleared](#fn-state-valueisweaklycleared)
-- [valueIsCollectableUnmarked](#fn-state-valueiscollectableunmarked)
-- [clearWeakValues](#fn-state-clearweakvalues)
-- [clearWeakTables](#fn-state-clearweaktables)
-- [clearDeadHashKeys](#fn-state-cleardeadhashkeys)
-- [clearWeakTableValues](#fn-state-clearweaktablevalues)
-- [clearWeakTableKeys](#fn-state-clearweaktablekeys)
-- [writeTableBarrier](#fn-state-writetablebarrier)
-- [writeBarrier](#fn-state-writebarrier)
-- [runPendingFinalizers](#fn-state-runpendingfinalizers)
-- [runPendingUserdataFinalizers](#fn-state-runpendinguserdatafinalizers)
-- [callableValue](#fn-state-callablevalue)
-- [sweepStrings](#fn-state-sweepstrings)
-- [sweepUserdata](#fn-state-sweepuserdata)
-- [sweepTables](#fn-state-sweeptables)
-- [sweepClosures](#fn-state-sweepclosures)
-- [sweepCClosures](#fn-state-sweepcclosures)
-- [sweepUpvalues](#fn-state-sweepupvalues)
-- [sweepCUpvalues](#fn-state-sweepcupvalues)
-- [sweepThreads](#fn-state-sweepthreads)
-- [findStringAllocation](#fn-state-findstringallocation)
-- [isTrackedThread](#fn-state-istrackedthread)
-- [isTrackedTable](#fn-state-istrackedtable)
-- [isTrackedUserdata](#fn-state-istrackeduserdata)
-- [isTrackedClosure](#fn-state-istrackedclosure)
-- [isTrackedCClosure](#fn-state-istrackedcclosure)
-- [isTrackedUpvalue](#fn-state-istrackedupvalue)
-- [isTrackedCUpvalue](#fn-state-istrackedcupvalue)
-- [destroyTable](#fn-state-destroytable)
-- [destroyUserdata](#fn-state-destroyuserdata)
-- [destroyClosure](#fn-state-destroyclosure)
-- [destroyCClosure](#fn-state-destroycclosure)
-- [destroyThread](#fn-state-destroythread)
-- [allocationStats](#fn-state-allocationstats)
-- [failRuntimeDetail](#fn-state-failruntimedetail)
-- [errorDetailAlloc](#fn-state-errordetailalloc)
-- [fail](#fn-state-fail)
-- [failArgument](#fn-state-failargument)
-- [failArgumentMessage](#fn-state-failargumentmessage)
-- [failArgumentType](#fn-state-failargumenttype)
-- [expectArgumentString](#fn-state-expectargumentstring)
-- [argumentDisplayIndex](#fn-state-argumentdisplayindex)
-- [expectArgumentTable](#fn-state-expectargumenttable)
-- [argumentInteger](#fn-state-argumentinteger)
-- [failValue](#fn-state-failvalue)
-- [throwValue](#fn-state-throwvalue)
-- [currentErrorValue](#fn-state-currenterrorvalue)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [init](#fn-state-init) | `allocator: std.mem.Allocator` | `!State` |  |
+| [initWithOptions](#fn-state-initwithoptions) | `allocator: std.mem.Allocator, options: StateOptions` | `!State` |  |
+| [stackValueLimit](#fn-state-stackvaluelimit) | `self: *const State` | `usize` |  |
+| [callFrameLimit](#fn-state-callframelimit) | `self: *const State` | `usize` |  |
+| [fileMetatable](#fn-state-filemetatable) | `state: *State` | `!*Table` |  |
+| [deinit](#fn-state-deinit) | `self: *State` | `void` |  |
+| [execute](#fn-state-execute) | `self: *State, proto: *const proto_mod.Proto` | `!void` |  |
+| [callLoadedClosure](#fn-state-callloadedclosure) | `self: *State, closure: *Closure, args: []const Value` | `![]Value` |  |
+| [protectedCallLoadedClosure](#fn-state-protectedcallloadedclosure) | `self: *State, closure: *Closure, args: []const Value` | `!ProtectedCallResult` |  |
+| [executeSourceChunk](#fn-state-executesourcechunk) | `self: *State, source: []const u8` | `!void` |  |
+| [executeSourceChunkNamed](#fn-state-executesourcechunknamed) | `self: *State, source: []const u8, source_name: []const u8` | `!void` |  |
+| [runThreadUntil](#fn-state-runthreaduntil) | `self: *State, thread: *Thread, target_frame_count: usize` | `anyerror!void` |  |
+| [checkExecutionLimits](#fn-state-checkexecutionlimits) | `self: *State, thread: *Thread` | `!void` |  |
+| [noteAllocation](#fn-state-noteallocation) | `self: *State, bytes: usize` | `void` |  |
+| [noteAllocationFreed](#fn-state-noteallocationfreed) | `self: *State, bytes: usize` | `void` |  |
+| [refreshAllocationTotal](#fn-state-refreshallocationtotal) | `self: *State` | `usize` |  |
+| [currentAllocationTotal](#fn-state-currentallocationtotal) | `self: *State` | `usize` |  |
+| [tableCapacityBytes](#fn-state-tablecapacitybytes) | `table: *const Table` | `usize` |  |
+| [tableGcBytes](#fn-state-tablegcbytes) | `table: *const Table` | `usize` |  |
+| [noteTableCapacityDelta](#fn-state-notetablecapacitydelta) | `self: *State, table: *const Table, old_capacity_bytes: usize` | `void` |  |
+| [getGlobal](#fn-state-getglobal) | `self: *State, name: []const u8` | `Value` |  |
+| [currentLine](#fn-state-currentline) | `self: *State, thread: *Thread, level: i64` | `?usize` |  |
+| [currentExtraArgs](#fn-state-currentextraargs) | `self: *State, thread: *Thread, level: i64` | `?usize` |  |
+| [currentWhat](#fn-state-currentwhat) | `self: *State, thread: *Thread, level: i64` | `[]const u8` |  |
+| [currentFunctionName](#fn-state-currentfunctionname) | `self: *State, thread: *Thread, level: i64` | `?[]const u8` |  |
+| [currentFunctionNameWhat](#fn-state-currentfunctionnamewhat) | `self: *State, thread: *Thread, level: i64` | `?[]const u8` |  |
+| [setThreadHook](#fn-state-setthreadhook) | `self: *State, target: *Thread, hook: Value, mask: []const u8, count: u32` | `void` |  |
+| [threadHookMask](#fn-state-threadhookmask) | `self: *State, thread: *Thread` | `![]const u8` |  |
+| [callHook](#fn-state-callhook) | `self: *State, thread: *Thread, event: []const u8` | `!void` |  |
+| [putGlobal](#fn-state-putglobal) | `self: *State, name: []const u8, value: Value` | `!void` |  |
+| [rootValue](#fn-state-rootvalue) | `self: *State, value: Value` | `!usize` |  |
+| [unrootValue](#fn-state-unrootvalue) | `self: *State, index: usize` | `void` |  |
+| [rootedValue](#fn-state-rootedvalue) | `self: *State, index: usize` | `Value` |  |
+| [activeRootCount](#fn-state-activerootcount) | `self: State` | `usize` |  |
+| [setApiCallbackDispatch](#fn-state-setapicallbackdispatch) | `self: *State, dispatch: ApiCallbackDispatchFn, user_data: *anyopaque` | `void` |  |
+| [setCClosureDispatch](#fn-state-setcclosuredispatch) | `self: *State, dispatch: CClosureDispatchFn, user_data: *anyopaque` | `void` |  |
+| [setCClosureResumeDispatch](#fn-state-setcclosureresumedispatch) | `self: *State, dispatch: CClosureResumeDispatchFn` | `void` |  |
+| [setCDebugHookDispatch](#fn-state-setcdebughookdispatch) | `self: *State, dispatch: CDebugHookDispatchFn` | `void` |  |
+| [newCClosure](#fn-state-newcclosure) | `self: *State, function_id: usize, upvalue_values: []const Value` | `!*CClosure` |  |
+| [newCoroutine](#fn-state-newcoroutine) | `self: *State, entry: Value` | `!*Thread` |  |
+| [resumeThread](#fn-state-resumethread) | `self: *State, target: *Thread, args: []const Value` | `!ProtectedCallResult` |  |
+| [closeThread](#fn-state-closethread) | `self: *State, target: *Thread` | `!?Value` |  |
+| [threadWasYielded](#fn-state-threadwasyielded) | `_: *State, target: *Thread` | `bool` |  |
+| [callCClosureDispatch](#fn-state-callcclosuredispatch) | `self: *State, thread: *Thread, op: bytecode.Call, closure: *CClosure` | `!void` |  |
+| [resumeCClosureDispatch](#fn-state-resumecclosuredispatch) | `self: *State, thread: *Thread, args: []const Value` | `!void` |  |
+| [callApiCallbackDispatch](#fn-state-callapicallbackdispatch) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [readFileAlloc](#fn-state-readfilealloc) | `self: *State, path: []const u8` | `![]const u8` |  |
+| [writeStdout](#fn-state-writestdout) | `self: *State, bytes: []const u8` | `!void` |  |
+| [writeStderr](#fn-state-writestderr) | `self: *State, bytes: []const u8` | `!void` |  |
+| [flushStdout](#fn-state-flushstdout) | `self: *State` | `!void` |  |
+| [flushStderr](#fn-state-flushstderr) | `self: *State` | `!void` |  |
+| [writeFile](#fn-state-writefile) | `self: *State, path: []const u8, data: []const u8` | `!void` |  |
+| [removeFile](#fn-state-removefile) | `self: *State, path: []const u8` | `!void` |  |
+| [renameFile](#fn-state-renamefile) | `self: *State, old_path: []const u8, new_path: []const u8` | `!void` |  |
+| [getenv](#fn-state-getenv) | `self: *State, name: []const u8` | `?[]const u8` |  |
+| [currentTime](#fn-state-currenttime) | `self: *State` | `!i64` |  |
+| [requireIo](#fn-state-requireio) | `self: *State, unavailable_message: []const u8` | `RuntimeError!std.Io` |  |
+| [processEnabled](#fn-state-processenabled) | `self: *State` | `bool` |  |
+| [readStdin](#fn-state-readstdin) | `self: *State, spec: []const u8` | `!Value` |  |
+| [loadSourceAsClosure](#fn-state-loadsourceasclosure) | `self: *State, source: []const u8` | `!Value` |  |
+| [loadSourceAsClosureNamed](#fn-state-loadsourceasclosurenamed) | `self: *State, source: []const u8, source_name: ?[]const u8` | `!Value` |  |
+| [loadSourceAsClosureNamedEnv](#fn-state-loadsourceasclosurenamedenv) | `self: *State, source: []const u8, source_name: ?[]const u8, environment: Value` | `!Value` |  |
+| [loadBinaryDump](#fn-state-loadbinarydump) | `self: *State, source: []const u8, environment: Value` | `!Value` |  |
+| [loadFileAsClosure](#fn-state-loadfileasclosure) | `self: *State, path: []const u8` | `!Value` |  |
+| [loadFileAsClosureNamed](#fn-state-loadfileasclosurenamed) | `self: *State, path: []const u8, source_name: ?[]const u8` | `!Value` |  |
+| [callCollect](#fn-state-callcollect) | `self: *State, thread: *Thread, callable: Value, args: []const Value` | `anyerror![]Value` |  |
+| [intern](#fn-state-intern) | `self: *State, bytes: []const u8` | `![]const u8` |  |
+| [allocateString](#fn-state-allocatestring) | `self: *State, bytes: []const u8` | `![]const u8` |  |
+| [newTableWithHints](#fn-state-newtablewithhints) | `self: *State, array_hint: u32, hash_hint: u32` | `!Value` |  |
+| [newUserdata](#fn-state-newuserdata) | `self: *State, ptr: *anyopaque, type_id: usize, type_name: []const u8, finalizer: ?UserdataFinalizer, finalizer_data: ?*const anyopaque, deinit_fn: ?UserdataDeinit` | `!Value` |  |
+| [closeUpvalues](#fn-state-closeupvalues) | `self: *State, thread: *Thread, first_stack_index: usize` | `void` |  |
+| [closeFramesTo](#fn-state-closeframesto) | `self: *State, thread: *Thread, frame_count: usize, error_value: ?Value` | `!void` |  |
+| [getTableValue](#fn-state-gettablevalue) | `self: *State, table_value: Value, key_value: Value` | `!Value` |  |
+| [getTableFromThread](#fn-state-gettablefromthread) | `self: *State, thread: *Thread, table_value: Value, key_value: Value` | `!Value` |  |
+| [setTableValue](#fn-state-settablevalue) | `self: *State, table_value: Value, key_value: Value, value: Value` | `!void` |  |
+| [setTableFromThread](#fn-state-settablefromthread) | `self: *State, thread: *Thread, table_value: Value, key_value: Value, value: Value` | `!void` |  |
+| [lengthOf](#fn-state-lengthof) | `self: *State, thread: *Thread, value: Value` | `!Value` |  |
+| [invokeValue](#fn-state-invokevalue) | `self: *State, thread: *Thread, resolved: bytecode.Call, depth: usize` | `anyerror!void` |  |
+| [callOneResult](#fn-state-calloneresult) | `self: *State, thread: *Thread, callable: Value, args: []const Value` | `anyerror!Value` |  |
+| [callOneResultWithContinuation](#fn-state-calloneresultwithcontinuation) | `self: *State, thread: *Thread, callable: Value, args: []const Value, result: CallOneContinuationResult` | `anyerror!Value` |  |
+| [callOneMetamethodWithContinuation](#fn-state-callonemetamethodwithcontinuation) | `self: *State, thread: *Thread, name: []const u8, callable: Value, args: []const Value, result: CallOneContinuationResult` | `anyerror!Value` |  |
+| [callOneMetamethod](#fn-state-callonemetamethod) | `self: *State, thread: *Thread, name: []const u8, callable: Value, args: []const Value` | `anyerror!Value` |  |
+| [metamethodDebugName](#fn-state-metamethoddebugname) | `name: []const u8` | `[]const u8` |  |
+| [callOneResultMaybeContinuation](#fn-state-calloneresultmaybecontinuation) | `self: *State, thread: *Thread, callable: Value, args: []const Value, continuation_result: ?CallOneContinuationResult` | `anyerror!Value` |  |
+| [pushCallOneContinuation](#fn-state-pushcallonecontinuation) | `self: *State, thread: *Thread, frame_count: usize, result: CallOneContinuationResult` | `!void` |  |
+| [readyCallOneContinuationIndex](#fn-state-readycallonecontinuationindex) | `thread: *Thread` | `?usize` |  |
+| [completeReadyCallOneContinuation](#fn-state-completereadycallonecontinuation) | `self: *State, thread: *Thread` | `!bool` |  |
+| [protectedCall](#fn-state-protectedcall) | `self: *State, thread: *Thread, callable: Value, args: []const Value` | `anyerror!ProtectedCallResult` |  |
+| [protectedCallContext](#fn-state-protectedcallcontext) | `_: *State, thread: *Thread` | `ProtectedCallContext` |  |
+| [protectedCallContextWithErrors](#fn-state-protectedcallcontextwitherrors) | `self: *State, thread: *Thread` | `ProtectedCallContext` |  |
+| [runProtectedCall](#fn-state-runprotectedcall) | `self: *State, thread: *Thread, context: ProtectedCallContext, callable: Value, args: []const Value` | `anyerror!ProtectedCallResult` |  |
+| [restoreProtectedCall](#fn-state-restoreprotectedcall) | `self: *State,         thread: *Thread,         context: ProtectedCallContext,         error_value: Value,` | `!Value` |  |
+| [pushProtectedContinuation](#fn-state-pushprotectedcontinuation) | `self: *State, thread: *Thread, context: ProtectedCallContext, base: bytecode.Register, return_count: u16, kind: ProtectedContinuationKind, handler: Value, handler_depth: usize` | `!void` |  |
+| [readyProtectedContinuationIndex](#fn-state-readyprotectedcontinuationindex) | `thread: *Thread` | `?usize` |  |
+| [errorProtectedContinuationIndex](#fn-state-errorprotectedcontinuationindex) | `thread: *Thread` | `?usize` |  |
+| [completeReadyProtectedContinuation](#fn-state-completereadyprotectedcontinuation) | `self: *State, thread: *Thread` | `!bool` |  |
+| [completeProtectedContinuationError](#fn-state-completeprotectedcontinuationerror) | `self: *State, thread: *Thread, error_value: Value` | `!bool` |  |
+| [returnProtectedContinuationSuccess](#fn-state-returnprotectedcontinuationsuccess) | `self: *State, thread: *Thread, continuation: ProtectedContinuation, values: []Value` | `!void` |  |
+| [returnProtectedContinuationFailure](#fn-state-returnprotectedcontinuationfailure) | `self: *State, thread: *Thread, continuation: ProtectedContinuation, failure: Value` | `!void` |  |
+| [valueToString](#fn-state-valuetostring) | `self: *State, thread: *Thread, value: Value` | `anyerror![]const u8` |  |
+| [setDebugMetatableValue](#fn-state-setdebugmetatablevalue) | `self: *State, value: Value, metatable_value: Value` | `!void` |  |
+| [getMetamethod](#fn-state-getmetamethod) | `self: *State, value: Value, name: []const u8` | `!?Value` |  |
+| [setTableMetatableRaw](#fn-state-settablemetatableraw) | `self: *State, table: *Table, metatable: ?*Table` | `void` |  |
+| [noteTableMetatableChanged](#fn-state-notetablemetatablechanged) | `self: *State, table: *Table, old_has_metatable: bool` | `void` |  |
+| [unlinkTableMetatable](#fn-state-unlinktablemetatable) | `self: *State, table: *Table` | `void` |  |
+| [luaTypeNameForError](#fn-state-luatypenameforerror) | `self: *State, value: Value` | `[]const u8` |  |
+| [jumpIfBranchResult](#fn-state-jumpifbranchresult) | `self: *State, thread: *Thread, result: bool, jump_if_truthy: bool, offset: bytecode.JumpOffset` | `!void` |  |
+| [compareValues](#fn-state-comparevalues) | `self: *State, thread: *Thread, lhs: Value, rhs: Value, op: CompareOp` | `!bool` |  |
+| [returnValues](#fn-state-returnvalues) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, values: []const Value` | `!void` |  |
+| [prepareClosureFrame](#fn-state-prepareclosureframe) | `self: *State, thread: *Thread, closure: *Closure, source_base: usize, frame_base: usize, arg_count: usize, return_start: usize, return_count: u16` | `!CallFrame` |  |
+| [captureVarargs](#fn-state-capturevarargs) | `self: *State, thread: *Thread, source_start: usize, count: usize` | `![]const Value` |  |
+| [namedVarargTable](#fn-state-namedvarargtable) | `self: *State, varargs: []const Value` | `!Value` |  |
+| [resolveReturnCount](#fn-state-resolvereturncount) | `self: *State, count: u16, available: usize` | `!usize` |  |
+| [returnXpcallFailure](#fn-state-returnxpcallfailure) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value` | `!void` |  |
+| [returnXpcallFailureFromDepth](#fn-state-returnxpcallfailurefromdepth) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, handler: Value, error_value: Value, initial_depth: usize` | `!void` |  |
+| [snapshotCoroutineErrorTraceback](#fn-state-snapshotcoroutineerrortraceback) | `self: *State, target: *Thread` | `![]const u8` |  |
+| [coroutineCreate](#fn-state-coroutinecreate) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineResume](#fn-state-coroutineresume) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineYield](#fn-state-coroutineyield) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineStatus](#fn-state-coroutinestatus) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineRunning](#fn-state-coroutinerunning) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineIsYieldable](#fn-state-coroutineisyieldable) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineClose](#fn-state-coroutineclose) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [coroutineWrap](#fn-state-coroutinewrap) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [callCoroutineWrapper](#fn-state-callcoroutinewrapper) | `self: *State, thread: *Thread, op: bytecode.Call, target: *Thread` | `!void` |  |
+| [callCoroutineWrapperWithArgs](#fn-state-callcoroutinewrapperwithargs) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, target: *Thread, args: []const Value` | `!void` |  |
+| [newCoroutineThread](#fn-state-newcoroutinethread) | `self: *State, entry: Value` | `!*Thread` |  |
+| [closeCoroutine](#fn-state-closecoroutine) | `self: *State, target: *Thread, error_value: ?Value` | `!?Value` |  |
+| [resumeCoroutine](#fn-state-resumecoroutine) | `self: *State, target: *Thread, args: []const Value` | `!CoroutineResumeResult` |  |
+| [startCoroutine](#fn-state-startcoroutine) | `self: *State, target: *Thread, args: []const Value` | `!void` |  |
+| [callableEntryClosure](#fn-state-callableentryclosure) | `self: *State` | `!*Closure` |  |
+| [setCoroutineResumeValues](#fn-state-setcoroutineresumevalues) | `self: *State, target: *Thread, args: []const Value` | `!void` |  |
+| [returnCoroutineResumeResult](#fn-state-returncoroutineresumeresult) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, result: CoroutineResumeResult` | `!void` |  |
+| [copyValues](#fn-state-copyvalues) | `self: *State, values: []const Value` | `![]Value` |  |
+| [copyStackSlice](#fn-state-copystackslice) | `self: *State, thread: *Thread, base: usize, count: usize` | `![]Value` |  |
+| [collectArgs](#fn-state-collectargs) | `self: *State, thread: *Thread, op: bytecode.Call, first: u16` | `![]Value` |  |
+| [returnProtectedResult](#fn-state-returnprotectedresult) | `self: *State, thread: *Thread, base: bytecode.Register, return_count: u16, result: ProtectedCallResult` | `!void` |  |
+| [expectTable](#fn-state-expecttable) | `self: *State, value: Value` | `!*Table` |  |
+| [expectString](#fn-state-expectstring) | `self: *State, value: Value` | `![]const u8` |  |
+| [expectThread](#fn-state-expectthread) | `self: *State, value: Value` | `!*Thread` |  |
+| [collectGarbageValue](#fn-state-collectgarbagevalue) | `self: *State, thread: *Thread, op: bytecode.Call` | `!void` |  |
+| [collectGarbageParam](#fn-state-collectgarbageparam) | `self: *State, value: Value` | `!GcParam` |  |
+| [collectGarbageStep](#fn-state-collectgarbagestep) | `self: *State, thread: ?*Thread, budget: i64` | `!bool` |  |
+| [collectGarbage](#fn-state-collectgarbage) | `self: *State` | `!void` |  |
+| [collectGarbageStepPublic](#fn-state-collectgarbagesteppublic) | `self: *State, budget: i64` | `!bool` |  |
+| [allocationByteCount](#fn-state-allocationbytecount) | `self: State` | `usize` |  |
+| [gcIsRunning](#fn-state-gcisrunning) | `self: State` | `bool` |  |
+| [stopGc](#fn-state-stopgc) | `self: *State` | `void` |  |
+| [restartGc](#fn-state-restartgc) | `self: *State` | `void` |  |
+| [switchGcMode](#fn-state-switchgcmode) | `self: *State, mode: GcMode` | `GcMode` |  |
+| [gcParam](#fn-state-gcparam) | `self: State, param: GcParam` | `i64` |  |
+| [setGcParam](#fn-state-setgcparam) | `self: *State, param: GcParam, value: i64` | `void` |  |
+| [collectGarbageConservatively](#fn-state-collectgarbageconservatively) | `self: *State, thread: ?*Thread` | `!void` |  |
+| [collectGarbageWithFinalizers](#fn-state-collectgarbagewithfinalizers) | `self: *State, thread: ?*Thread` | `!void` |  |
+| [collectGarbageWithFinalizersMode](#fn-state-collectgarbagewithfinalizersmode) | `self: *State, thread: ?*Thread, mark_all_stack_registers: bool` | `!void` |  |
+| [shouldRunAutoGc](#fn-state-shouldrunautogc) | `self: *State` | `bool` |  |
+| [resetAutoGcThreshold](#fn-state-resetautogcthreshold) | `self: *State` | `void` |  |
+| [resetMarks](#fn-state-resetmarks) | `self: *State` | `void` |  |
+| [markRoots](#fn-state-markroots) | `self: *State` | `void` |  |
+| [markValue](#fn-state-markvalue) | `self: *State, value: Value` | `void` |  |
+| [markRuntimeErrorPayload](#fn-state-markruntimeerrorpayload) | `self: *State, payload: ?RuntimeErrorPayload` | `void` |  |
+| [markString](#fn-state-markstring) | `self: *State, bytes: []const u8` | `void` |  |
+| [markTable](#fn-state-marktable) | `self: *State, table: *Table` | `void` |  |
+| [markUserdata](#fn-state-markuserdata) | `self: *State, userdata: *Userdata` | `void` |  |
+| [markWeakTableStrings](#fn-state-markweaktablestrings) | `self: *State, table: *Table, keys: bool, values: bool` | `void` |  |
+| [markWeakString](#fn-state-markweakstring) | `self: *State, value: Value` | `void` |  |
+| [markClosure](#fn-state-markclosure) | `self: *State, closure: *Closure` | `void` |  |
+| [markCClosure](#fn-state-markcclosure) | `self: *State, closure: *CClosure` | `void` |  |
+| [markUpvalue](#fn-state-markupvalue) | `self: *State, upvalue: *Upvalue` | `void` |  |
+| [markCUpvalue](#fn-state-markcupvalue) | `self: *State, upvalue: *CUpvalue` | `void` |  |
+| [markThread](#fn-state-markthread) | `self: *State, thread: *Thread` | `void` |  |
+| [markThreadStack](#fn-state-markthreadstack) | `self: *State, thread: *Thread` | `void` |  |
+| [markStackRange](#fn-state-markstackrange) | `self: *State, thread: *Thread, base: usize, count: usize` | `void` |  |
+| [weakMode](#fn-state-weakmode) | `self: *State, table: *Table` | `WeakMode` |  |
+| [hasWeakTables](#fn-state-hasweaktables) | `self: *State` | `bool` |  |
+| [markEphemeronValues](#fn-state-markephemeronvalues) | `self: *State, table: *Table` | `bool` |  |
+| [convergeEphemerons](#fn-state-convergeephemerons) | `self: *State` | `void` |  |
+| [markValueChanged](#fn-state-markvaluechanged) | `self: *State, value: Value` | `bool` |  |
+| [valueIsMarked](#fn-state-valueismarked) | `self: *State, value: Value` | `bool` |  |
+| [valueIsWeaklyCleared](#fn-state-valueisweaklycleared) | `self: *State, value: Value` | `bool` |  |
+| [valueIsCollectableUnmarked](#fn-state-valueiscollectableunmarked) | `self: *State, value: Value` | `bool` |  |
+| [clearWeakValues](#fn-state-clearweakvalues) | `self: *State` | `void` |  |
+| [clearWeakTables](#fn-state-clearweaktables) | `self: *State` | `void` |  |
+| [clearDeadHashKeys](#fn-state-cleardeadhashkeys) | `self: *State` | `void` |  |
+| [clearWeakTableValues](#fn-state-clearweaktablevalues) | `self: *State, table: *Table` | `void` |  |
+| [clearWeakTableKeys](#fn-state-clearweaktablekeys) | `self: *State, table: *Table` | `void` |  |
+| [writeTableBarrier](#fn-state-writetablebarrier) | `self: *State, table: *Table, key: Value, value: Value` | `void` |  |
+| [writeBarrier](#fn-state-writebarrier) | `self: *State, parent_marked: bool, child: Value` | `void` |  |
+| [runPendingFinalizers](#fn-state-runpendingfinalizers) | `self: *State, thread: ?*Thread` | `!void` |  |
+| [runPendingUserdataFinalizers](#fn-state-runpendinguserdatafinalizers) | `self: *State` | `void` |  |
+| [callableValue](#fn-state-callablevalue) | `self: *State, value: Value` | `bool` |  |
+| [sweepStrings](#fn-state-sweepstrings) | `self: *State` | `void` |  |
+| [sweepUserdata](#fn-state-sweepuserdata) | `self: *State` | `void` |  |
+| [sweepTables](#fn-state-sweeptables) | `self: *State` | `void` |  |
+| [sweepClosures](#fn-state-sweepclosures) | `self: *State` | `void` |  |
+| [sweepCClosures](#fn-state-sweepcclosures) | `self: *State` | `void` |  |
+| [sweepUpvalues](#fn-state-sweepupvalues) | `self: *State` | `void` |  |
+| [sweepCUpvalues](#fn-state-sweepcupvalues) | `self: *State` | `void` |  |
+| [sweepThreads](#fn-state-sweepthreads) | `self: *State` | `void` |  |
+| [findStringAllocation](#fn-state-findstringallocation) | `self: *State, bytes: []const u8` | `?usize` |  |
+| [isTrackedThread](#fn-state-istrackedthread) | `self: *State, thread: *Thread` | `bool` |  |
+| [isTrackedTable](#fn-state-istrackedtable) | `self: *State, table: *Table` | `bool` |  |
+| [isTrackedUserdata](#fn-state-istrackeduserdata) | `self: *State, userdata: *Userdata` | `bool` |  |
+| [isTrackedClosure](#fn-state-istrackedclosure) | `self: *State, closure: *Closure` | `bool` |  |
+| [isTrackedCClosure](#fn-state-istrackedcclosure) | `self: *State, closure: *CClosure` | `bool` |  |
+| [isTrackedUpvalue](#fn-state-istrackedupvalue) | `self: *State, upvalue: *Upvalue` | `bool` |  |
+| [isTrackedCUpvalue](#fn-state-istrackedcupvalue) | `self: *State, upvalue: *CUpvalue` | `bool` |  |
+| [destroyTable](#fn-state-destroytable) | `self: *State, table: *Table` | `void` |  |
+| [destroyUserdata](#fn-state-destroyuserdata) | `self: *State, userdata: *Userdata` | `void` |  |
+| [destroyClosure](#fn-state-destroyclosure) | `self: *State, closure: *Closure` | `void` |  |
+| [destroyCClosure](#fn-state-destroycclosure) | `self: *State, closure: *CClosure` | `void` |  |
+| [destroyThread](#fn-state-destroythread) | `self: *State, thread: *Thread` | `void` |  |
+| [allocationStats](#fn-state-allocationstats) | `self: State` | `RuntimeAllocationStats` |  |
+| [failRuntimeDetail](#fn-state-failruntimedetail) | `self: *State, thread: ?*Thread, detail: []const u8` | `RuntimeError` |  |
+| [errorDetailAlloc](#fn-state-errordetailalloc) | `self: *State, allocator: std.mem.Allocator, err: anyerror` | `![]const u8` |  |
+| [fail](#fn-state-fail) | `self: *State, message: []const u8` | `RuntimeError` |  |
+| [failArgument](#fn-state-failargument) | `self: *State, function_name: []const u8, index: u16, detail: errors.ArgumentErrorDetail` | `RuntimeError` |  |
+| [failArgumentMessage](#fn-state-failargumentmessage) | `self: *State, function_name: []const u8, index: u16, message: []const u8` | `RuntimeError` |  |
+| [failArgumentType](#fn-state-failargumenttype) | `self: *State, function_name: []const u8, index: u16, expected: []const u8, actual: Value` | `RuntimeError` |  |
+| [expectArgumentString](#fn-state-expectargumentstring) | `self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16` | `![]const u8` |  |
+| [argumentDisplayIndex](#fn-state-argumentdisplayindex) | `self: *State, thread: *Thread, function_name: []const u8, index: u16` | `u16` |  |
+| [expectArgumentTable](#fn-state-expectargumenttable) | `self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16` | `!*Table` |  |
+| [argumentInteger](#fn-state-argumentinteger) | `self: *State, thread: *Thread, op: bytecode.Call, function_name: []const u8, index: u16` | `!i64` |  |
+| [failValue](#fn-state-failvalue) | `self: *State, value: Value` | `RuntimeError` |  |
+| [throwValue](#fn-state-throwvalue) | `self: *State, value: Value` | `RuntimeError` |  |
+| [currentErrorValue](#fn-state-currenterrorvalue) | `self: *State` | `Value` |  |
 
 <a id="fn-state-init"></a>
 
@@ -2899,7 +2962,10 @@ References: [`State`](#type-state), [`Value`](#alias-value)
 ## CompareOp
 
 ```zig
-pub const CompareOp = enum {};
+pub const CompareOp = enum {
+    lt,
+    le,
+};
 ```
 
 <a id="fn-valuesequal"></a>

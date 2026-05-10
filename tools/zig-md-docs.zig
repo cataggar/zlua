@@ -433,7 +433,7 @@ fn collectDecls(
 
             var kind: DeclKind = if (mut == .keyword_var) .variable else .constant;
             if (init_node) |init| {
-                if (containerKind(tree, init) != null) {
+                if (containerKind(tree, init) != null or isErrorSetDecl(tree, init)) {
                     kind = .type;
                 } else if (import_path != null) {
                     kind = .import;
@@ -456,7 +456,9 @@ fn collectDecls(
             if (init_node) |init| {
                 var container_buffer: [2]Ast.Node.Index = undefined;
                 if (tree.fullContainerDecl(&container_buffer, init)) |container| {
-                    try collectContainerMembers(allocator, config, project_root_abs, source_path_abs, tree, container.ast.members, &decl);
+                    try collectContainerMembers(allocator, config, project_root_abs, source_path_abs, tree, container.ast.main_token, container.ast.members, &decl);
+                } else if (isErrorSetDecl(tree, init)) {
+                    try collectErrorSetMembers(allocator, tree, init, &decl);
                 }
             }
 
@@ -472,17 +474,21 @@ fn collectContainerMembers(
     project_root_abs: []const u8,
     source_path_abs: []const u8,
     tree: Ast,
+    container_token: Ast.TokenIndex,
     members: []const Ast.Node.Index,
     owner: *DeclDocs,
 ) anyerror!void {
     var nested_imports = std.ArrayList(ImportDocs).empty;
+    const is_enum = tree.tokenTag(container_token) == .keyword_enum;
     for (members) |member| {
         if (tree.fullContainerField(member)) |field| {
-            if (field.ast.tuple_like) continue;
             const first = field.firstToken();
-            const name = tree.tokenSlice(field.ast.main_token);
+            const name = if (field.ast.tuple_like and !is_enum)
+                try std.fmt.allocPrint(allocator, "{d}", .{owner.fields.items.len})
+            else
+                try allocator.dupe(u8, tree.tokenSlice(field.ast.main_token));
             try owner.fields.append(allocator, .{
-                .name = try allocator.dupe(u8, name),
+                .name = name,
                 .doc = try collectDocComment(allocator, tree, first),
                 .signature = try simpleNodeSignature(allocator, tree, member),
                 .line = lineNumber(tree, first),
@@ -490,6 +496,21 @@ fn collectContainerMembers(
         }
     }
     try collectDecls(allocator, config, project_root_abs, source_path_abs, tree, members, &owner.children, &nested_imports);
+}
+
+fn collectErrorSetMembers(allocator: Allocator, tree: Ast, node: Ast.Node.Index, owner: *DeclDocs) !void {
+    const lbrace, const rbrace = tree.nodeData(node).token_and_token;
+    var tok = lbrace + 1;
+    while (tok < rbrace) : (tok += 1) {
+        if (tree.tokenTag(tok) != .identifier) continue;
+        const name = tree.tokenSlice(tok);
+        try owner.fields.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .doc = try collectDocComment(allocator, tree, tok),
+            .signature = try allocator.dupe(u8, name),
+            .line = lineNumber(tree, tok),
+        });
+    }
 }
 
 fn collectModuleDoc(allocator: Allocator, tree: Ast) ![]const u8 {
@@ -570,6 +591,10 @@ fn containerKind(tree: Ast, node: Ast.Node.Index) ?[]const u8 {
     };
 }
 
+fn isErrorSetDecl(tree: Ast, node: Ast.Node.Index) bool {
+    return tree.nodeTag(node) == .error_set_decl;
+}
+
 fn isAliasExpr(tree: Ast, node: Ast.Node.Index) bool {
     return switch (tree.nodeTag(node)) {
         .identifier, .field_access, .deref, .unwrap_optional => true,
@@ -627,6 +652,7 @@ fn varSignature(
         if (var_decl.ast.init_node.unwrap()) |init| {
             const has_semicolon = tree.tokenTag(tree.lastToken(node) + 1) == .semicolon;
             if (containerHeaderSignature(allocator, tree, var_decl.firstToken(), init, has_semicolon)) |sig| return sig;
+            if (errorSetHeaderSignature(allocator, tree, var_decl.firstToken(), init, has_semicolon)) |sig| return sig;
         }
     }
 
@@ -667,6 +693,19 @@ fn containerHeaderSignature(allocator: Allocator, tree: Ast, start_token: Ast.To
         }
     }
     return null;
+}
+
+fn errorSetHeaderSignature(allocator: Allocator, tree: Ast, start_token: Ast.TokenIndex, init: Ast.Node.Index, has_semicolon: bool) ?[]const u8 {
+    if (!isErrorSetDecl(tree, init)) return null;
+    const lbrace, _ = tree.nodeData(init).token_and_token;
+    const start = tree.tokenStart(start_token);
+    const end = tree.tokenStart(lbrace) + 1;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    out.appendSlice(allocator, std.mem.trimEnd(u8, tree.source[start..end], &std.ascii.whitespace)) catch return null;
+    out.appendSlice(allocator, " ... }") catch return null;
+    if (has_semicolon) out.append(allocator, ';') catch return null;
+    return out.toOwnedSlice(allocator) catch null;
 }
 
 fn simpleNodeSignature(allocator: Allocator, tree: Ast, node: Ast.Node.Index) ![]const u8 {
@@ -791,16 +830,6 @@ fn renderModuleNavigation(
     try appendHeading(allocator, out, heading_level, "Navigation");
     try out.append(allocator, '\n');
     try out.print(allocator, "- [API Index]({s})\n", .{try indexHref(allocator, module.name)});
-
-    const current_index = findModuleIndex(docs, module.name) orelse 0;
-    if (current_index > 0) {
-        const previous = docs.modules.items[current_index - 1];
-        try out.print(allocator, "- Previous: [{s}]({s})\n", .{ previous.name, try moduleHref(allocator, module.name, previous.name) });
-    }
-    if (current_index + 1 < docs.modules.items.len) {
-        const next = docs.modules.items[current_index + 1];
-        try out.print(allocator, "- Next: [{s}]({s})\n", .{ next.name, try moduleHref(allocator, module.name, next.name) });
-    }
     if (parentModuleName(module.name)) |parent_name| {
         if (findModuleIndex(docs, parent_name) != null) {
             try out.print(allocator, "- Parent: [{s}]({s})\n", .{ parent_name, try moduleHref(allocator, module.name, parent_name) });
@@ -820,6 +849,15 @@ fn renderModuleNavigation(
     }
     if (wrote_submodules) try out.append(allocator, '\n');
     try out.append(allocator, '\n');
+    try renderAllDocumentsNavigation(allocator, out, docs, module.name);
+}
+
+fn renderAllDocumentsNavigation(allocator: Allocator, out: *std.ArrayList(u8), docs: *const PackageDocs, current_module: []const u8) !void {
+    try out.appendSlice(allocator, "<details>\n<summary>All documents</summary>\n\n");
+    for (docs.modules.items) |module| {
+        try out.print(allocator, "- [{s}]({s})\n", .{ module.name, try moduleHref(allocator, current_module, module.name) });
+    }
+    try out.appendSlice(allocator, "\n</details>\n\n");
 }
 
 fn findModuleIndex(docs: *const PackageDocs, module_name: []const u8) ?usize {
@@ -910,15 +948,39 @@ fn renderDecl(
     if (decl.children.items.len != 0) {
         try appendHeading(allocator, out, heading_level + 1, "Nested Declarations");
         try out.append(allocator, '\n');
-        for (decl.children.items) |child| {
-            const child_anchor = try declAnchor(allocator, child, decl.name);
-            try out.print(allocator, "- [{s}](#{s})\n", .{ child.name, child_anchor });
-        }
-        try out.append(allocator, '\n');
+        try renderNestedDeclarationsTable(allocator, out, decl.children.items, decl.name);
         for (decl.children.items) |child| {
             try renderDecl(allocator, out, symbols, current_module, child, heading_level + 1, decl.name, single_file);
         }
     }
+}
+
+fn renderNestedDeclarationsTable(allocator: Allocator, out: *std.ArrayList(u8), children: []const DeclDocs, parent_name: []const u8) !void {
+    try out.appendSlice(allocator, "| Name | Parameters | Return Type | Description |\n");
+    try out.appendSlice(allocator, "| --- | --- | --- | --- |\n");
+    for (children) |child| {
+        const child_anchor = try declAnchor(allocator, child, parent_name);
+        const parameters = functionParameters(child.signature);
+        const return_type = functionReturnType(child.signature);
+        try out.appendSlice(allocator, "| [");
+        try appendTableCellEscaped(allocator, out, child.name);
+        try out.print(allocator, "](#{s}) | ", .{child_anchor});
+        if (parameters.len != 0) {
+            try out.append(allocator, '`');
+            try appendTableCellEscaped(allocator, out, parameters);
+            try out.append(allocator, '`');
+        }
+        try out.appendSlice(allocator, " | ");
+        if (return_type.len != 0) {
+            try out.append(allocator, '`');
+            try appendTableCellEscaped(allocator, out, return_type);
+            try out.append(allocator, '`');
+        }
+        try out.appendSlice(allocator, " | ");
+        try appendTableCellEscaped(allocator, out, firstDocSentence(child.doc));
+        try out.appendSlice(allocator, " |\n");
+    }
+    try out.append(allocator, '\n');
 }
 
 fn appendDeclSignatureCodeBlock(allocator: Allocator, out: *std.ArrayList(u8), decl: *const DeclDocs) !void {
@@ -988,6 +1050,97 @@ fn appendFieldSignature(allocator: Allocator, out: *std.ArrayList(u8), field: Fi
 fn appendSpaces(allocator: Allocator, out: *std.ArrayList(u8), count: usize) !void {
     var i: usize = 0;
     while (i < count) : (i += 1) try out.append(allocator, ' ');
+}
+
+fn appendTableCellEscaped(allocator: Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
+    var previous_space = false;
+    for (text) |byte| {
+        switch (byte) {
+            '\n', '\r', '\t' => {
+                if (!previous_space) try out.append(allocator, ' ');
+                previous_space = true;
+            },
+            '|' => {
+                try out.appendSlice(allocator, "\\|");
+                previous_space = false;
+            },
+            '`' => {
+                try out.appendSlice(allocator, "&#96;");
+                previous_space = false;
+            },
+            else => {
+                try out.append(allocator, byte);
+                previous_space = byte == ' ';
+            },
+        }
+    }
+}
+
+fn firstDocSentence(doc: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, doc, &std.ascii.whitespace);
+    if (std.mem.indexOf(u8, trimmed, "\n\n")) |end| return trimmed[0..end];
+    return trimmed;
+}
+
+const FunctionParamBounds = struct {
+    lparen: usize,
+    end: usize,
+};
+
+fn functionParameters(signature: []const u8) []const u8 {
+    const bounds = functionParamBounds(signature) orelse return "";
+    return std.mem.trim(u8, signature[bounds.lparen + 1 .. bounds.end - 1], &std.ascii.whitespace);
+}
+
+fn functionReturnType(signature: []const u8) []const u8 {
+    const bounds = functionParamBounds(signature) orelse return "";
+
+    var tail = std.mem.trim(u8, signature[bounds.end..], &std.ascii.whitespace);
+    while (consumeFnModifier(tail)) |next| tail = std.mem.trim(u8, next, &std.ascii.whitespace);
+    if (std.mem.indexOfScalar(u8, tail, '{')) |brace| tail = tail[0..brace];
+    tail = std.mem.trim(u8, tail, &std.ascii.whitespace);
+    if (std.mem.endsWith(u8, tail, ";")) tail = std.mem.trim(u8, tail[0 .. tail.len - 1], &std.ascii.whitespace);
+    return tail;
+}
+
+fn functionParamBounds(signature: []const u8) ?FunctionParamBounds {
+    const fn_index = std.mem.indexOf(u8, signature, "fn") orelse return null;
+    if (fn_index > 0 and isIdentContinue(signature[fn_index - 1])) return null;
+    const after_fn = fn_index + 2;
+    if (after_fn < signature.len and isIdentContinue(signature[after_fn])) return null;
+    const lparen = std.mem.indexOfScalarPos(u8, signature, after_fn, '(') orelse return null;
+    const end = matchingParenEnd(signature, lparen) orelse return null;
+    return .{ .lparen = lparen, .end = end };
+}
+
+fn consumeFnModifier(text: []const u8) ?[]const u8 {
+    const modifiers = [_][]const u8{ "align", "addrspace", "linksection", "callconv" };
+    for (modifiers) |modifier| {
+        if (!std.mem.startsWith(u8, text, modifier)) continue;
+        if (text.len <= modifier.len or text[modifier.len] != '(') continue;
+        const end = matchingParenEnd(text, modifier.len) orelse return null;
+        return text[end..];
+    }
+    return null;
+}
+
+fn matchingParenEnd(text: []const u8, lparen: usize) ?usize {
+    var depth: usize = 0;
+    var i = lparen;
+    while (i < text.len) : (i += 1) {
+        switch (text[i]) {
+            '"' => i = skipQuoted(text, i, '"') -| 1,
+            '\'' => i = skipQuoted(text, i, '\'') -| 1,
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn appendSignatureReferences(
@@ -1269,6 +1422,8 @@ fn isAnchorByte(byte: u8) bool {
 }
 
 fn moduleOutputRelativePath(allocator: Allocator, module_name: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, module_name, "root")) return allocator.dupe(u8, "root.md");
+
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
     for (module_name) |byte| {
@@ -1338,6 +1493,45 @@ test "anchor generation is deterministic" {
     try std.testing.expectEqualStrings("fn-foo-bar", anchor);
 }
 
+test "root module output path is stable" {
+    const allocator = std.testing.allocator;
+    const root_path = try moduleOutputRelativePath(allocator, "root");
+    defer allocator.free(root_path);
+    try std.testing.expectEqualStrings("root.md", root_path);
+}
+
+test "module navigation lists all documents without previous and next" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var docs = PackageDocs{ .name = "pkg" };
+    try docs.modules.append(allocator, .{ .name = "root", .path = "/tmp/zerde.zig", .doc = "" });
+    try docs.modules.append(allocator, .{ .name = "codec", .path = "/tmp/codec.zig", .doc = "" });
+    try docs.modules.append(allocator, .{ .name = "codec.json", .path = "/tmp/codec/json.zig", .doc = "" });
+
+    var out = std.ArrayList(u8).empty;
+    try renderModuleNavigation(allocator, &out, &docs, &docs.modules.items[1], 2, false);
+
+    try std.testing.expectEqualStrings(
+        \\## Navigation
+        \\
+        \\- [API Index](README.md)
+        \\- Submodules: [codec.json](codec/json.md)
+        \\
+        \\<details>
+        \\<summary>All documents</summary>
+        \\
+        \\- [root](root.md)
+        \\- [codec](codec.md)
+        \\- [codec.json](codec/json.md)
+        \\
+        \\</details>
+        \\
+        \\
+    , out.items);
+}
+
 test "type field signatures render inline with docs" {
     const allocator = std.testing.allocator;
     var decl = DeclDocs{
@@ -1398,6 +1592,191 @@ test "empty type signatures omit ellipsis" {
     try std.testing.expectEqualStrings(
         \\```zig
         \\pub const GcOptions = struct {};
+        \\```
+        \\
+        \\
+    , out.items);
+}
+
+test "enum fields collect and render inline with docs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\pub const Status = enum {
+        \\    /// Ready for use.
+        \\    ready,
+        \\    /// Failed with code.
+        \\    failed = 2,
+        \\};
+    ;
+
+    var tree = try Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+
+    var decls = std.ArrayList(DeclDocs).empty;
+    var imports = std.ArrayList(ImportDocs).empty;
+    const config = Config{};
+    try collectDecls(allocator, &config, "/tmp", "/tmp/status.zig", tree, tree.rootDecls(), &decls, &imports);
+
+    try std.testing.expectEqual(@as(usize, 1), decls.items.len);
+    try std.testing.expectEqual(@as(usize, 2), decls.items[0].fields.items.len);
+
+    var out = std.ArrayList(u8).empty;
+    try appendDeclSignatureCodeBlock(allocator, &out, &decls.items[0]);
+
+    try std.testing.expectEqualStrings(
+        \\```zig
+        \\pub const Status = enum {
+        \\    /// Ready for use.
+        \\    ready,
+        \\    /// Failed with code.
+        \\    failed = 2,
+        \\};
+        \\```
+        \\
+        \\
+    , out.items);
+}
+
+test "tuple struct fields collect and render inline with docs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\pub const Pair = struct {
+        \\    /// First item.
+        \\    u32,
+        \\    /// Second item.
+        \\    []const u8,
+        \\};
+    ;
+
+    var tree = try Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+
+    var decls = std.ArrayList(DeclDocs).empty;
+    var imports = std.ArrayList(ImportDocs).empty;
+    const config = Config{};
+    try collectDecls(allocator, &config, "/tmp", "/tmp/pair.zig", tree, tree.rootDecls(), &decls, &imports);
+
+    try std.testing.expectEqual(@as(usize, 1), decls.items.len);
+    try std.testing.expectEqual(@as(usize, 2), decls.items[0].fields.items.len);
+    try std.testing.expectEqualStrings("0", decls.items[0].fields.items[0].name);
+    try std.testing.expectEqualStrings("1", decls.items[0].fields.items[1].name);
+
+    var out = std.ArrayList(u8).empty;
+    try appendDeclSignatureCodeBlock(allocator, &out, &decls.items[0]);
+
+    try std.testing.expectEqualStrings(
+        \\```zig
+        \\pub const Pair = struct {
+        \\    /// First item.
+        \\    u32,
+        \\    /// Second item.
+        \\    []const u8,
+        \\};
+        \\```
+        \\
+        \\
+    , out.items);
+}
+
+test "error set fields collect and render inline with docs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source =
+        \\pub const ParseError = error {
+        \\    /// Encountered an invalid token.
+        \\    BadToken,
+        \\    /// Reached the end of input unexpectedly.
+        \\    EndOfStream,
+        \\};
+    ;
+
+    var tree = try Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+
+    var decls = std.ArrayList(DeclDocs).empty;
+    var imports = std.ArrayList(ImportDocs).empty;
+    const config = Config{};
+    try collectDecls(allocator, &config, "/tmp", "/tmp/errors.zig", tree, tree.rootDecls(), &decls, &imports);
+
+    try std.testing.expectEqual(@as(usize, 1), decls.items.len);
+    try std.testing.expectEqual(.type, decls.items[0].kind);
+    try std.testing.expectEqual(@as(usize, 2), decls.items[0].fields.items.len);
+
+    var out = std.ArrayList(u8).empty;
+    try appendDeclSignatureCodeBlock(allocator, &out, &decls.items[0]);
+
+    try std.testing.expectEqualStrings(
+        \\```zig
+        \\pub const ParseError = error {
+        \\    /// Encountered an invalid token.
+        \\    BadToken,
+        \\    /// Reached the end of input unexpectedly.
+        \\    EndOfStream,
+        \\};
+        \\```
+        \\
+        \\
+    , out.items);
+}
+
+test "nested declarations render summary table before details" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var parent = DeclDocs{
+        .name = "Api",
+        .kind = .type,
+        .visibility = .public,
+        .doc = "",
+        .signature = "pub const Api = struct { ... };",
+        .line = 1,
+    };
+    try parent.children.append(allocator, .{
+        .name = "init",
+        .kind = .function,
+        .visibility = .public,
+        .doc = "Create an Api.\nSecond line.",
+        .signature = "pub fn init(name: []const u8) !Api",
+        .line = 2,
+    });
+
+    var symbols = SymbolIndex{};
+    var out = std.ArrayList(u8).empty;
+    try renderDecl(allocator, &out, &symbols, "root", parent, 2, null, false);
+
+    try std.testing.expectEqualStrings(
+        \\<a id="type-api"></a>
+        \\
+        \\## Api
+        \\
+        \\```zig
+        \\pub const Api = struct { ... };
+        \\```
+        \\
+        \\### Nested Declarations
+        \\
+        \\| Name | Parameters | Return Type | Description |
+        \\| --- | --- | --- | --- |
+        \\| [init](#fn-api-init) | `name: []const u8` | `!Api` | Create an Api. Second line. |
+        \\
+        \\<a id="fn-api-init"></a>
+        \\
+        \\### Api.init
+        \\
+        \\Create an Api.
+        \\Second line.
+        \\
+        \\```zig
+        \\pub fn init(name: []const u8) !Api
         \\```
         \\
         \\

@@ -3,9 +3,70 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [stdlib.json](../stdlib/json.md)
-- Next: [stdlib.toml](../stdlib/toml.md)
 - Parent: [stdlib](../stdlib.md)
+
+<details>
+<summary>All documents</summary>
+
+- [root](../root.md)
+- [frontend](../frontend.md)
+- [errors](../errors.md)
+- [frontend.source](../frontend/source.md)
+- [frontend.token](../frontend/token.md)
+- [frontend.diagnostic](../frontend/diagnostic.md)
+- [frontend.lexer](../frontend/lexer.md)
+- [frontend.ast](../frontend/ast.md)
+- [frontend.parser](../frontend/parser.md)
+- [compile](../compile.md)
+- [compile.resolver](../compile/resolver.md)
+- [compile.bytecode](../compile/bytecode.md)
+- [compile.proto](../compile/proto.md)
+- [compile.compiler](../compile/compiler.md)
+- [compile.disasm](../compile/disasm.md)
+- [api](../api.md)
+- [runtime](../runtime.md)
+- [runtime.chunk](../runtime/chunk.md)
+- [runtime.types](../runtime/types.md)
+- [runtime.value](../runtime/value.md)
+- [runtime.execute](../runtime/execute.md)
+- [testing.process](../testing/process.md)
+- [runtime.state](../runtime/state.md)
+- [runtime.call](../runtime/call.md)
+- [runtime.coroutine](../runtime/coroutine.md)
+- [runtime.debug](../runtime/debug.md)
+- [runtime.gc](../runtime/gc.md)
+- [runtime.host](../runtime/host.md)
+- [stdlib](../stdlib.md)
+- [stdlib.base](../stdlib/base.md)
+- [stdlib.table](../stdlib/table.md)
+- [stdlib.string](../stdlib/string.md)
+- [stdlib.math](../stdlib/math.md)
+- [stdlib.utf8](../stdlib/utf8.md)
+- [stdlib.coroutine](../stdlib/coroutine.md)
+- [stdlib.debug](../stdlib/debug.md)
+- [stdlib.package](../stdlib/package.md)
+- [stdlib.io](../stdlib/io.md)
+- [stdlib.os](../stdlib/os.md)
+- [stdlib.json](../stdlib/json.md)
+- [stdlib.zerde_lua](../stdlib/zerde_lua.md)
+- [stdlib.toml](../stdlib/toml.md)
+- [stdlib.msgpack](../stdlib/msgpack.md)
+- [stdlib.csv](../stdlib/csv.md)
+- [runtime.vm](../runtime/vm.md)
+- [runtime.tests](../runtime/tests.md)
+- [runtime.internal](../runtime/internal.md)
+- [testing](../testing.md)
+- [testing.clua](../testing/clua.md)
+- [testing.bench_runner](../testing/bench_runner.md)
+- [testing.c_api_runner](../testing/c_api_runner.md)
+- [testing.diff_runner](../testing/diff_runner.md)
+- [testing.expected_failures](../testing/expected_failures.md)
+- [testing.metadata](../testing/metadata.md)
+- [testing.normalizer](../testing/normalizer.md)
+- [testing.extension_runner](../testing/extension_runner.md)
+- [testing.official_suite](../testing/official_suite.md)
+
+</details>
 
 ## Functions
 
@@ -58,20 +119,22 @@ pub const LuaSink = struct {
 
 ### Nested Declarations
 
-- [init](#fn-luasink-init)
-- [deinit](#fn-luasink-deinit)
-- [emitNull](#fn-luasink-emitnull)
-- [emitBool](#fn-luasink-emitbool)
-- [emitInt](#fn-luasink-emitint)
-- [emitFloat](#fn-luasink-emitfloat)
-- [emitString](#fn-luasink-emitstring)
-- [emitBytes](#fn-luasink-emitbytes)
-- [emitDateTimeRaw](#fn-luasink-emitdatetimeraw)
-- [beginSeq](#fn-luasink-beginseq)
-- [endSeq](#fn-luasink-endseq)
-- [beginStruct](#fn-luasink-beginstruct)
-- [emitFieldName](#fn-luasink-emitfieldname)
-- [endStruct](#fn-luasink-endstruct)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [init](#fn-luasink-init) | `state: *State` | `LuaSink` |  |
+| [deinit](#fn-luasink-deinit) | `self: *LuaSink` | `void` |  |
+| [emitNull](#fn-luasink-emitnull) | `self: *LuaSink` | `!void` |  |
+| [emitBool](#fn-luasink-emitbool) | `self: *LuaSink, value: bool` | `!void` |  |
+| [emitInt](#fn-luasink-emitint) | `self: *LuaSink, value: i128` | `!void` |  |
+| [emitFloat](#fn-luasink-emitfloat) | `self: *LuaSink, value: f64` | `!void` |  |
+| [emitString](#fn-luasink-emitstring) | `self: *LuaSink, value: []const u8` | `!void` |  |
+| [emitBytes](#fn-luasink-emitbytes) | `self: *LuaSink, value: []const u8` | `!void` |  |
+| [emitDateTimeRaw](#fn-luasink-emitdatetimeraw) | `self: *LuaSink, value: []const u8` | `!void` |  |
+| [beginSeq](#fn-luasink-beginseq) | `self: *LuaSink, len: ?usize` | `!void` |  |
+| [endSeq](#fn-luasink-endseq) | `self: *LuaSink` | `!void` |  |
+| [beginStruct](#fn-luasink-beginstruct) | `self: *LuaSink, len: ?usize` | `!void` |  |
+| [emitFieldName](#fn-luasink-emitfieldname) | `self: *LuaSink, name: []const u8` | `!void` |  |
+| [endStruct](#fn-luasink-endstruct) | `self: *LuaSink` | `!void` |  |
 
 <a id="fn-luasink-init"></a>
 

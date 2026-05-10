@@ -3,9 +3,70 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [runtime.gc](../runtime/gc.md)
-- Next: [stdlib](../stdlib.md)
 - Parent: [runtime](../runtime.md)
+
+<details>
+<summary>All documents</summary>
+
+- [root](../root.md)
+- [frontend](../frontend.md)
+- [errors](../errors.md)
+- [frontend.source](../frontend/source.md)
+- [frontend.token](../frontend/token.md)
+- [frontend.diagnostic](../frontend/diagnostic.md)
+- [frontend.lexer](../frontend/lexer.md)
+- [frontend.ast](../frontend/ast.md)
+- [frontend.parser](../frontend/parser.md)
+- [compile](../compile.md)
+- [compile.resolver](../compile/resolver.md)
+- [compile.bytecode](../compile/bytecode.md)
+- [compile.proto](../compile/proto.md)
+- [compile.compiler](../compile/compiler.md)
+- [compile.disasm](../compile/disasm.md)
+- [api](../api.md)
+- [runtime](../runtime.md)
+- [runtime.chunk](../runtime/chunk.md)
+- [runtime.types](../runtime/types.md)
+- [runtime.value](../runtime/value.md)
+- [runtime.execute](../runtime/execute.md)
+- [testing.process](../testing/process.md)
+- [runtime.state](../runtime/state.md)
+- [runtime.call](../runtime/call.md)
+- [runtime.coroutine](../runtime/coroutine.md)
+- [runtime.debug](../runtime/debug.md)
+- [runtime.gc](../runtime/gc.md)
+- [runtime.host](../runtime/host.md)
+- [stdlib](../stdlib.md)
+- [stdlib.base](../stdlib/base.md)
+- [stdlib.table](../stdlib/table.md)
+- [stdlib.string](../stdlib/string.md)
+- [stdlib.math](../stdlib/math.md)
+- [stdlib.utf8](../stdlib/utf8.md)
+- [stdlib.coroutine](../stdlib/coroutine.md)
+- [stdlib.debug](../stdlib/debug.md)
+- [stdlib.package](../stdlib/package.md)
+- [stdlib.io](../stdlib/io.md)
+- [stdlib.os](../stdlib/os.md)
+- [stdlib.json](../stdlib/json.md)
+- [stdlib.zerde_lua](../stdlib/zerde_lua.md)
+- [stdlib.toml](../stdlib/toml.md)
+- [stdlib.msgpack](../stdlib/msgpack.md)
+- [stdlib.csv](../stdlib/csv.md)
+- [runtime.vm](../runtime/vm.md)
+- [runtime.tests](../runtime/tests.md)
+- [runtime.internal](../runtime/internal.md)
+- [testing](../testing.md)
+- [testing.clua](../testing/clua.md)
+- [testing.bench_runner](../testing/bench_runner.md)
+- [testing.c_api_runner](../testing/c_api_runner.md)
+- [testing.diff_runner](../testing/diff_runner.md)
+- [testing.expected_failures](../testing/expected_failures.md)
+- [testing.metadata](../testing/metadata.md)
+- [testing.normalizer](../testing/normalizer.md)
+- [testing.extension_runner](../testing/extension_runner.md)
+- [testing.official_suite](../testing/official_suite.md)
+
+</details>
 
 ## Types
 
@@ -41,18 +102,20 @@ pub const MemoryFilesystem = struct {
 
 ### Nested Declarations
 
-- [default_max_path_len](#const-memoryfilesystem-default_max_path_len)
-- [Options](#type-memoryfilesystem-options)
-- [init](#fn-memoryfilesystem-init)
-- [initWithOptions](#fn-memoryfilesystem-initwithoptions)
-- [initWithFiles](#fn-memoryfilesystem-initwithfiles)
-- [initWithFilesAndOptions](#fn-memoryfilesystem-initwithfilesandoptions)
-- [deinit](#fn-memoryfilesystem-deinit)
-- [readFileAlloc](#fn-memoryfilesystem-readfilealloc)
-- [writeFile](#fn-memoryfilesystem-writefile)
-- [removeFile](#fn-memoryfilesystem-removefile)
-- [renameFile](#fn-memoryfilesystem-renamefile)
-- [normalizePathAlloc](#fn-memoryfilesystem-normalizepathalloc)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [default_max_path_len](#const-memoryfilesystem-default_max_path_len) |  |  |  |
+| [Options](#type-memoryfilesystem-options) |  |  |  |
+| [init](#fn-memoryfilesystem-init) | `allocator: std.mem.Allocator` | `MemoryFilesystem` |  |
+| [initWithOptions](#fn-memoryfilesystem-initwithoptions) | `allocator: std.mem.Allocator, options: Options` | `MemoryFilesystem` |  |
+| [initWithFiles](#fn-memoryfilesystem-initwithfiles) | `allocator: std.mem.Allocator, files: []const MemoryFile` | `!MemoryFilesystem` |  |
+| [initWithFilesAndOptions](#fn-memoryfilesystem-initwithfilesandoptions) | `allocator: std.mem.Allocator, files: []const MemoryFile, options: Options` | `!MemoryFilesystem` |  |
+| [deinit](#fn-memoryfilesystem-deinit) | `self: *MemoryFilesystem` | `void` |  |
+| [readFileAlloc](#fn-memoryfilesystem-readfilealloc) | `self: *const MemoryFilesystem, allocator: std.mem.Allocator, path: []const u8` | `![]const u8` |  |
+| [writeFile](#fn-memoryfilesystem-writefile) | `self: *MemoryFilesystem, path: []const u8, contents: []const u8` | `!void` |  |
+| [removeFile](#fn-memoryfilesystem-removefile) | `self: *MemoryFilesystem, path: []const u8` | `!void` |  |
+| [renameFile](#fn-memoryfilesystem-renamefile) | `self: *MemoryFilesystem, old_path: []const u8, new_path: []const u8` | `!void` |  |
+| [normalizePathAlloc](#fn-memoryfilesystem-normalizepathalloc) | `allocator: std.mem.Allocator, path: []const u8, max_path_len: usize` | `![]u8` |  |
 
 <a id="const-memoryfilesystem-default_max_path_len"></a>
 
@@ -177,8 +240,10 @@ pub fn normalizePathAlloc(allocator: std.mem.Allocator, path: []const u8, max_pa
 
 ```zig
 pub const FilesystemCapability = union(enum) {
+    disabled,
     memory: []const MemoryFile,
     memory_rw: *MemoryFilesystem,
+    host_cwd,
 };
 ```
 
@@ -188,7 +253,9 @@ pub const FilesystemCapability = union(enum) {
 
 ```zig
 pub const ClockCapability = union(enum) {
+    disabled,
     fixed: i64,
+    system,
 };
 ```
 
@@ -197,6 +264,9 @@ pub const ClockCapability = union(enum) {
 ## ProcessCapability
 
 ```zig
-pub const ProcessCapability = enum {};
+pub const ProcessCapability = enum {
+    disabled,
+    enabled,
+};
 ```
 

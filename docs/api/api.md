@@ -3,8 +3,69 @@
 ## Navigation
 
 - [API Index](README.md)
-- Previous: [compile.disasm](compile/disasm.md)
-- Next: [runtime](runtime.md)
+
+<details>
+<summary>All documents</summary>
+
+- [root](root.md)
+- [frontend](frontend.md)
+- [errors](errors.md)
+- [frontend.source](frontend/source.md)
+- [frontend.token](frontend/token.md)
+- [frontend.diagnostic](frontend/diagnostic.md)
+- [frontend.lexer](frontend/lexer.md)
+- [frontend.ast](frontend/ast.md)
+- [frontend.parser](frontend/parser.md)
+- [compile](compile.md)
+- [compile.resolver](compile/resolver.md)
+- [compile.bytecode](compile/bytecode.md)
+- [compile.proto](compile/proto.md)
+- [compile.compiler](compile/compiler.md)
+- [compile.disasm](compile/disasm.md)
+- [api](api.md)
+- [runtime](runtime.md)
+- [runtime.chunk](runtime/chunk.md)
+- [runtime.types](runtime/types.md)
+- [runtime.value](runtime/value.md)
+- [runtime.execute](runtime/execute.md)
+- [testing.process](testing/process.md)
+- [runtime.state](runtime/state.md)
+- [runtime.call](runtime/call.md)
+- [runtime.coroutine](runtime/coroutine.md)
+- [runtime.debug](runtime/debug.md)
+- [runtime.gc](runtime/gc.md)
+- [runtime.host](runtime/host.md)
+- [stdlib](stdlib.md)
+- [stdlib.base](stdlib/base.md)
+- [stdlib.table](stdlib/table.md)
+- [stdlib.string](stdlib/string.md)
+- [stdlib.math](stdlib/math.md)
+- [stdlib.utf8](stdlib/utf8.md)
+- [stdlib.coroutine](stdlib/coroutine.md)
+- [stdlib.debug](stdlib/debug.md)
+- [stdlib.package](stdlib/package.md)
+- [stdlib.io](stdlib/io.md)
+- [stdlib.os](stdlib/os.md)
+- [stdlib.json](stdlib/json.md)
+- [stdlib.zerde_lua](stdlib/zerde_lua.md)
+- [stdlib.toml](stdlib/toml.md)
+- [stdlib.msgpack](stdlib/msgpack.md)
+- [stdlib.csv](stdlib/csv.md)
+- [runtime.vm](runtime/vm.md)
+- [runtime.tests](runtime/tests.md)
+- [runtime.internal](runtime/internal.md)
+- [testing](testing.md)
+- [testing.clua](testing/clua.md)
+- [testing.bench_runner](testing/bench_runner.md)
+- [testing.c_api_runner](testing/c_api_runner.md)
+- [testing.diff_runner](testing/diff_runner.md)
+- [testing.expected_failures](testing/expected_failures.md)
+- [testing.metadata](testing/metadata.md)
+- [testing.normalizer](testing/normalizer.md)
+- [testing.extension_runner](testing/extension_runner.md)
+- [testing.official_suite](testing/official_suite.md)
+
+</details>
 
 ## Overview
 
@@ -55,6 +116,9 @@ and should not be treated as a stable embedding contract.
 
 ## Types
 
+- [Error](#type-error)
+- [UnsupportedOption](#type-unsupportedoption)
+- [ConversionError](#type-conversionerror)
 - [Stdlib](#type-stdlib)
 - [IoCapability](#type-iocapability)
 - [EnvironmentCapability](#type-environmentcapability)
@@ -83,9 +147,6 @@ and should not be treated as a stable embedding contract.
 
 ## Constants
 
-- [Error](#const-error)
-- [UnsupportedOption](#const-unsupportedoption)
-- [ConversionError](#const-conversionerror)
 - [HostFn](#const-hostfn)
 
 ## Aliases
@@ -97,34 +158,43 @@ and should not be treated as a stable embedding contract.
 - [ProcessCapability](#alias-processcapability)
 - [DoOptions](#alias-dooptions)
 
-<a id="const-error"></a>
+<a id="type-error"></a>
 
 ## Error
 
-[Error](#const-error) set used when an API operation failed because Lua raised a syntax or runtime error.
+[Error](#type-error) set used when an API operation failed because Lua raised a syntax or runtime error.
 
 ```zig
-pub const Error = error{LuaError};
+pub const Error = error{
+    LuaError,
+};
 ```
 
-<a id="const-unsupportedoption"></a>
+<a id="type-unsupportedoption"></a>
 
 ## UnsupportedOption
 
-[Error](#const-error) set used when an option combination is not supported by the high-level API.
+[Error](#type-error) set used when an option combination is not supported by the high-level API.
 
 ```zig
-pub const UnsupportedOption = error{UnsupportedOption};
+pub const UnsupportedOption = error{
+    UnsupportedOption,
+};
 ```
 
-<a id="const-conversionerror"></a>
+<a id="type-conversionerror"></a>
 
 ## ConversionError
 
 Errors produced while converting values between Zig and Lua representations.
 
 ```zig
-pub const ConversionError =...;
+pub const ConversionError = error{
+    TypeMismatch,
+    IntegerOutOfRange,
+    UnsupportedType,
+    ArityMismatch,
+};
 ```
 
 <a id="fn-userdataoptions"></a>
@@ -154,7 +224,16 @@ pub fn UserdataPtrOptions(comptime T: type) type
 Standard-library selection used when creating or opening a state.
 
 ```zig
-pub const Stdlib = enum {};
+pub const Stdlib = enum {
+    /// Open no standard libraries.
+    none,
+    /// Open only base functionality.
+    base,
+    /// Open libraries considered safe for sandboxed embedding.
+    safe,
+    /// Open the full Lua standard-library surface; host capabilities still gate ambient access.
+    full,
+};
 ```
 
 <a id="alias-memoryfile"></a>
@@ -202,7 +281,9 @@ pub const IoCapability = struct {
 
 ### Nested Declarations
 
-- [disabled](#const-iocapability-disabled)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [disabled](#const-iocapability-disabled) |  |  | I/O capability with no host I/O handles or captured streams. |
 
 <a id="const-iocapability-disabled"></a>
 
@@ -236,6 +317,8 @@ Environment-variable access granted to `os.getenv` and enabled child processes.
 
 ```zig
 pub const EnvironmentCapability = union(enum) {
+    /// Deny environment access.
+    disabled,
     /// Use the supplied environment map.
     map: *const std.process.Environ.Map,
 };
@@ -288,7 +371,9 @@ pub const Capabilities = struct {
 
 ### Nested Declarations
 
-- [sandboxed](#const-capabilities-sandboxed)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [sandboxed](#const-capabilities-sandboxed) |  |  | Capability set that denies all ambient host access. |
 
 <a id="const-capabilities-sandboxed"></a>
 
@@ -391,7 +476,14 @@ pub const Options = struct {
 Accepted chunk kinds for `loadString` and `loadFile`.
 
 ```zig
-pub const LoadMode = enum {};
+pub const LoadMode = enum {
+    /// Accept only Lua source text.
+    source_only,
+    /// Accept only zlua binary chunks.
+    binary_only,
+    /// Accept either Lua source text or zlua binary chunks.
+    source_or_binary,
+};
 ```
 
 <a id="type-loadoptions"></a>
@@ -496,7 +588,12 @@ pub const GcBudget = struct {
 Result of an incremental garbage-collection step.
 
 ```zig
-pub const GcStepResult = enum {};
+pub const GcStepResult = enum {
+    /// The requested collection work completed.
+    complete,
+    /// More work remains.
+    pending,
+};
 ```
 
 <a id="type-state"></a>
@@ -526,34 +623,36 @@ pub const State = struct {
 
 ### Nested Declarations
 
-- [init](#fn-state-init)
-- [deinit](#fn-state-deinit)
-- [allocator](#fn-state-allocator)
-- [instructionBudget](#fn-state-instructionbudget)
-- [resetInstructionBudget](#fn-state-resetinstructionbudget)
-- [openLibs](#fn-state-openlibs)
-- [collect](#fn-state-collect)
-- [stepGc](#fn-state-stepgc)
-- [push](#fn-state-push)
-- [read](#fn-state-read)
-- [setGlobal](#fn-state-setglobal)
-- [getGlobal](#fn-state-getglobal)
-- [register](#fn-state-register)
-- [registerTyped](#fn-state-registertyped)
-- [createTable](#fn-state-createtable)
-- [newUserdata](#fn-state-newuserdata)
-- [newUserdataPtr](#fn-state-newuserdataptr)
-- [createModule](#fn-state-createmodule)
-- [preloadModule](#fn-state-preloadmodule)
-- [setPackagePath](#fn-state-setpackagepath)
-- [addMemoryFile](#fn-state-addmemoryfile)
-- [loadString](#fn-state-loadstring)
-- [loadFile](#fn-state-loadfile)
-- [loadBytecode](#fn-state-loadbytecode)
-- [doString](#fn-state-dostring)
-- [doFile](#fn-state-dofile)
-- [errorMessage](#fn-state-errormessage)
-- [takeErrorValue](#fn-state-takeerrorvalue)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [init](#fn-state-init) | `state_allocator: std.mem.Allocator, options: Options` | `!State` | Creates a new Lua state using &#96;state_allocator&#96; and the supplied options. |
+| [deinit](#fn-state-deinit) | `self: *State` | `void` | Releases all resources owned by the state and invalidates outstanding API handles. |
+| [allocator](#fn-state-allocator) | `self: *State` | `std.mem.Allocator` | Returns the allocator used for API-owned allocations returned to the host. |
+| [instructionBudget](#fn-state-instructionbudget) | `self: *const State` | `InstructionBudget` | Returns the cumulative instruction budget usage for this state. |
+| [resetInstructionBudget](#fn-state-resetinstructionbudget) | `self: *State` | `void` | Resets the cumulative instruction counter to zero. |
+| [openLibs](#fn-state-openlibs) | `self: *State, mode: Stdlib` | `!void` | Opens additional standard libraries after state creation. |
+| [collect](#fn-state-collect) | `self: *State` | `!void` | Runs a full garbage collection cycle. |
+| [stepGc](#fn-state-stepgc) | `self: *State, budget: GcBudget` | `!GcStepResult` | Runs garbage-collection work for &#96;budget&#96; and reports whether collection completed. |
+| [push](#fn-state-push) | `self: *State, value: anytype` | `!Value` | Converts a Zig value into a rooted high-level Lua &#96;Value&#96;. |
+| [read](#fn-state-read) | `self: *State, value: Value, comptime T: type` | `!T` | Converts a high-level Lua &#96;Value&#96; to the requested Zig type. |
+| [setGlobal](#fn-state-setglobal) | `self: *State, name: []const u8, value: anytype` | `!void` | Sets a global variable after converting &#96;value&#96; to a Lua value. |
+| [getGlobal](#fn-state-getglobal) | `self: *State, name: []const u8, comptime T: type` | `!T` | Reads a global variable and converts it to &#96;T&#96;. |
+| [register](#fn-state-register) | `self: *State, name: []const u8, callback: HostFn` | `!Function` | Creates a Lua function handle that dispatches to an untyped Zig callback. |
+| [registerTyped](#fn-state-registertyped) | `self: *State, name: []const u8, comptime function: anytype` | `!Function` | Creates a Lua function handle from a typed Zig function. |
+| [createTable](#fn-state-createtable) | `self: *State, options: TableOptions` | `!Table` | Creates a rooted Lua table handle with optional capacity hints. |
+| [newUserdata](#fn-state-newuserdata) | `self: *State, comptime T: type, value: T, options: UserdataOptions(T)` | `!Userdata(T)` | Allocates Lua-owned userdata storage initialized with &#96;value&#96;. |
+| [newUserdataPtr](#fn-state-newuserdataptr) | `self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)` | `!Userdata(T)` | Wraps host-owned storage as Lua userdata without taking ownership of &#96;ptr&#96;. |
+| [createModule](#fn-state-createmodule) | `self: *State, name: []const u8` | `!Table` | Creates a table intended to be installed as a Lua module. |
+| [preloadModule](#fn-state-preloadmodule) | `self: *State, name: []const u8, module: Table` | `!void` | Adds &#96;module&#96; to &#96;package.loaded&#96; so &#96;require(name)&#96; returns it. |
+| [setPackagePath](#fn-state-setpackagepath) | `self: *State, path: []const u8` | `!void` | Sets &#96;package.path&#96;, opening the package library first if needed. |
+| [addMemoryFile](#fn-state-addmemoryfile) | `self: *State, path: []const u8, contents: []const u8` | `!void` | Adds or writes a file in the state's memory-backed filesystem. |
+| [loadString](#fn-state-loadstring) | `self: *State, source: []const u8, options: LoadOptions` | `!Function` | Loads source text or bytecode from memory and returns a rooted function handle. |
+| [loadFile](#fn-state-loadfile) | `self: *State, path: []const u8, options: LoadOptions` | `!Function` | Loads source text or bytecode from the configured filesystem. |
+| [loadBytecode](#fn-state-loadbytecode) | `self: *State, bytecode: []const u8, options: BytecodeLoadOptions` | `!Function` | Loads a zlua bytecode dump and returns a rooted function handle. |
+| [doString](#fn-state-dostring) | `self: *State, source: []const u8, options: DoOptions` | `!void` | Loads and immediately executes source text or bytecode from memory. |
+| [doFile](#fn-state-dofile) | `self: *State, path: []const u8, options: DoOptions` | `!void` | Loads and immediately executes a chunk from the configured filesystem. |
+| [errorMessage](#fn-state-errormessage) | `self: *State` | `![]const u8` | Formats the last Lua error value as an allocated message. |
+| [takeErrorValue](#fn-state-takeerrorvalue) | `self: *State` | `?ErrorRef` | Takes ownership of the last captured Lua error value, if one exists. |
 
 <a id="fn-state-init"></a>
 
@@ -925,8 +1024,10 @@ pub const Ref = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-ref-deinit)
-- [value](#fn-ref-value)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-ref-deinit) | `self: *Ref` | `void` | Releases this handle's root. |
+| [value](#fn-ref-value) | `self: Ref` | `!Value` | Returns the referenced value as a high-level &#96;Value&#96;. |
 
 <a id="fn-ref-deinit"></a>
 
@@ -966,9 +1067,11 @@ pub const Table = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-table-deinit)
-- [get](#fn-table-get)
-- [set](#fn-table-set)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-table-deinit) | `self: *Table` | `void` | Releases this table handle's root. |
+| [get](#fn-table-get) | `self: Table, key: anytype, comptime T: type` | `!T` | Reads &#96;key&#96; from the table and converts the result to &#96;T&#96;. |
+| [set](#fn-table-set) | `self: Table, key: anytype, value: anytype` | `!void` | Converts and assigns &#96;value&#96; at &#96;key&#96; in the table. |
 
 <a id="fn-table-deinit"></a>
 
@@ -1020,10 +1123,12 @@ pub const Function = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-function-deinit)
-- [call](#fn-function-call)
-- [protectedCall](#fn-function-protectedcall)
-- [dumpBytecode](#fn-function-dumpbytecode)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-function-deinit) | `self: *Function` | `void` | Releases this function handle's root. |
+| [call](#fn-function-call) | `self: Function, args: anytype, comptime R: type` | `!R` | Calls the function with tuple arguments and converts the first or tuple result to &#96;R&#96;. |
+| [protectedCall](#fn-function-protectedcall) | `self: Function, args: anytype, comptime R: type` | `!CallResult(R)` | Calls the function and returns Lua failures as an &#96;ErrorRef&#96; instead of &#96;error.LuaError&#96;. |
+| [dumpBytecode](#fn-function-dumpbytecode) | `self: Function, options: BytecodeDumpOptions` | `![]const u8` | Dumps this function to zlua bytecode. |
 
 <a id="fn-function-deinit"></a>
 
@@ -1101,7 +1206,9 @@ pub const AnyUserdata = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-anyuserdata-deinit)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-anyuserdata-deinit) | `self: *AnyUserdata` | `void` | Releases this userdata handle's root. |
 
 <a id="fn-anyuserdata-deinit"></a>
 
@@ -1139,9 +1246,11 @@ pub const ErrorRef = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-errorref-deinit)
-- [value](#fn-errorref-value)
-- [message](#fn-errorref-message)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-errorref-deinit) | `self: *ErrorRef` | `void` | Releases this error handle's root. |
+| [value](#fn-errorref-value) | `self: ErrorRef` | `!Value` | Returns the raw Lua error value as a high-level &#96;Value&#96;. |
+| [message](#fn-errorref-message) | `self: ErrorRef` | `![]const u8` | Formats the Lua error value as an allocated message. |
 
 <a id="fn-errorref-deinit"></a>
 
@@ -1189,6 +1298,8 @@ High-level Lua value union used for dynamic conversion and inspection.
 
 ```zig
 pub const Value = union(enum) {
+    /// Lua `nil`.
+    nil,
     /// Lua boolean.
     boolean: bool,
     /// Lua integer.
@@ -1203,12 +1314,16 @@ pub const Value = union(enum) {
     function: Function,
     /// Rooted Lua userdata handle with unknown Zig payload type.
     userdata: AnyUserdata,
+    /// Lua value kind not represented by the high-level API.
+    unsupported,
 };
 ```
 
 ### Nested Declarations
 
-- [deinit](#fn-value-deinit)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-value-deinit) | `self: *Value` | `void` | Releases any rooted handle contained by this value. |
 
 <a id="fn-value-deinit"></a>
 
@@ -1247,13 +1362,15 @@ pub const Context = struct {
 
 ### Nested Declarations
 
-- [state](#fn-context-state)
-- [argCount](#fn-context-argcount)
-- [arg](#fn-context-arg)
-- [optionalArg](#fn-context-optionalarg)
-- [pushReturn](#fn-context-pushreturn)
-- [returnValues](#fn-context-returnvalues)
-- [raise](#fn-context-raise)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [state](#fn-context-state) | `self: *Context` | `*State` | Returns the owning Lua state. |
+| [argCount](#fn-context-argcount) | `self: *Context` | `usize` | Returns the number of Lua arguments passed to the callback. |
+| [arg](#fn-context-arg) | `self: *Context, index: usize, comptime T: type` | `!T` | Reads required argument &#96;index&#96; and converts it to &#96;T&#96;. |
+| [optionalArg](#fn-context-optionalarg) | `self: *Context, index: usize, comptime T: type` | `!?T` | Reads optional argument &#96;index&#96;, returning null when absent or Lua &#96;nil&#96;. |
+| [pushReturn](#fn-context-pushreturn) | `self: *Context, value: anytype` | `!void` | Appends one converted Lua return value for the current callback. |
+| [returnValues](#fn-context-returnvalues) | `self: *Context, values: anytype` | `!void` | Replaces callback returns with &#96;values&#96;. |
+| [raise](#fn-context-raise) | `self: *Context, value: anytype` | `error` | Raises a Lua error using &#96;value&#96; as the error object. |
 
 <a id="fn-context-state"></a>
 

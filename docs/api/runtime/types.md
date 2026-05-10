@@ -3,12 +3,74 @@
 ## Navigation
 
 - [API Index](../README.md)
-- Previous: [runtime.chunk](../runtime/chunk.md)
-- Next: [runtime.value](../runtime/value.md)
 - Parent: [runtime](../runtime.md)
+
+<details>
+<summary>All documents</summary>
+
+- [root](../root.md)
+- [frontend](../frontend.md)
+- [errors](../errors.md)
+- [frontend.source](../frontend/source.md)
+- [frontend.token](../frontend/token.md)
+- [frontend.diagnostic](../frontend/diagnostic.md)
+- [frontend.lexer](../frontend/lexer.md)
+- [frontend.ast](../frontend/ast.md)
+- [frontend.parser](../frontend/parser.md)
+- [compile](../compile.md)
+- [compile.resolver](../compile/resolver.md)
+- [compile.bytecode](../compile/bytecode.md)
+- [compile.proto](../compile/proto.md)
+- [compile.compiler](../compile/compiler.md)
+- [compile.disasm](../compile/disasm.md)
+- [api](../api.md)
+- [runtime](../runtime.md)
+- [runtime.chunk](../runtime/chunk.md)
+- [runtime.types](../runtime/types.md)
+- [runtime.value](../runtime/value.md)
+- [runtime.execute](../runtime/execute.md)
+- [testing.process](../testing/process.md)
+- [runtime.state](../runtime/state.md)
+- [runtime.call](../runtime/call.md)
+- [runtime.coroutine](../runtime/coroutine.md)
+- [runtime.debug](../runtime/debug.md)
+- [runtime.gc](../runtime/gc.md)
+- [runtime.host](../runtime/host.md)
+- [stdlib](../stdlib.md)
+- [stdlib.base](../stdlib/base.md)
+- [stdlib.table](../stdlib/table.md)
+- [stdlib.string](../stdlib/string.md)
+- [stdlib.math](../stdlib/math.md)
+- [stdlib.utf8](../stdlib/utf8.md)
+- [stdlib.coroutine](../stdlib/coroutine.md)
+- [stdlib.debug](../stdlib/debug.md)
+- [stdlib.package](../stdlib/package.md)
+- [stdlib.io](../stdlib/io.md)
+- [stdlib.os](../stdlib/os.md)
+- [stdlib.json](../stdlib/json.md)
+- [stdlib.zerde_lua](../stdlib/zerde_lua.md)
+- [stdlib.toml](../stdlib/toml.md)
+- [stdlib.msgpack](../stdlib/msgpack.md)
+- [stdlib.csv](../stdlib/csv.md)
+- [runtime.vm](../runtime/vm.md)
+- [runtime.tests](../runtime/tests.md)
+- [runtime.internal](../runtime/internal.md)
+- [testing](../testing.md)
+- [testing.clua](../testing/clua.md)
+- [testing.bench_runner](../testing/bench_runner.md)
+- [testing.c_api_runner](../testing/c_api_runner.md)
+- [testing.diff_runner](../testing/diff_runner.md)
+- [testing.expected_failures](../testing/expected_failures.md)
+- [testing.metadata](../testing/metadata.md)
+- [testing.normalizer](../testing/normalizer.md)
+- [testing.extension_runner](../testing/extension_runner.md)
+- [testing.official_suite](../testing/official_suite.md)
+
+</details>
 
 ## Types
 
+- [RuntimeError](#type-runtimeerror)
 - [Value](#type-value)
 - [NativeFn](#type-nativefn)
 - [ProtectedCallResult](#type-protectedcallresult)
@@ -46,7 +108,6 @@
 
 ## Constants
 
-- [RuntimeError](#const-runtimeerror)
 - [UserdataFinalizer](#const-userdatafinalizer)
 - [UserdataDeinit](#const-userdatadeinit)
 - [ApiCallbackDispatchFn](#const-apicallbackdispatchfn)
@@ -56,12 +117,16 @@
 - [TableEntryIndex](#const-tableentryindex)
 - [PointerAllocationIndex](#const-pointerallocationindex)
 
-<a id="const-runtimeerror"></a>
+<a id="type-runtimeerror"></a>
 
 ## RuntimeError
 
 ```zig
-pub const RuntimeError =...;
+pub const RuntimeError = error{
+    RuntimeError,
+    StackOverflow,
+    UnsupportedOpcode,
+};
 ```
 
 <a id="type-value"></a>
@@ -70,6 +135,7 @@ pub const RuntimeError =...;
 
 ```zig
 pub const Value = union(enum) {
+    nil,
     boolean: bool,
     integer: i64,
     number: f64,
@@ -81,6 +147,34 @@ pub const Value = union(enum) {
     thread: *Thread,
     coroutine_wrapper: *Thread,
     gmatch_iterator: *Table,
+    native_print,
+    native_tostring,
+    native_getmetatable,
+    native_setmetatable,
+    native_rawequal,
+    native_rawget,
+    native_rawset,
+    native_rawlen,
+    native_next,
+    native_pairs,
+    native_ipairs,
+    native_ipairs_iter,
+    native_table_create,
+    native_select,
+    native_assert,
+    native_error,
+    native_pcall,
+    native_xpcall,
+    native_collectgarbage,
+    native_debug_traceback,
+    native_coroutine_create,
+    native_coroutine_resume,
+    native_coroutine_yield,
+    native_coroutine_status,
+    native_coroutine_running,
+    native_coroutine_isyieldable,
+    native_coroutine_close,
+    native_coroutine_wrap,
     native: NativeFn,
 };
 ```
@@ -90,12 +184,131 @@ pub const Value = union(enum) {
 ## NativeFn
 
 ```zig
-pub const NativeFn = enum { ... };
+pub const NativeFn = enum {
+    load,
+    type,
+    tonumber,
+    warn,
+    table_concat,
+    table_insert,
+    table_move,
+    table_pack,
+    table_remove,
+    table_sort,
+    table_unpack,
+    string_byte,
+    string_char,
+    string_dump,
+    string_find,
+    string_format,
+    string_gmatch,
+    string_gmatch_iter,
+    string_gsub,
+    string_len,
+    string_lower,
+    string_match,
+    string_pack,
+    string_packsize,
+    string_rep,
+    string_reverse,
+    string_sub,
+    string_unpack,
+    string_upper,
+    math_abs,
+    math_acos,
+    math_asin,
+    math_atan,
+    math_ceil,
+    math_cos,
+    math_deg,
+    math_exp,
+    math_floor,
+    math_fmod,
+    math_frexp,
+    math_ldexp,
+    math_log,
+    math_max,
+    math_min,
+    math_modf,
+    math_rad,
+    math_random,
+    math_randomseed,
+    math_sin,
+    math_sqrt,
+    math_tan,
+    math_tointeger,
+    math_type,
+    math_ult,
+    utf8_char,
+    utf8_codepoint,
+    utf8_codes,
+    utf8_codes_iter,
+    utf8_len,
+    utf8_offset,
+    loadfile,
+    dofile,
+    require,
+    package_searchpath,
+    package_searcher_preload,
+    package_searcher_lua,
+    io_read,
+    io_write,
+    io_open,
+    io_input,
+    io_output,
+    io_close,
+    io_flush,
+    io_lines,
+    io_tmpfile,
+    io_type,
+    io_file_read,
+    io_file_write,
+    io_file_close,
+    io_file_seek,
+    io_file_flush,
+    io_file_lines,
+    io_file_setvbuf,
+    io_lines_iter,
+    os_time,
+    os_clock,
+    os_date,
+    os_getenv,
+    os_setlocale,
+    os_execute,
+    os_remove,
+    os_rename,
+    os_tmpname,
+    os_difftime,
+    debug_getinfo,
+    debug_getupvalue,
+    debug_setupvalue,
+    debug_upvalueid,
+    debug_upvaluejoin,
+    debug_getlocal,
+    debug_setlocal,
+    debug_getregistry,
+    debug_sethook,
+    debug_gethook,
+    debug_setmetatable,
+    debug_setuservalue,
+    debug_getuservalue,
+    json_read,
+    json_write,
+    toml_read,
+    toml_write,
+    msgpack_read,
+    msgpack_write,
+    csv_read,
+    csv_write,
+    api_callback_dispatch,
+};
 ```
 
 ### Nested Declarations
 
-- [name](#fn-nativefn-name)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [name](#fn-nativefn-name) | `self: NativeFn` | `[]const u8` |  |
 
 <a id="fn-nativefn-name"></a>
 
@@ -179,7 +392,13 @@ References: [`CDebugHookContext`](#type-cdebughookcontext)
 ## DebugHookEvent
 
 ```zig
-pub const DebugHookEvent = enum {};
+pub const DebugHookEvent = enum {
+    call,
+    ret,
+    line,
+    count,
+    tail_call,
+};
 ```
 
 <a id="type-cdebughookcontext"></a>
@@ -216,12 +435,14 @@ pub const CClosureContext = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-cclosurecontext-deinit)
-- [argCount](#fn-cclosurecontext-argcount)
-- [argValue](#fn-cclosurecontext-argvalue)
-- [appendReturn](#fn-cclosurecontext-appendreturn)
-- [raise](#fn-cclosurecontext-raise)
-- [yieldWithReturns](#fn-cclosurecontext-yieldwithreturns)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-cclosurecontext-deinit) | `self: *CClosureContext` | `void` |  |
+| [argCount](#fn-cclosurecontext-argcount) | `self: *CClosureContext` | `usize` |  |
+| [argValue](#fn-cclosurecontext-argvalue) | `self: *CClosureContext, index: usize` | `Value` |  |
+| [appendReturn](#fn-cclosurecontext-appendreturn) | `self: *CClosureContext, value: Value` | `!void` |  |
+| [raise](#fn-cclosurecontext-raise) | `self: *CClosureContext, value: Value` | `error` |  |
+| [yieldWithReturns](#fn-cclosurecontext-yieldwithreturns) | `self: *CClosureContext, values: []const Value` | `!void` |  |
 
 <a id="fn-cclosurecontext-deinit"></a>
 
@@ -300,10 +521,12 @@ pub const CClosureResumeContext = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-cclosureresumecontext-deinit)
-- [appendReturn](#fn-cclosureresumecontext-appendreturn)
-- [raise](#fn-cclosureresumecontext-raise)
-- [yieldWithReturns](#fn-cclosureresumecontext-yieldwithreturns)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-cclosureresumecontext-deinit) | `self: *CClosureResumeContext` | `void` |  |
+| [appendReturn](#fn-cclosureresumecontext-appendreturn) | `self: *CClosureResumeContext, value: Value` | `!void` |  |
+| [raise](#fn-cclosureresumecontext-raise) | `self: *CClosureResumeContext, value: Value` | `error` |  |
+| [yieldWithReturns](#fn-cclosureresumecontext-yieldwithreturns) | `self: *CClosureResumeContext, values: []const Value` | `!void` |  |
 
 <a id="fn-cclosureresumecontext-deinit"></a>
 
@@ -364,15 +587,17 @@ pub const ApiCallbackContext = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-apicallbackcontext-deinit)
-- [argCount](#fn-apicallbackcontext-argcount)
-- [callbackArgValue](#fn-apicallbackcontext-callbackargvalue)
-- [clearReturns](#fn-apicallbackcontext-clearreturns)
-- [appendReturn](#fn-apicallbackcontext-appendreturn)
-- [fail](#fn-apicallbackcontext-fail)
-- [failArgumentMessage](#fn-apicallbackcontext-failargumentmessage)
-- [failArgumentType](#fn-apicallbackcontext-failargumenttype)
-- [raise](#fn-apicallbackcontext-raise)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-apicallbackcontext-deinit) | `self: *ApiCallbackContext` | `void` |  |
+| [argCount](#fn-apicallbackcontext-argcount) | `self: *ApiCallbackContext` | `usize` |  |
+| [callbackArgValue](#fn-apicallbackcontext-callbackargvalue) | `self: *ApiCallbackContext, index: usize` | `Value` |  |
+| [clearReturns](#fn-apicallbackcontext-clearreturns) | `self: *ApiCallbackContext` | `void` |  |
+| [appendReturn](#fn-apicallbackcontext-appendreturn) | `self: *ApiCallbackContext, value: Value` | `!void` |  |
+| [fail](#fn-apicallbackcontext-fail) | `self: *ApiCallbackContext, message: []const u8` | `RuntimeError` |  |
+| [failArgumentMessage](#fn-apicallbackcontext-failargumentmessage) | `self: *ApiCallbackContext, index: usize, message: []const u8` | `RuntimeError` |  |
+| [failArgumentType](#fn-apicallbackcontext-failargumenttype) | `self: *ApiCallbackContext, index: usize, expected: []const u8, actual: Value` | `RuntimeError` |  |
+| [raise](#fn-apicallbackcontext-raise) | `self: *ApiCallbackContext, value: Value` | `error` |  |
 
 <a id="fn-apicallbackcontext-deinit"></a>
 
@@ -432,7 +657,7 @@ References: [`ApiCallbackContext`](#type-apicallbackcontext), [`Value`](#type-va
 pub fn fail(self: *ApiCallbackContext, message: []const u8) RuntimeError
 ```
 
-References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#const-runtimeerror)
+References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#type-runtimeerror)
 
 <a id="fn-apicallbackcontext-failargumentmessage"></a>
 
@@ -442,7 +667,7 @@ References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#
 pub fn failArgumentMessage(self: *ApiCallbackContext, index: usize, message: []const u8) RuntimeError
 ```
 
-References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#const-runtimeerror)
+References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#type-runtimeerror)
 
 <a id="fn-apicallbackcontext-failargumenttype"></a>
 
@@ -452,7 +677,7 @@ References: [`ApiCallbackContext`](#type-apicallbackcontext), [`RuntimeError`](#
 pub fn failArgumentType(self: *ApiCallbackContext, index: usize, expected: []const u8, actual: Value) RuntimeError
 ```
 
-References: [`ApiCallbackContext`](#type-apicallbackcontext), [`Value`](#type-value), [`RuntimeError`](#const-runtimeerror)
+References: [`ApiCallbackContext`](#type-apicallbackcontext), [`Value`](#type-value), [`RuntimeError`](#type-runtimeerror)
 
 <a id="fn-apicallbackcontext-raise"></a>
 
@@ -478,7 +703,9 @@ pub const RuntimeErrorPayload = union(enum) {
 
 ### Nested Declarations
 
-- [luaValue](#fn-runtimeerrorpayload-luavalue)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [luaValue](#fn-runtimeerrorpayload-luavalue) | `self: RuntimeErrorPayload, state: anytype` | `Value` |  |
 
 <a id="fn-runtimeerrorpayload-luavalue"></a>
 
@@ -511,7 +738,11 @@ pub const ProtectedCallContext = struct {
 ## ProtectedContinuationKind
 
 ```zig
-pub const ProtectedContinuationKind = enum {};
+pub const ProtectedContinuationKind = enum {
+    pcall,
+    xpcall,
+    xpcall_handler,
+};
 ```
 
 <a id="type-protectedcontinuation"></a>
@@ -575,6 +806,7 @@ pub const CallOneContinuationResult = union(enum) {
     inverted_truthy: usize,
     branch_truthy: BranchContinuation,
     branch_inverted_truthy: BranchContinuation,
+    discard,
 };
 ```
 
@@ -693,15 +925,17 @@ pub const Table = struct {
 
 ### Nested Declarations
 
-- [init](#fn-table-init)
-- [deinit](#fn-table-deinit)
-- [get](#fn-table-get)
-- [set](#fn-table-set)
-- [setExistingNonNil](#fn-table-setexistingnonnil)
-- [len](#fn-table-len)
-- [next](#fn-table-next)
-- [removeHashKey](#fn-table-removehashkey)
-- [removeEntryAt](#fn-table-removeentryat)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [init](#fn-table-init) | `allocator: std.mem.Allocator, array_hint: u32, hash_hint: u32` | `!Table` |  |
+| [deinit](#fn-table-deinit) | `self: *Table, allocator: std.mem.Allocator` | `void` |  |
+| [get](#fn-table-get) | `self: Table, key: Value` | `Value` |  |
+| [set](#fn-table-set) | `self: *Table, allocator: std.mem.Allocator, key: Value, value: Value` | `!void` |  |
+| [setExistingNonNil](#fn-table-setexistingnonnil) | `self: *Table, key: Value, value: Value` | `bool` |  |
+| [len](#fn-table-len) | `self: Table` | `i64` |  |
+| [next](#fn-table-next) | `self: Table, key: Value` | `![2]Value` |  |
+| [removeHashKey](#fn-table-removehashkey) | `self: *Table, key: Value` | `void` |  |
+| [removeEntryAt](#fn-table-removeentryat) | `self: *Table, index: usize` | `void` |  |
 
 <a id="fn-table-init"></a>
 
@@ -868,10 +1102,12 @@ pub const Thread = struct {
 
 ### Nested Declarations
 
-- [initRoot](#fn-thread-initroot)
-- [initCoroutine](#fn-thread-initcoroutine)
-- [deinit](#fn-thread-deinit)
-- [ensureStack](#fn-thread-ensurestack)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [initRoot](#fn-thread-initroot) | `allocator: std.mem.Allocator, closure: *Closure, stack_value_limit: usize` | `!Thread` |  |
+| [initCoroutine](#fn-thread-initcoroutine) | `entry: Value` | `Thread` |  |
+| [deinit](#fn-thread-deinit) | `self: *Thread, allocator: std.mem.Allocator` | `void` |  |
+| [ensureStack](#fn-thread-ensurestack) | `self: *Thread, allocator: std.mem.Allocator, size: usize, limit: usize` | `!void` |  |
 
 <a id="fn-thread-initroot"></a>
 
@@ -918,7 +1154,12 @@ References: [`Thread`](#type-thread)
 ## ThreadStatus
 
 ```zig
-pub const ThreadStatus = enum {};
+pub const ThreadStatus = enum {
+    suspended,
+    running,
+    normal,
+    dead,
+};
 ```
 
 <a id="type-callframe"></a>
@@ -946,7 +1187,9 @@ pub const CallFrame = struct {
 
 ### Nested Declarations
 
-- [deinit](#fn-callframe-deinit)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [deinit](#fn-callframe-deinit) | `self: *CallFrame, allocator: std.mem.Allocator` | `void` |  |
 
 <a id="fn-callframe-deinit"></a>
 
@@ -982,12 +1225,17 @@ pub const PointerAllocationIndex = std.AutoHashMap(usize, usize);
 ## GcMode
 
 ```zig
-pub const GcMode = enum { ... };
+pub const GcMode = enum {
+    incremental,
+    generational,
+};
 ```
 
 ### Nested Declarations
 
-- [name](#fn-gcmode-name)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [name](#fn-gcmode-name) | `self: GcMode` | `[]const u8` |  |
 
 <a id="fn-gcmode-name"></a>
 
@@ -1004,7 +1252,14 @@ References: [`GcMode`](#type-gcmode)
 ## GcParam
 
 ```zig
-pub const GcParam = enum {};
+pub const GcParam = enum {
+    minormul,
+    majorminor,
+    minormajor,
+    pause,
+    stepmul,
+    stepsize,
+};
 ```
 
 <a id="type-gcparams"></a>
@@ -1024,8 +1279,10 @@ pub const GcParams = struct {
 
 ### Nested Declarations
 
-- [get](#fn-gcparams-get)
-- [set](#fn-gcparams-set)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [get](#fn-gcparams-get) | `self: GcParams, param: GcParam` | `i64` |  |
+| [set](#fn-gcparams-set) | `self: *GcParams, param: GcParam, value: i64` | `void` |  |
 
 <a id="fn-gcparams-get"></a>
 
@@ -1075,7 +1332,9 @@ pub const RuntimeAllocationStats = struct {
 
 ### Nested Declarations
 
-- [total](#fn-runtimeallocationstats-total)
+| Name | Parameters | Return Type | Description |
+| --- | --- | --- | --- |
+| [total](#fn-runtimeallocationstats-total) | `self: RuntimeAllocationStats` | `usize` |  |
 
 <a id="fn-runtimeallocationstats-total"></a>
 
