@@ -38,18 +38,15 @@ const zlua = @import("zlua");
 const Budget = struct {
     remaining: i64,
 
-    fn spend(self: *@This(), amount: i64) i64 {
+    pub fn init(amount: i64) @This() {
+        return .{ .remaining = amount };
+    }
+
+    pub fn spend(self: *@This(), amount: i64) i64 {
         self.remaining = @max(self.remaining - amount, 0);
         return self.remaining;
     }
 };
-
-fn newBudget(ctx: *zlua.Context, amount: i64) !zlua.Userdata(Budget) {
-    var budget = try ctx.state().newUserdata(Budget, .{ .remaining = amount }, .{});
-    errdefer budget.deinit();
-    try budget.method("spend", Budget.spend);
-    return budget;
-}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -57,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var lua = try zlua.State.init(allocator, .{});
     defer lua.deinit();
 
-    var new_budget = try lua.registerTyped("new_budget", newBudget);
+    var new_budget = try lua.registerUserdataInitializerWith(Budget, "new_budget", Budget.init, .{});
     defer new_budget.deinit();
     try lua.setGlobal("new_budget", new_budget);
 

@@ -639,9 +639,12 @@ pub const State = struct {
 | [getGlobal](#fn-state-getglobal) | `self: *State, name: []const u8, comptime T: type` | `!T` | Reads a global variable and converts it to &#96;T&#96;. |
 | [register](#fn-state-register) | `self: *State, name: []const u8, callback: HostFn` | `!Function` | Creates a Lua function handle that dispatches to an untyped Zig callback. |
 | [registerTyped](#fn-state-registertyped) | `self: *State, name: []const u8, comptime function: anytype` | `!Function` | Creates a Lua function handle from a typed Zig function. |
+| [registerUserdataInitializerWith](#fn-state-registeruserdatainitializerwith) | `self: *State, comptime T: type, name: []const u8, comptime initializer: anytype, comptime options: UserdataOptions(T)` | `!Function` | Creates a Lua function handle that constructs auto-bound userdata using &#96;initializer&#96;. |
 | [createTable](#fn-state-createtable) | `self: *State, options: TableOptions` | `!Table` | Creates a rooted Lua table handle with optional capacity hints. |
 | [newUserdata](#fn-state-newuserdata) | `self: *State, comptime T: type, value: T, options: UserdataOptions(T)` | `!Userdata(T)` | Allocates Lua-owned userdata storage initialized with &#96;value&#96;. |
+| [newUserdataAuto](#fn-state-newuserdataauto) | `self: *State, comptime T: type, value: T, options: UserdataOptions(T)` | `!Userdata(T)` | Allocates Lua-owned userdata and installs eligible methods declared on &#96;T&#96;. |
 | [newUserdataPtr](#fn-state-newuserdataptr) | `self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)` | `!Userdata(T)` | Wraps host-owned storage as Lua userdata without taking ownership of &#96;ptr&#96;. |
+| [newUserdataPtrAuto](#fn-state-newuserdataptrauto) | `self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)` | `!Userdata(T)` | Wraps host-owned storage as Lua userdata and installs eligible methods declared on &#96;T&#96;. |
 | [createModule](#fn-state-createmodule) | `self: *State, name: []const u8` | `!Table` | Creates a table intended to be installed as a Lua module. |
 | [preloadModule](#fn-state-preloadmodule) | `self: *State, name: []const u8, module: Table` | `!void` | Adds &#96;module&#96; to &#96;package.loaded&#96; so &#96;require(name)&#96; returns it. |
 | [setPackagePath](#fn-state-setpackagepath) | `self: *State, path: []const u8` | `!void` | Sets &#96;package.path&#96;, opening the package library first if needed. |
@@ -833,6 +836,23 @@ pub fn registerTyped(self: *State, name: []const u8, comptime function: anytype)
 
 References: [`State`](#type-state), [`Function`](#type-function)
 
+<a id="fn-state-registeruserdatainitializerwith"></a>
+
+### State.registerUserdataInitializerWith
+
+Creates a Lua function handle that constructs auto-bound userdata using `initializer`.
+
+The initializer's parameters are read from Lua arguments by type. A
+`*Context` parameter may be included and is injected without consuming a
+Lua argument. The initializer must return `T` or `!T`; the result is
+wrapped with `newUserdataAuto` before being returned to Lua.
+
+```zig
+pub fn registerUserdataInitializerWith(self: *State, comptime T: type, name: []const u8, comptime initializer: anytype, comptime options: UserdataOptions(T)) !Function
+```
+
+References: [`State`](#type-state), [`Function`](#type-function)
+
 <a id="fn-state-createtable"></a>
 
 ### State.createTable
@@ -857,6 +877,22 @@ pub fn newUserdata(self: *State, comptime T: type, value: T, options: UserdataOp
 
 References: [`State`](#type-state)
 
+<a id="fn-state-newuserdataauto"></a>
+
+### State.newUserdataAuto
+
+Allocates Lua-owned userdata and installs eligible methods declared on `T`.
+
+Public function declarations whose first parameter is `*T` or `*const T`
+are installed on the userdata. Names beginning with `__` are installed as
+metamethods; all other eligible names are installed on `__index`.
+
+```zig
+pub fn newUserdataAuto(self: *State, comptime T: type, value: T, options: UserdataOptions(T)) !Userdata(T)
+```
+
+References: [`State`](#type-state)
+
 <a id="fn-state-newuserdataptr"></a>
 
 ### State.newUserdataPtr
@@ -865,6 +901,18 @@ Wraps host-owned storage as Lua userdata without taking ownership of `ptr`.
 
 ```zig
 pub fn newUserdataPtr(self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)) !Userdata(T)
+```
+
+References: [`State`](#type-state)
+
+<a id="fn-state-newuserdataptrauto"></a>
+
+### State.newUserdataPtrAuto
+
+Wraps host-owned storage as Lua userdata and installs eligible methods declared on `T`.
+
+```zig
+pub fn newUserdataPtrAuto(self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)) !Userdata(T)
 ```
 
 References: [`State`](#type-state)

@@ -470,6 +470,22 @@ pub const State = struct {
         return self.register(name, Wrapper.call);
     }
 
+    /// Creates a Lua function handle that constructs auto-bound userdata using `initializer`.
+    ///
+    /// The initializer's parameters are read from Lua arguments by type. A
+    /// `*Context` parameter may be included and is injected without consuming a
+    /// Lua argument. The initializer must return `T` or `!T`; the result is
+    /// wrapped with `newUserdataAuto` before being returned to Lua.
+    pub fn registerUserdataInitializerWith(self: *State, comptime T: type, name: []const u8, comptime initializer: anytype, comptime options: UserdataOptions(T)) !Function {
+        const Wrapper = struct {
+            fn call(ctx: *Context) !void {
+                try callUserdataInitializer(T, initializer, options, ctx);
+            }
+        };
+
+        return self.register(name, Wrapper.call);
+    }
+
     /// Creates a rooted Lua table handle with optional capacity hints.
     pub fn createTable(self: *State, options: TableOptions) !Table {
         const raw = self.raw_state.newTableWithHints(options.array_hint, options.hash_hint) catch |err| return self.captureLuaError(err);
@@ -489,12 +505,32 @@ pub const State = struct {
         return userdata;
     }
 
+    /// Allocates Lua-owned userdata and installs eligible methods declared on `T`.
+    ///
+    /// Public function declarations whose first parameter is `*T` or `*const T`
+    /// are installed on the userdata. Names beginning with `__` are installed as
+    /// metamethods; all other eligible names are installed on `__index`.
+    pub fn newUserdataAuto(self: *State, comptime T: type, value: T, options: UserdataOptions(T)) !Userdata(T) {
+        var userdata = try self.newUserdata(T, value, options);
+        errdefer userdata.deinit();
+        try userdata.bindMethods(T);
+        return userdata;
+    }
+
     /// Wraps host-owned storage as Lua userdata without taking ownership of `ptr`.
     pub fn newUserdataPtr(self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)) !Userdata(T) {
         const raw = try self.raw_state.newUserdata(ptr, typeId(T), @typeName(T), userdataFinalizer(T, options.finalizer), userdataFinalizerData(T, options.finalizer), null);
         var userdata = try Userdata(T).fromRuntime(self, raw);
         errdefer userdata.deinit();
         try userdata.initMetatable();
+        return userdata;
+    }
+
+    /// Wraps host-owned storage as Lua userdata and installs eligible methods declared on `T`.
+    pub fn newUserdataPtrAuto(self: *State, comptime T: type, ptr: *T, options: UserdataPtrOptions(T)) !Userdata(T) {
+        var userdata = try self.newUserdataPtr(T, ptr, options);
+        errdefer userdata.deinit();
+        try userdata.bindMethods(T);
         return userdata;
     }
 
@@ -951,6 +987,26 @@ pub fn Userdata(comptime T: type) type {
             try self.ref.state.raw_state.setTableValue(index_value, .{ .string = try self.ref.state.raw_state.intern(name) }, .{ .closure = try method_function.rawClosure() });
         }
 
+        /// Installs eligible methods declared on `Source`.
+        ///
+        /// Function declarations whose first parameter is `*T` or `*const T` are
+        /// installed. Names beginning with `__` are installed as metamethods;
+        /// all other eligible names are installed on `__index`.
+        pub fn bindMethods(self: @This(), comptime Source: type) !void {
+            if (@typeInfo(Source) != .@"struct") @compileError("bindMethods requires a struct type");
+
+            inline for (@typeInfo(Source).@"struct".decls) |decl| {
+                const member = @field(Source, decl.name);
+                if (comptime isUserdataMethod(T, @TypeOf(member))) {
+                    if (comptime isMetamethodName(decl.name)) {
+                        try self.metamethod(decl.name, member);
+                    } else {
+                        try self.method(decl.name, member);
+                    }
+                }
+            }
+        }
+
         /// Installs a typed Zig function as a userdata metamethod such as `__close`.
         pub fn metamethod(self: @This(), name: []const u8, comptime function: anytype) !void {
             const Wrapper = struct {
@@ -1338,11 +1394,12 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
 
     switch (@typeInfo(Return)) {
         .error_union => |error_union| {
-            var result = try @call(.auto, function, args);
-            defer deinitIfOwned(error_union.payload, &result);
-            if (error_union.payload == void) {
+            if (comptime error_union.payload == void) {
+                try @call(.auto, function, args);
                 try ctx.returnValues(.{});
             } else {
+                var result = try @call(.auto, function, args);
+                defer deinitIfOwned(error_union.payload, &result);
                 try ctx.returnValues(result);
             }
         },
@@ -1350,6 +1407,58 @@ fn callTyped(comptime function: anytype, ctx: *Context) !void {
             var result = @call(.auto, function, args);
             defer deinitIfOwned(Return, &result);
             try ctx.returnValues(result);
+        },
+    }
+}
+
+fn callUserdataInitializer(comptime T: type, comptime initializer: anytype, comptime options: UserdataOptions(T), ctx: *Context) !void {
+    const FunctionType = @TypeOf(initializer);
+    const SignatureType = switch (@typeInfo(FunctionType)) {
+        .@"fn" => FunctionType,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => pointer.child,
+            else => @compileError("userdata initializers require a function or function pointer"),
+        },
+        else => @compileError("userdata initializers require a function or function pointer"),
+    };
+    const function_info = switch (@typeInfo(FunctionType)) {
+        .@"fn" => |info| info,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => |info| info,
+            else => @compileError("userdata initializers require a function or function pointer"),
+        },
+        else => @compileError("userdata initializers require a function or function pointer"),
+    };
+
+    if (function_info.is_var_args) @compileError("userdata initializers do not support varargs functions");
+
+    var args: std.meta.ArgsTuple(SignatureType) = undefined;
+    var lua_arg_index: usize = 0;
+    inline for (function_info.params, 0..) |param, index| {
+        const Param = param.type orelse @compileError("userdata initializer parameters must be typed");
+        if (Param == *Context) {
+            args[index] = ctx;
+        } else {
+            args[index] = try ctx.arg(lua_arg_index, Param);
+            lua_arg_index += 1;
+        }
+    }
+
+    const Return = function_info.return_type orelse @compileError("userdata initializers must return T or !T");
+    switch (@typeInfo(Return)) {
+        .error_union => |error_union| {
+            if (comptime error_union.payload != T) @compileError("userdata initializers must return T or !T");
+            const value = try @call(.auto, initializer, args);
+            var userdata = try ctx.state().newUserdataAuto(T, value, options);
+            defer userdata.deinit();
+            try ctx.returnValues(userdata);
+        },
+        else => {
+            if (comptime Return != T) @compileError("userdata initializers must return T or !T");
+            const value = @call(.auto, initializer, args);
+            var userdata = try ctx.state().newUserdataAuto(T, value, options);
+            defer userdata.deinit();
+            try ctx.returnValues(userdata);
         },
     }
 }
@@ -1377,13 +1486,19 @@ fn callUserdataMethod(comptime T: type, comptime function: anytype, ctx: *Contex
     if (function_info.is_var_args) @compileError("userdata methods do not support varargs functions");
     if (function_info.params.len == 0) @compileError("userdata methods require a receiver parameter");
     const Receiver = function_info.params[0].type orelse @compileError("userdata method receiver must be typed");
-    if (@typeInfo(Receiver) != .pointer) @compileError("userdata method receiver must be a pointer");
+    if (comptime !isUserdataReceiver(T, Receiver)) @compileError("userdata method receiver must be *T or *const T");
 
     var args: std.meta.ArgsTuple(SignatureType) = undefined;
-    args[0] = try ctx.arg(0, Receiver);
+    args[0] = try userdataReceiverArg(T, Receiver, ctx);
+    var lua_arg_index: usize = 1;
     inline for (function_info.params[1..], 1..) |param, index| {
         const Param = param.type orelse @compileError("userdata method parameters must be typed");
-        args[index] = try ctx.arg(index, Param);
+        if (Param == *Context) {
+            args[index] = ctx;
+        } else {
+            args[index] = try ctx.arg(lua_arg_index, Param);
+            lua_arg_index += 1;
+        }
     }
 
     const Return = function_info.return_type orelse void;
@@ -1395,18 +1510,64 @@ fn callUserdataMethod(comptime T: type, comptime function: anytype, ctx: *Contex
 
     switch (@typeInfo(Return)) {
         .error_union => |error_union| {
-            const result = try @call(.auto, function, args);
-            if (error_union.payload == void) {
+            if (comptime error_union.payload == void) {
+                try @call(.auto, function, args);
                 try ctx.returnValues(.{});
             } else {
+                var result = try @call(.auto, function, args);
+                defer deinitIfOwned(error_union.payload, &result);
                 try ctx.returnValues(result);
             }
         },
         else => {
-            const result = @call(.auto, function, args);
+            var result = @call(.auto, function, args);
+            defer deinitIfOwned(Return, &result);
             try ctx.returnValues(result);
         },
     }
+}
+
+fn isUserdataMethod(comptime T: type, comptime FunctionType: type) bool {
+    const function_info = switch (@typeInfo(FunctionType)) {
+        .@"fn" => |info| info,
+        .pointer => |pointer| switch (@typeInfo(pointer.child)) {
+            .@"fn" => |info| info,
+            else => return false,
+        },
+        else => return false,
+    };
+
+    if (function_info.is_var_args or function_info.params.len == 0) return false;
+    const Receiver = function_info.params[0].type orelse return false;
+    return isUserdataReceiver(T, Receiver);
+}
+
+fn isUserdataReceiver(comptime T: type, comptime Receiver: type) bool {
+    return switch (@typeInfo(Receiver)) {
+        .pointer => |pointer| pointer.size == .one and
+            pointer.child == T and
+            !pointer.is_volatile and
+            pointer.alignment == null and
+            pointer.address_space == .generic and
+            !pointer.is_allowzero and
+            pointer.sentinel_ptr == null,
+        else => false,
+    };
+}
+
+fn isMetamethodName(comptime name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "__");
+}
+
+fn userdataReceiverArg(comptime T: type, comptime Receiver: type, ctx: *Context) !Receiver {
+    const raw = ctx.raw.callbackArgValue(0);
+    const userdata = switch (raw) {
+        .userdata => |value| value,
+        else => return ctx.argConversionError(0, Receiver, raw, error.TypeMismatch),
+    };
+
+    const ptr = userdataPtr(T, userdata) catch |err| return ctx.argConversionError(0, Receiver, raw, err);
+    return ptr;
 }
 
 fn TypeToken(comptime T: type) type {
@@ -2391,6 +2552,270 @@ test "api userdata methods receive typed Zig pointers" {
     try std.testing.expectEqual(@as(i64, 5), (try counter.ptr()).value);
 }
 
+test "api auto userdata binding installs receiver methods" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn inc(self: *@This(), ctx: *Context, amount: i64) !i64 {
+            try std.testing.expectEqual(@as(usize, 2), ctx.argCount());
+            self.value += amount;
+            return self.value;
+        }
+
+        pub fn get(self: *const @This()) i64 {
+            return self.value;
+        }
+
+        pub fn clear(self: *@This()) !void {
+            self.value = 0;
+        }
+
+        pub fn __tostring(self: *const @This()) []const u8 {
+            _ = self;
+            return "Counter";
+        }
+
+        pub fn helper(amount: i64) i64 {
+            return amount;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var counter = try lua.newUserdataAuto(Counter, .{ .value = 0 }, .{});
+    defer counter.deinit();
+    try lua.setGlobal("counter", counter);
+
+    try lua.doString(
+        \\assert(type(counter) == 'userdata')
+        \\assert(counter:inc(2) == 2)
+        \\assert(counter:get() == 2)
+        \\assert(tostring(counter) == 'Counter')
+        \\counter:clear()
+        \\assert(counter:get() == 0)
+        \\assert(counter.helper == nil)
+    , .{ .name = "=api-auto-userdata" });
+
+    try std.testing.expectEqual(@as(i64, 0), (try counter.ptr()).value);
+}
+
+test "api auto userdata pointer wrappers bind methods" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn inc(self: *@This(), amount: i64) i64 {
+            self.value += amount;
+            return self.value;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var backing = Counter{ .value = 10 };
+    var counter = try lua.newUserdataPtrAuto(Counter, &backing, .{});
+    defer counter.deinit();
+    try lua.setGlobal("counter", counter);
+
+    try lua.doString("assert(counter:inc(32) == 42)", .{ .name = "=api-auto-userdata-ptr" });
+    try std.testing.expectEqual(@as(i64, 42), backing.value);
+}
+
+test "api userdata initializer with returns auto-bound userdata" {
+    const Budget = struct {
+        remaining: i64,
+        label: []const u8,
+
+        pub fn init(ctx: *Context, amount: i64, label: []const u8) !@This() {
+            try std.testing.expectEqual(@as(usize, 2), ctx.argCount());
+            return .{ .remaining = amount, .label = label };
+        }
+
+        pub fn spend(self: *@This(), amount: i64) i64 {
+            self.remaining = @max(self.remaining - amount, 0);
+            return self.remaining;
+        }
+
+        pub fn name(self: *const @This()) []const u8 {
+            return self.label;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var new_budget = try lua.registerUserdataInitializerWith(Budget, "new_budget", Budget.init, .{});
+    defer new_budget.deinit();
+    try lua.setGlobal("new_budget", new_budget);
+
+    var chunk = try lua.loadString(
+        \\local budget = new_budget(25, 'ops')
+        \\assert(type(budget) == 'userdata')
+        \\assert(budget:name() == 'ops')
+        \\assert(budget:spend(7) == 18)
+        \\return budget
+    , .{ .name = "=api-userdata-initializer-with" });
+    defer chunk.deinit();
+
+    var budget = try chunk.call(.{}, Userdata(Budget));
+    defer budget.deinit();
+    try std.testing.expectEqual(@as(i64, 18), (try budget.ptr()).remaining);
+}
+
+test "api userdata initializer with accepts plain initializer functions" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn init(value: i64) @This() {
+            return .{ .value = value };
+        }
+
+        pub fn get(self: *const @This()) i64 {
+            return self.value;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var new_counter = try lua.registerUserdataInitializerWith(Counter, "new_counter", Counter.init, .{});
+    defer new_counter.deinit();
+    try lua.setGlobal("new_counter", new_counter);
+
+    try lua.doString("assert(new_counter(42):get() == 42)", .{ .name = "=api-userdata-initializer-plain" });
+}
+
+test "api userdata initializer with argument errors become Lua errors" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn init(value: i64) @This() {
+            return .{ .value = value };
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var new_counter = try lua.registerUserdataInitializerWith(Counter, "new_counter", Counter.init, .{});
+    defer new_counter.deinit();
+    try lua.setGlobal("new_counter", new_counter);
+
+    var chunk = try lua.loadString("new_counter('bad')", .{ .name = "=api-userdata-initializer-arg-error" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "new_counter") != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "number") != null);
+        },
+    }
+}
+
+test "api userdata initializer with can raise Lua errors" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn init(ctx: *Context, value: i64) !@This() {
+            if (value < 0) return ctx.raise("negative counter");
+            return .{ .value = value };
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var new_counter = try lua.registerUserdataInitializerWith(Counter, "new_counter", Counter.init, .{});
+    defer new_counter.deinit();
+    try lua.setGlobal("new_counter", new_counter);
+
+    var chunk = try lua.loadString("new_counter(-1)", .{ .name = "=api-userdata-initializer-raise" });
+    defer chunk.deinit();
+
+    try expectProtectedErrorContains(&lua, chunk, "negative counter");
+}
+
+test "api auto userdata binding skips non receiver declarations" {
+    const Other = struct { value: i64 };
+    const Fixture = struct {
+        value: i64,
+
+        pub const tag = "not a method";
+
+        pub fn ok(self: *const @This()) i64 {
+            return self.value;
+        }
+
+        pub fn static() i64 {
+            return 1;
+        }
+
+        pub fn wrongReceiver(self: *Other) i64 {
+            return self.value;
+        }
+
+        pub fn wrongConstReceiver(self: *const Other) i64 {
+            return self.value;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var fixture = try lua.newUserdataAuto(Fixture, .{ .value = 7 }, .{});
+    defer fixture.deinit();
+    try lua.setGlobal("fixture", fixture);
+
+    try lua.doString(
+        \\assert(fixture:ok() == 7)
+        \\assert(fixture.tag == nil)
+        \\assert(fixture.static == nil)
+        \\assert(fixture.wrongReceiver == nil)
+        \\assert(fixture.wrongConstReceiver == nil)
+    , .{ .name = "=api-auto-userdata-skips" });
+}
+
+test "api userdata method context injection works in later positions" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn middle(self: *@This(), amount: i64, ctx: *Context, label: []const u8) !i64 {
+            try std.testing.expectEqual(@as(usize, 3), ctx.argCount());
+            try std.testing.expectEqualStrings("middle", label);
+            self.value += amount;
+            return self.value;
+        }
+
+        pub fn trailing(self: *@This(), amount: i64, label: []const u8, ctx: *Context) !i64 {
+            try std.testing.expectEqual(@as(usize, 3), ctx.argCount());
+            try std.testing.expectEqualStrings("trailing", label);
+            self.value += amount;
+            return self.value;
+        }
+    };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var counter = try lua.newUserdataAuto(Counter, .{ .value = 0 }, .{});
+    defer counter.deinit();
+    try lua.setGlobal("counter", counter);
+
+    try lua.doString(
+        \\assert(counter:middle(2, 'middle') == 2)
+        \\assert(counter:trailing(3, 'trailing') == 5)
+    , .{ .name = "=api-userdata-context-positions" });
+
+    try std.testing.expectEqual(@as(i64, 5), (try counter.ptr()).value);
+}
+
 test "api userdata pointer wrappers and Context.arg typed reads" {
     const Counter = struct {
         value: i64,
@@ -2451,6 +2876,46 @@ test "api userdata wrong type errors are clear" {
             const message = try err.message();
             defer lua.allocator().free(message);
             try std.testing.expect(std.mem.indexOf(u8, message, "need_counter") != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Counter)) != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Other)) != null);
+        },
+    }
+}
+
+test "api userdata method wrong receiver errors are clear" {
+    const Counter = struct {
+        value: i64,
+
+        pub fn inc(self: *@This(), amount: i64) i64 {
+            self.value += amount;
+            return self.value;
+        }
+    };
+    const Other = struct { value: i64 };
+
+    var lua = try State.init(std.testing.allocator, .{});
+    defer lua.deinit();
+
+    var counter = try lua.newUserdataAuto(Counter, .{ .value = 0 }, .{});
+    defer counter.deinit();
+    try lua.setGlobal("counter", counter);
+
+    var other = try lua.newUserdata(Other, .{ .value = 1 }, .{});
+    defer other.deinit();
+    try lua.setGlobal("other", other);
+
+    var chunk = try lua.loadString("counter.inc(other, 1)", .{ .name = "=api-userdata-wrong-receiver" });
+    defer chunk.deinit();
+
+    const result = try chunk.protectedCall(.{}, void);
+    switch (result) {
+        .ok => return error.TestExpectedLuaError,
+        .lua_error => |err_ref| {
+            var err = err_ref;
+            defer err.deinit();
+            const message = try err.message();
+            defer lua.allocator().free(message);
+            try std.testing.expect(std.mem.indexOf(u8, message, "inc") != null);
             try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Counter)) != null);
             try std.testing.expect(std.mem.indexOf(u8, message, @typeName(Other)) != null);
         },
