@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const compile = @import("../compile.zig");
 const call_mod = @import("call.zig");
 const coroutine_mod = @import("coroutine.zig");
@@ -57,8 +58,10 @@ pub const StdlibMode = stdlib.LibrarySelection;
 pub const MemoryFile = host.MemoryFile;
 pub const MemoryFilesystem = host.MemoryFilesystem;
 pub const FilesystemCapability = host.FilesystemCapability;
+pub const EnvironmentCapability = host.EnvironmentCapability;
 pub const ClockCapability = host.ClockCapability;
 pub const ProcessCapability = host.ProcessCapability;
+pub const ProcessResult = host.ProcessResult;
 
 const CoroutineResumeResult = types.CoroutineResumeResult;
 pub const Closure = types.Closure;
@@ -86,7 +89,7 @@ pub const StateOptions = struct {
     stdout: ?*std.Io.Writer = null,
     stderr: ?*std.Io.Writer = null,
     filesystem: FilesystemCapability = .disabled,
-    environment: ?*const std.process.Environ.Map = null,
+    environment: EnvironmentCapability = .disabled,
     clock: ClockCapability = .system,
     process: ProcessCapability = .disabled,
     stdin: []const u8 = "",
@@ -1312,7 +1315,10 @@ pub const State = struct {
                 return self.fail("cannot open file");
             },
             .memory_rw => |filesystem| return filesystem.readFileAlloc(self.allocator, path) catch return self.fail("cannot open file"),
-            .host_cwd => {
+            .custom => |filesystem| return filesystem.read_file_alloc(filesystem.context, self.allocator, path) catch return self.fail("cannot open file"),
+            .host_cwd => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host filesystem unavailable");
+            } else {
                 const io = try self.requireIo("filesystem I/O unavailable");
                 return Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch return self.fail("cannot open file");
             },
@@ -1341,7 +1347,13 @@ pub const State = struct {
         switch (self.options.filesystem) {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.writeFile(path, data) catch return self.fail("cannot write file"),
-            .host_cwd => {
+            .custom => |filesystem| {
+                const write = filesystem.write_file orelse return self.fail("filesystem write access disabled");
+                write(filesystem.context, path, data) catch return self.fail("cannot write file");
+            },
+            .host_cwd => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host filesystem unavailable");
+            } else {
                 const io = try self.requireIo("filesystem I/O unavailable");
                 Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data }) catch return self.fail("cannot write file");
             },
@@ -1352,7 +1364,13 @@ pub const State = struct {
         switch (self.options.filesystem) {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.removeFile(path) catch return self.fail("cannot remove file"),
-            .host_cwd => {
+            .custom => |filesystem| {
+                const remove = filesystem.remove_file orelse return self.fail("filesystem write access disabled");
+                remove(filesystem.context, path) catch return self.fail("cannot remove file");
+            },
+            .host_cwd => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host filesystem unavailable");
+            } else {
                 const io = try self.requireIo("filesystem I/O unavailable");
                 Dir.cwd().deleteFile(io, path) catch return self.fail("cannot remove file");
             },
@@ -1363,7 +1381,13 @@ pub const State = struct {
         switch (self.options.filesystem) {
             .disabled, .memory => return self.fail("filesystem write access disabled"),
             .memory_rw => |filesystem| filesystem.renameFile(old_path, new_path) catch return self.fail("cannot rename file"),
-            .host_cwd => {
+            .custom => |filesystem| {
+                const rename = filesystem.rename_file orelse return self.fail("filesystem write access disabled");
+                rename(filesystem.context, old_path, new_path) catch return self.fail("cannot rename file");
+            },
+            .host_cwd => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host filesystem unavailable");
+            } else {
                 const io = try self.requireIo("filesystem I/O unavailable");
                 Dir.cwd().rename(old_path, Dir.cwd(), new_path, io) catch return self.fail("cannot rename file");
             },
@@ -1371,18 +1395,56 @@ pub const State = struct {
     }
 
     pub fn getenv(self: *State, name: []const u8) ?[]const u8 {
-        const environment = self.options.environment orelse return null;
-        return environment.get(name);
+        return switch (self.options.environment) {
+            .disabled => null,
+            .map => |environment| environment.get(name),
+            .custom => |environment| environment.get(environment.context, name),
+        };
     }
 
     pub fn currentTime(self: *State) !i64 {
         return switch (self.options.clock) {
             .disabled => self.fail("clock access disabled"),
             .fixed => |value| value,
-            .system => {
+            .system => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host clock unavailable");
+            } else {
                 const io = try self.requireIo("clock I/O unavailable");
                 return @intCast(@divTrunc(Clock.real.now(io).nanoseconds, std.time.ns_per_s));
             },
+            .custom => |clock| clock.now(clock.context) catch return self.fail("clock unavailable"),
+        };
+    }
+
+    pub fn executeProcess(self: *State, command: []const u8) !ProcessResult {
+        return switch (self.options.process) {
+            .disabled => return self.fail("process access disabled"),
+            .custom => |process| return process.execute(process.context, command) catch return self.fail("process execution failed"),
+            .enabled => if (comptime builtin.os.tag == .freestanding) {
+                return self.fail("host process unavailable");
+            } else {
+                const io = try self.requireIo("process I/O unavailable");
+                const argv = [_][]const u8{ "/bin/sh", "-c", command };
+                const result = std.process.run(self.allocator, io, .{
+                    .argv = &argv,
+                    .environ_map = self.environmentMap(),
+                    .stdout_limit = .limited(1024 * 1024),
+                    .stderr_limit = .limited(1024 * 1024),
+                }) catch return self.fail("process execution failed");
+                defer self.allocator.free(result.stdout);
+                defer self.allocator.free(result.stderr);
+                return switch (result.term) {
+                    .exited => |code| .{ .status = .exit, .code = code },
+                    else => .{ .status = .signal, .code = 0 },
+                };
+            },
+        };
+    }
+
+    fn environmentMap(self: *State) ?*const std.process.Environ.Map {
+        return switch (self.options.environment) {
+            .map => |environment| environment,
+            .disabled, .custom => null,
         };
     }
 
@@ -1391,7 +1453,10 @@ pub const State = struct {
     }
 
     pub fn processEnabled(self: *State) bool {
-        return self.options.process == .enabled;
+        return switch (self.options.process) {
+            .disabled => false,
+            .enabled, .custom => true,
+        };
     }
 
     pub fn readStdin(self: *State, spec: []const u8) !Value {

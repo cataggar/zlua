@@ -101,19 +101,25 @@ pub const IoCapability = struct {
 
 /// Filesystem access granted to Lua file APIs, `loadfile`, `dofile`, and `require`.
 pub const FilesystemCapability = runtime.FilesystemCapability;
+/// Callback-backed filesystem access for embedders with non-std host services.
+pub const CustomFilesystem = runtime.CustomFilesystem;
 
 /// Environment-variable access granted to `os.getenv` and enabled child processes.
-pub const EnvironmentCapability = union(enum) {
-    /// Deny environment access.
-    disabled,
-    /// Use the supplied environment map.
-    map: *const std.process.Environ.Map,
-};
+pub const EnvironmentCapability = runtime.EnvironmentCapability;
+/// Callback-backed environment access for embedders with non-std host services.
+pub const CustomEnvironment = runtime.CustomEnvironment;
 
 /// Clock access granted to Lua time/date APIs.
 pub const ClockCapability = runtime.ClockCapability;
+/// Callback-backed clock access for embedders with non-std host services.
+pub const CustomClock = runtime.CustomClock;
 /// Process-spawning access granted to `os.execute`.
 pub const ProcessCapability = runtime.ProcessCapability;
+/// Callback-backed process execution for embedders with non-std host services.
+pub const CustomProcess = runtime.CustomProcess;
+/// Result returned by callback-backed process execution.
+pub const ProcessResult = runtime.ProcessResult;
+pub const ProcessStatus = runtime.ProcessStatus;
 
 /// Host services Lua code may use when matching standard-library functions are open.
 pub const Capabilities = struct {
@@ -563,7 +569,7 @@ pub const State = struct {
     /// Adds or writes a file in the state's memory-backed filesystem.
     ///
     /// Disabled and read-only memory states store an owned copy. Writable memory
-    /// filesystems receive a write. Host filesystem states return
+    /// filesystems receive a write. Host and custom filesystem states return
     /// `error.UnsupportedOption`.
     pub fn addMemoryFile(self: *State, path: []const u8, contents: []const u8) !void {
         switch (self.raw_state.options.filesystem) {
@@ -572,7 +578,7 @@ pub const State = struct {
                 try filesystem.writeFile(path, contents);
                 return;
             },
-            .host_cwd => return error.UnsupportedOption,
+            .host_cwd, .custom => return error.UnsupportedOption,
         }
 
         try self.appendMemoryFile(path, contents, true);
@@ -1300,10 +1306,7 @@ fn runtimeOptions(options: Options) runtime.StateOptions {
         .stdout = options.capabilities.io.stdout,
         .stderr = options.capabilities.io.stderr,
         .filesystem = options.capabilities.filesystem,
-        .environment = switch (options.capabilities.environment) {
-            .disabled => null,
-            .map => |map| map,
-        },
+        .environment = options.capabilities.environment,
         .clock = options.capabilities.clock,
         .process = options.capabilities.process,
         .stdin = options.capabilities.io.stdin,

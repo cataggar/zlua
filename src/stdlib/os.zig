@@ -99,25 +99,16 @@ pub fn setlocale(state: *State, thread: *Thread, op: bytecode.Call) !void {
 }
 
 pub fn execute(state: *State, thread: *Thread, op: bytecode.Call) !void {
-    if (!state.processEnabled()) return state.fail("process access disabled");
     const command = try state.expectArgumentString(thread, op, "os.execute", 0);
-    const io = try state.requireIo("process I/O unavailable");
-    const argv = [_][]const u8{ "/bin/sh", "-c", command };
-    const result = std.process.run(state.allocator, io, .{
-        .argv = &argv,
-        .environ_map = state.options.environment,
-        .stdout_limit = .limited(1024 * 1024),
-        .stderr_limit = .limited(1024 * 1024),
-    }) catch return state.fail("process execution failed");
-    defer state.allocator.free(result.stdout);
-    defer state.allocator.free(result.stderr);
-    switch (result.term) {
-        .exited => |code| if (code == 0) {
-            try state.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = true }, .{ .string = try state.intern("exit") }, .{ .integer = code } });
-        } else {
-            try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("exit") }, .{ .integer = code } });
-        },
-        else => try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = try state.intern("signal") }, .{ .integer = 0 } }),
+    const result = try state.executeProcess(command);
+    const status = try state.intern(switch (result.status) {
+        .exit => "exit",
+        .signal => "signal",
+    });
+    if (result.status == .exit and result.code == 0) {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .{ .boolean = true }, .{ .string = status }, .{ .integer = result.code } });
+    } else {
+        try state.returnValues(thread, op.base, op.return_count, &.{ .nil, .{ .string = status }, .{ .integer = result.code } });
     }
 }
 

@@ -45,8 +45,15 @@ pub const StdlibMode = state_mod.StdlibMode;
 pub const MemoryFile = host.MemoryFile;
 pub const MemoryFilesystem = host.MemoryFilesystem;
 pub const FilesystemCapability = host.FilesystemCapability;
+pub const CustomFilesystem = host.CustomFilesystem;
+pub const EnvironmentCapability = host.EnvironmentCapability;
+pub const CustomEnvironment = host.CustomEnvironment;
 pub const ClockCapability = host.ClockCapability;
+pub const CustomClock = host.CustomClock;
 pub const ProcessCapability = host.ProcessCapability;
+pub const CustomProcess = host.CustomProcess;
+pub const ProcessResult = host.ProcessResult;
+pub const ProcessStatus = host.ProcessStatus;
 
 pub const CompareOp = state_mod.CompareOp;
 pub const valuesEqual = state_mod.valuesEqual;

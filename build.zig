@@ -45,6 +45,21 @@ pub fn build(b: *std.Build) void {
         .optimize = bench_optimize,
         .imports = &.{.{ .name = "zerde", .module = zerde_bench_mod }},
     });
+    const freestanding_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+    const freestanding_zerde_dep = b.dependency("zerde", .{
+        .target = freestanding_target,
+        .optimize = optimize,
+    });
+    const freestanding_mod = b.addModule("zlua-freestanding", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = freestanding_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zerde", .module = freestanding_zerde_dep.module("zerde") }},
+    });
 
     const zlua_c_lib = b.addLibrary(.{
         .name = "zlua-c",
@@ -235,15 +250,36 @@ pub fn build(b: *std.Build) void {
     ci_c_api_step.dependOn(c_api_step);
     ci_c_api_step.dependOn(c_api_test_step);
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    if (target.result.os.tag != .freestanding) {
+        const mod_tests = b.addTest(.{ .root_module = mod });
+        const run_mod_tests = b.addRunArtifact(mod_tests);
+
+        const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+        const run_exe_tests = b.addRunArtifact(exe_tests);
+
+        test_step.dependOn(&run_mod_tests.step);
+        test_step.dependOn(&run_exe_tests.step);
+    }
+
+    const freestanding_test_exe = b.addExecutable(.{
+        .name = "zlua-test-freestanding",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_freestanding_main.zig"),
+            .target = freestanding_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zlua", .module = freestanding_mod }},
+        }),
+    });
+    const freestanding_test_step = b.step("test-freestanding", "Build and run x86_64 freestanding custom host smoke test");
+    if (b.graph.host.result.cpu.arch == .x86_64 and b.graph.host.result.os.tag == .linux) {
+        const run_freestanding_test = b.addRunArtifact(freestanding_test_exe);
+        run_freestanding_test.skip_foreign_checks = true;
+        freestanding_test_step.dependOn(&run_freestanding_test.step);
+    } else {
+        freestanding_test_step.dependOn(&freestanding_test_exe.step);
+    }
+    test_step.dependOn(freestanding_test_step);
 
     const diff_step = b.step("test-diff", "Run CLua differential tests");
     const diff_cmd = b.addRunArtifact(diff_exe);

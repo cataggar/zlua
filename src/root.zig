@@ -25,6 +25,16 @@ pub const Userdata = api.Userdata;
 pub const AnyUserdata = api.AnyUserdata;
 pub const MemoryFile = api.MemoryFile;
 pub const MemoryFilesystem = api.MemoryFilesystem;
+pub const FilesystemCapability = api.FilesystemCapability;
+pub const CustomFilesystem = api.CustomFilesystem;
+pub const EnvironmentCapability = api.EnvironmentCapability;
+pub const CustomEnvironment = api.CustomEnvironment;
+pub const ClockCapability = api.ClockCapability;
+pub const CustomClock = api.CustomClock;
+pub const ProcessCapability = api.ProcessCapability;
+pub const CustomProcess = api.CustomProcess;
+pub const ProcessResult = api.ProcessResult;
+pub const ProcessStatus = api.ProcessStatus;
 
 test {
     _ = frontend;

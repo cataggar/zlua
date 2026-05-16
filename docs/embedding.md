@@ -47,13 +47,15 @@ The sandbox boundary has two layers. The `stdlib` option controls which Lua glob
 
 | Capability | Grants | Disabled behavior |
 | --- | --- | --- |
-| `io` | Host `std.Io`, stdin contents, and optional stdout/stderr writers. Required by host filesystem, clock, and process operations that need Zig I/O. | No host I/O handle is available; file, clock, or process operations that require it fail instead of falling back to ambient process I/O. |
-| `filesystem` | `.memory` read-only files, `.memory_rw` writable memory files, or `.host_cwd` access to the process current working directory. | `loadfile`, `dofile`, `require`, `io.open`, `io.lines`, `os.remove`, and `os.rename` cannot read or mutate host files. |
-| `environment` | A host-provided environment map for `os.getenv` and enabled child processes. | `os.getenv` returns `nil`; enabled child processes receive no implicit environment map from zlua. |
-| `clock` | A fixed timestamp or system clock for `os.time` and default-time `os.date` calls. | Current-time reads fail with `clock access disabled`. |
-| `process` | `os.execute` through the configured I/O and environment capabilities. | `os.execute` fails with `process access disabled`; zlua does not provide dynamic native module loading. |
+| `io` | Host `std.Io`, stdin contents, and optional stdout/stderr writers. Required by std-backed host filesystem, clock, and process operations that need Zig I/O. | No host I/O handle is available; std-backed file, clock, or process operations that require it fail instead of falling back to ambient process I/O. |
+| `filesystem` | `.memory` read-only files, `.memory_rw` writable memory files, `.host_cwd` access to the process current working directory, or `.custom` callback-backed files. | `loadfile`, `dofile`, `require`, `io.open`, `io.lines`, `os.remove`, and `os.rename` cannot read or mutate host files. |
+| `environment` | A std environment map or `.custom` callback for `os.getenv`. Std-backed child processes also receive `.map` environments. | `os.getenv` returns `nil`; enabled std-backed child processes receive no implicit environment map from zlua. |
+| `clock` | A fixed timestamp, std system clock, or `.custom` callback for `os.time` and default-time `os.date` calls. | Current-time reads fail with `clock access disabled`. |
+| `process` | `os.execute` through std process spawning or a `.custom` callback. | `os.execute` fails with `process access disabled`; zlua does not provide dynamic native module loading. |
 
 The command-line `zlua` binary is intentionally different from the embedding default: it starts with full host filesystem, environment, process, and I/O access so it behaves like a normal Lua interpreter. Use the Zig embedding API when untrusted or plugin-style code should start sandboxed.
+
+The std-backed host variants, `.filesystem = .host_cwd`, `.clock = .system`, and `.process = .enabled`, use Zig standard-library host facilities. They are intended for normal hosted targets. Freestanding embedders, kernels, unikernels, and other non-std hosts should provide `.custom` capabilities instead.
 
 To capture output and provide deterministic time:
 
@@ -112,13 +114,101 @@ const report = try filesystem.readFileAlloc(allocator, "report.txt");
 defer allocator.free(report);
 ```
 
-`State.addMemoryFile` can add owned files to a state that was initialized with disabled or read-only memory filesystem access. It writes through to `.memory_rw` filesystems and returns `error.UnsupportedOption` for host-filesystem states.
+`State.addMemoryFile` can add owned files to a state that was initialized with disabled or read-only memory filesystem access. It writes through to `.memory_rw` filesystems and returns `error.UnsupportedOption` for host and custom filesystem states.
 
 Memory filesystem paths are sandbox-relative. zlua normalizes `.` segments and repeated `/` separators, rejects absolute paths, rejects `..` path traversal, rejects backslash-containing paths, rejects NUL bytes, rejects empty paths, and enforces a configurable maximum normalized path length for writable memory files. `loadfile`, `dofile`, and `require` use the same memory-filesystem path checks, so package paths that expand to absolute or parent-traversal paths do not escape the memory sandbox.
 
 `MemoryFilesystem.init` uses the default path limit. Use `MemoryFilesystem.initWithOptions` or `MemoryFilesystem.initWithFilesAndOptions` to set `max_path_len` or an optional `max_bytes` content quota. The quota counts file contents, applies during seed-file initialization, creates, and overwrites, decreases when files are removed, and `renameFile` overwrites an existing normalized target without changing the total byte count except for the removed target contents.
 
 `io.tmpfile` and `os.tmpname` are currently synthetic helpers in embedded states. They do not create host files by themselves, but closing a writable temporary file still goes through the configured filesystem capability.
+
+### Custom Host Capabilities
+
+Use `.custom` capabilities when the host has filesystem, environment, clock, or process services that are not exposed through Zig's std host APIs. This is the intended shape for freestanding kernels that still want Lua's full host-facing standard library profile.
+
+Custom callbacks receive an opaque context pointer supplied by the embedder. Filesystem read callbacks must return an allocator-owned buffer using the allocator passed by zlua. Optional filesystem mutation callbacks can be left `null`; Lua write/remove/rename operations then report capability-denial style errors.
+
+```zig
+const Host = struct {
+    filesystem: zlua.MemoryFilesystem,
+
+    fn self(ctx: ?*anyopaque) *Host {
+        return @ptrCast(@alignCast(ctx.?));
+    }
+
+    fn readFileAlloc(ctx: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+        return self(ctx).filesystem.readFileAlloc(allocator, path);
+    }
+
+    fn writeFile(ctx: ?*anyopaque, path: []const u8, contents: []const u8) !void {
+        try self(ctx).filesystem.writeFile(path, contents);
+    }
+
+    fn removeFile(ctx: ?*anyopaque, path: []const u8) !void {
+        try self(ctx).filesystem.removeFile(path);
+    }
+
+    fn renameFile(ctx: ?*anyopaque, old_path: []const u8, new_path: []const u8) !void {
+        try self(ctx).filesystem.renameFile(old_path, new_path);
+    }
+
+    fn getenv(ctx: ?*anyopaque, name: []const u8) ?[]const u8 {
+        _ = ctx;
+        if (std.mem.eql(u8, name, "KERNEL_ENV")) return "present";
+        return null;
+    }
+
+    fn now(ctx: ?*anyopaque) !i64 {
+        _ = ctx;
+        return 1_700_000_000;
+    }
+
+    fn execute(ctx: ?*anyopaque, command: []const u8) !zlua.ProcessResult {
+        _ = ctx;
+        if (std.mem.eql(u8, command, "true")) return .{ .status = .exit, .code = 0 };
+        return .{ .status = .exit, .code = 1 };
+    }
+};
+
+var host = Host{ .filesystem = zlua.MemoryFilesystem.init(allocator) };
+defer host.filesystem.deinit();
+try host.filesystem.writeFile("scripts/main.lua", "return os.getenv('KERNEL_ENV')");
+
+var lua = try zlua.State.init(allocator, .{
+    .stdlib = .full,
+    .capabilities = .{
+        .filesystem = .{ .custom = .{
+            .context = &host,
+            .read_file_alloc = Host.readFileAlloc,
+            .write_file = Host.writeFile,
+            .remove_file = Host.removeFile,
+            .rename_file = Host.renameFile,
+        } },
+        .environment = .{ .custom = .{
+            .context = &host,
+            .get = Host.getenv,
+        } },
+        .clock = .{ .custom = .{
+            .context = &host,
+            .now = Host.now,
+        } },
+        .process = .{ .custom = .{
+            .context = &host,
+            .execute = Host.execute,
+        } },
+    },
+});
+defer lua.deinit();
+
+try lua.doString(
+    \\assert(dofile('scripts/main.lua') == 'present')
+    \\assert(os.time() == 1700000000)
+    \\local ok, why, code = os.execute('true')
+    \\assert(ok == true and why == 'exit' and code == 0)
+, .{ .name = "=custom-host" });
+```
+
+`CustomProcess.execute` maps directly to Lua's `os.execute` result convention. Return `.status = .exit, .code = 0` for success, `.status = .exit` with a non-zero code for command failure, or `.status = .signal` when the host process abstraction reports signal-style termination.
 
 ## Limits
 

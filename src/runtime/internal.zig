@@ -17,6 +17,7 @@ pub const StdlibMode = state.StdlibMode;
 pub const MemoryFile = host.MemoryFile;
 pub const MemoryFilesystem = host.MemoryFilesystem;
 pub const FilesystemCapability = host.FilesystemCapability;
+pub const EnvironmentCapability = host.EnvironmentCapability;
 pub const ClockCapability = host.ClockCapability;
 pub const ProcessCapability = host.ProcessCapability;
 

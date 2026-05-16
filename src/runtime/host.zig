@@ -148,17 +148,59 @@ pub const FilesystemCapability = union(enum) {
     memory: []const MemoryFile,
     memory_rw: *MemoryFilesystem,
     host_cwd,
+    custom: CustomFilesystem,
+};
+
+pub const CustomFilesystem = struct {
+    context: ?*anyopaque = null,
+    read_file_alloc: *const fn (context: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]const u8,
+    write_file: ?*const fn (context: ?*anyopaque, path: []const u8, contents: []const u8) anyerror!void = null,
+    remove_file: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
+    rename_file: ?*const fn (context: ?*anyopaque, old_path: []const u8, new_path: []const u8) anyerror!void = null,
+};
+
+pub const EnvironmentCapability = union(enum) {
+    disabled,
+    map: *const std.process.Environ.Map,
+    custom: CustomEnvironment,
+};
+
+pub const CustomEnvironment = struct {
+    context: ?*anyopaque = null,
+    get: *const fn (context: ?*anyopaque, name: []const u8) ?[]const u8,
 };
 
 pub const ClockCapability = union(enum) {
     disabled,
     fixed: i64,
     system,
+    custom: CustomClock,
 };
 
-pub const ProcessCapability = enum {
+pub const CustomClock = struct {
+    context: ?*anyopaque = null,
+    now: *const fn (context: ?*anyopaque) anyerror!i64,
+};
+
+pub const ProcessCapability = union(enum) {
     disabled,
     enabled,
+    custom: CustomProcess,
+};
+
+pub const CustomProcess = struct {
+    context: ?*anyopaque = null,
+    execute: *const fn (context: ?*anyopaque, command: []const u8) anyerror!ProcessResult,
+};
+
+pub const ProcessResult = struct {
+    status: ProcessStatus,
+    code: i64,
+};
+
+pub const ProcessStatus = enum {
+    exit,
+    signal,
 };
 
 test "memory filesystem normalizes relative paths" {
