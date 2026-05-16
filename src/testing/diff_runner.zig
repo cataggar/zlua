@@ -242,7 +242,7 @@ fn runZluaForStage(
             .state = .{
                 .io = io,
                 .filesystem = .host_cwd,
-                .environment = environ_map,
+                .environment = .{ .map = environ_map },
                 .process = .disabled,
                 .debug_errors = options.debug_errors,
             },

@@ -75,7 +75,7 @@ fn runCliProgram(
         .stdlib = options.stdlib,
         .io = io,
         .filesystem = .host_cwd,
-        .environment = environ_map,
+        .environment = .{ .map = environ_map },
         .process = .enabled,
         .debug_errors = options.debug_errors,
         .trace_vm = options.trace_vm,
