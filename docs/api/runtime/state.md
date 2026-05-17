@@ -116,8 +116,10 @@
 - [MemoryFile](#alias-memoryfile)
 - [MemoryFilesystem](#alias-memoryfilesystem)
 - [FilesystemCapability](#alias-filesystemcapability)
+- [EnvironmentCapability](#alias-environmentcapability)
 - [ClockCapability](#alias-clockcapability)
 - [ProcessCapability](#alias-processcapability)
+- [ProcessResult](#alias-processresult)
 - [Closure](#alias-closure)
 - [CClosure](#alias-cclosure)
 - [CUpvalue](#alias-cupvalue)
@@ -290,6 +292,14 @@ pub const MemoryFilesystem = host.MemoryFilesystem;
 pub const FilesystemCapability = host.FilesystemCapability;
 ```
 
+<a id="alias-environmentcapability"></a>
+
+## EnvironmentCapability
+
+```zig
+pub const EnvironmentCapability = host.EnvironmentCapability;
+```
+
 <a id="alias-clockcapability"></a>
 
 ## ClockCapability
@@ -304,6 +314,14 @@ pub const ClockCapability = host.ClockCapability;
 
 ```zig
 pub const ProcessCapability = host.ProcessCapability;
+```
+
+<a id="alias-processresult"></a>
+
+## ProcessResult
+
+```zig
+pub const ProcessResult = host.ProcessResult;
 ```
 
 <a id="alias-closure"></a>
@@ -389,7 +407,7 @@ pub const StateOptions = struct {
     stdout: ?*std.Io.Writer = null,
     stderr: ?*std.Io.Writer = null,
     filesystem: FilesystemCapability = .disabled,
-    environment: ?*const std.process.Environ.Map = null,
+    environment: EnvironmentCapability = .disabled,
     clock: ClockCapability = .system,
     process: ProcessCapability = .disabled,
     stdin: []const u8 = "",
@@ -523,6 +541,7 @@ pub const State = struct {
 | [renameFile](#fn-state-renamefile) | `self: *State, old_path: []const u8, new_path: []const u8` | `!void` |  |
 | [getenv](#fn-state-getenv) | `self: *State, name: []const u8` | `?[]const u8` |  |
 | [currentTime](#fn-state-currenttime) | `self: *State` | `!i64` |  |
+| [executeProcess](#fn-state-executeprocess) | `self: *State, command: []const u8` | `!ProcessResult` |  |
 | [requireIo](#fn-state-requireio) | `self: *State, unavailable_message: []const u8` | `RuntimeError!std.Io` |  |
 | [processEnabled](#fn-state-processenabled) | `self: *State` | `bool` |  |
 | [readStdin](#fn-state-readstdin) | `self: *State, spec: []const u8` | `!Value` |  |
@@ -1253,6 +1272,16 @@ pub fn currentTime(self: *State) !i64
 ```
 
 References: [`State`](#type-state)
+
+<a id="fn-state-executeprocess"></a>
+
+### State.executeProcess
+
+```zig
+pub fn executeProcess(self: *State, command: []const u8) !ProcessResult
+```
+
+References: [`State`](#type-state), [`ProcessResult`](#alias-processresult)
 
 <a id="fn-state-requireio"></a>
 

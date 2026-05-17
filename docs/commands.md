@@ -265,7 +265,7 @@ Benchmark files live under `tests/bench` and are discovered recursively. Metadat
 
 ## C API Harness
 
-The C API harness compiles each C fixture twice, once against CLua and once against `zlua-c`, then compares behavior.
+The C API harness compiles each C fixture twice, once against CLua and once against `zlua-c`, then compares behavior. User-facing C API scope, linking guidance, and caveats live in [c-api.md](c-api.md).
 
 Build-runner forms:
 

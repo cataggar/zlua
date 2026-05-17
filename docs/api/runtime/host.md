@@ -73,8 +73,15 @@
 - [MemoryFile](#type-memoryfile)
 - [MemoryFilesystem](#type-memoryfilesystem)
 - [FilesystemCapability](#type-filesystemcapability)
+- [CustomFilesystem](#type-customfilesystem)
+- [EnvironmentCapability](#type-environmentcapability)
+- [CustomEnvironment](#type-customenvironment)
 - [ClockCapability](#type-clockcapability)
+- [CustomClock](#type-customclock)
 - [ProcessCapability](#type-processcapability)
+- [CustomProcess](#type-customprocess)
+- [ProcessResult](#type-processresult)
+- [ProcessStatus](#type-processstatus)
 
 <a id="type-memoryfile"></a>
 
@@ -244,6 +251,44 @@ pub const FilesystemCapability = union(enum) {
     memory: []const MemoryFile,
     memory_rw: *MemoryFilesystem,
     host_cwd,
+    custom: CustomFilesystem,
+};
+```
+
+<a id="type-customfilesystem"></a>
+
+## CustomFilesystem
+
+```zig
+pub const CustomFilesystem = struct {
+    context: ?*anyopaque = null,
+    read_file_alloc: *const fn (context: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]const u8,
+    write_file: ?*const fn (context: ?*anyopaque, path: []const u8, contents: []const u8) anyerror!void = null,
+    remove_file: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
+    rename_file: ?*const fn (context: ?*anyopaque, old_path: []const u8, new_path: []const u8) anyerror!void = null,
+};
+```
+
+<a id="type-environmentcapability"></a>
+
+## EnvironmentCapability
+
+```zig
+pub const EnvironmentCapability = union(enum) {
+    disabled,
+    map: *const std.process.Environ.Map,
+    custom: CustomEnvironment,
+};
+```
+
+<a id="type-customenvironment"></a>
+
+## CustomEnvironment
+
+```zig
+pub const CustomEnvironment = struct {
+    context: ?*anyopaque = null,
+    get: *const fn (context: ?*anyopaque, name: []const u8) ?[]const u8,
 };
 ```
 
@@ -256,6 +301,18 @@ pub const ClockCapability = union(enum) {
     disabled,
     fixed: i64,
     system,
+    custom: CustomClock,
+};
+```
+
+<a id="type-customclock"></a>
+
+## CustomClock
+
+```zig
+pub const CustomClock = struct {
+    context: ?*anyopaque = null,
+    now: *const fn (context: ?*anyopaque) anyerror!i64,
 };
 ```
 
@@ -264,9 +321,43 @@ pub const ClockCapability = union(enum) {
 ## ProcessCapability
 
 ```zig
-pub const ProcessCapability = enum {
+pub const ProcessCapability = union(enum) {
     disabled,
     enabled,
+    custom: CustomProcess,
+};
+```
+
+<a id="type-customprocess"></a>
+
+## CustomProcess
+
+```zig
+pub const CustomProcess = struct {
+    context: ?*anyopaque = null,
+    execute: *const fn (context: ?*anyopaque, command: []const u8) anyerror!ProcessResult,
+};
+```
+
+<a id="type-processresult"></a>
+
+## ProcessResult
+
+```zig
+pub const ProcessResult = struct {
+    status: ProcessStatus,
+    code: i64,
+};
+```
+
+<a id="type-processstatus"></a>
+
+## ProcessStatus
+
+```zig
+pub const ProcessStatus = enum {
+    exit,
+    signal,
 };
 ```
 

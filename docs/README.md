@@ -10,6 +10,7 @@ Use this index to jump to the document that owns each topic.
 | [Commands](commands.md) | `just` recipes, `zig build` steps, zlua CLI options, and harness arguments. |
 | [Development](development.md) | Project shape, commands, source conventions, and local workflow. |
 | [Testing](testing.md) | Unit tests, CLua differential fixtures, official Lua 5.5 dashboard, C API fixtures, and CI policy. |
+| [Lua C API Compatibility](c-api.md) | Supported C API scope, build/link instructions, caveats, and fixture policy. |
 | [Benchmarking](benchmark.md) | Benchmark harness, current baseline, result interpretation, and performance workflow. |
 | [Embedding](embedding.md) | Zig-native host API for creating states, loading code, exposing callbacks, sandboxing, bytecode, and userdata. |
 | [Next Steps](next-steps.md) | Remaining hardening, performance, API, and release-documentation work. |

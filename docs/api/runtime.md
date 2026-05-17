@@ -105,8 +105,15 @@
 - [MemoryFile](#alias-memoryfile)
 - [MemoryFilesystem](#alias-memoryfilesystem)
 - [FilesystemCapability](#alias-filesystemcapability)
+- [CustomFilesystem](#alias-customfilesystem)
+- [EnvironmentCapability](#alias-environmentcapability)
+- [CustomEnvironment](#alias-customenvironment)
 - [ClockCapability](#alias-clockcapability)
+- [CustomClock](#alias-customclock)
 - [ProcessCapability](#alias-processcapability)
+- [CustomProcess](#alias-customprocess)
+- [ProcessResult](#alias-processresult)
+- [ProcessStatus](#alias-processstatus)
 - [CompareOp](#alias-compareop)
 - [valuesEqual](#alias-valuesequal)
 - [truthy](#alias-truthy)
@@ -465,6 +472,36 @@ pub const FilesystemCapability = host.FilesystemCapability;
 
 References: [`host.FilesystemCapability`](runtime/host.md#type-filesystemcapability)
 
+<a id="alias-customfilesystem"></a>
+
+## CustomFilesystem
+
+```zig
+pub const CustomFilesystem = host.CustomFilesystem;
+```
+
+References: [`host.CustomFilesystem`](runtime/host.md#type-customfilesystem)
+
+<a id="alias-environmentcapability"></a>
+
+## EnvironmentCapability
+
+```zig
+pub const EnvironmentCapability = host.EnvironmentCapability;
+```
+
+References: [`host.EnvironmentCapability`](runtime/host.md#type-environmentcapability)
+
+<a id="alias-customenvironment"></a>
+
+## CustomEnvironment
+
+```zig
+pub const CustomEnvironment = host.CustomEnvironment;
+```
+
+References: [`host.CustomEnvironment`](runtime/host.md#type-customenvironment)
+
 <a id="alias-clockcapability"></a>
 
 ## ClockCapability
@@ -475,6 +512,16 @@ pub const ClockCapability = host.ClockCapability;
 
 References: [`host.ClockCapability`](runtime/host.md#type-clockcapability)
 
+<a id="alias-customclock"></a>
+
+## CustomClock
+
+```zig
+pub const CustomClock = host.CustomClock;
+```
+
+References: [`host.CustomClock`](runtime/host.md#type-customclock)
+
 <a id="alias-processcapability"></a>
 
 ## ProcessCapability
@@ -484,6 +531,36 @@ pub const ProcessCapability = host.ProcessCapability;
 ```
 
 References: [`host.ProcessCapability`](runtime/host.md#type-processcapability)
+
+<a id="alias-customprocess"></a>
+
+## CustomProcess
+
+```zig
+pub const CustomProcess = host.CustomProcess;
+```
+
+References: [`host.CustomProcess`](runtime/host.md#type-customprocess)
+
+<a id="alias-processresult"></a>
+
+## ProcessResult
+
+```zig
+pub const ProcessResult = host.ProcessResult;
+```
+
+References: [`host.ProcessResult`](runtime/host.md#type-processresult)
+
+<a id="alias-processstatus"></a>
+
+## ProcessStatus
+
+```zig
+pub const ProcessStatus = host.ProcessStatus;
+```
+
+References: [`host.ProcessStatus`](runtime/host.md#type-processstatus)
 
 <a id="alias-compareop"></a>
 

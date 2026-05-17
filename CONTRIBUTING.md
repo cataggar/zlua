@@ -49,6 +49,7 @@ Detailed conventions live in:
 | --- | --- |
 | [Development](docs/development.md) | Project shape, commands, source conventions, and local workflow. |
 | [Testing](docs/testing.md) | Differential fixtures, official dashboard, C API fixtures, and CI policy. |
+| [Lua C API Compatibility](docs/c-api.md) | C API scope, build/link instructions, caveats, and fixture policy. |
 | [Benchmarking](docs/benchmark.md) | Performance workflow and benchmark interpretation. |
 | [Architecture](docs/architecture.md) | Implementation structure and invariants. |
 | [Embedding](docs/embedding.md) | Public Zig embedding API. |

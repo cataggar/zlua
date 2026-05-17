@@ -149,6 +149,7 @@ Start with [docs/README.md](docs/README.md) for the full documentation index.
 | [Development](docs/development.md) | Project shape, commands, source conventions, and local workflow. |
 | [Lua Standard Library and Extensions](docs/stdlib.md) | Lua-visible standard libraries, selection modes, and JSON/TOML/MessagePack extensions. |
 | [Testing](docs/testing.md) | Test layers, CLua differential fixtures, official dashboard, and C API fixtures. |
+| [Lua C API Compatibility](docs/c-api.md) | Supported C API scope, build/link instructions, caveats, and fixture policy. |
 | [Benchmarking](docs/benchmark.md) | Benchmark harness and current performance methodology. |
 | [Embedding](docs/embedding.md) | Zig-native embedding API. |
 | [Next Steps](docs/next-steps.md) | Remaining hardening, performance, API, and release-documentation work. |

@@ -126,7 +126,7 @@ The harness parses `--mode=internal`, but internal `testC`-enabled CLua/zlua bui
 
 ## C API Fixtures
 
-The C API layer builds `zlua-c` from `src/c_api.zig` and installs the downloaded Lua 5.5 headers. The fixture harness compiles each C file under `tests/c-api` twice: once against CLua and once against zlua. A fixture passes when both variants build, run, and produce compatible behavior.
+The C API layer builds `zlua-c` from `src/c_api.zig` and installs the downloaded Lua 5.5 headers. The fixture harness compiles each C file under `tests/c-api` twice: once against CLua and once against zlua. A fixture passes when both variants build, run, and produce compatible behavior. See [c-api.md](c-api.md) for supported scope, build/link instructions, and caveats.
 
 Run all C API fixtures:
 

@@ -121,7 +121,6 @@ and should not be treated as a stable embedding contract.
 - [ConversionError](#type-conversionerror)
 - [Stdlib](#type-stdlib)
 - [IoCapability](#type-iocapability)
-- [EnvironmentCapability](#type-environmentcapability)
 - [Capabilities](#type-capabilities)
 - [Limits](#type-limits)
 - [InstructionBudget](#type-instructionbudget)
@@ -154,8 +153,15 @@ and should not be treated as a stable embedding contract.
 - [MemoryFile](#alias-memoryfile)
 - [MemoryFilesystem](#alias-memoryfilesystem)
 - [FilesystemCapability](#alias-filesystemcapability)
+- [CustomFilesystem](#alias-customfilesystem)
+- [EnvironmentCapability](#alias-environmentcapability)
+- [CustomEnvironment](#alias-customenvironment)
 - [ClockCapability](#alias-clockcapability)
+- [CustomClock](#alias-customclock)
 - [ProcessCapability](#alias-processcapability)
+- [CustomProcess](#alias-customprocess)
+- [ProcessResult](#alias-processresult)
+- [ProcessStatus](#alias-processstatus)
 - [DoOptions](#alias-dooptions)
 
 <a id="type-error"></a>
@@ -309,20 +315,41 @@ pub const FilesystemCapability = runtime.FilesystemCapability;
 
 References: [`runtime.FilesystemCapability`](runtime.md#alias-filesystemcapability)
 
-<a id="type-environmentcapability"></a>
+<a id="alias-customfilesystem"></a>
+
+## CustomFilesystem
+
+Callback-backed filesystem access for embedders with non-std host services.
+
+```zig
+pub const CustomFilesystem = runtime.CustomFilesystem;
+```
+
+References: [`runtime.CustomFilesystem`](runtime.md#alias-customfilesystem)
+
+<a id="alias-environmentcapability"></a>
 
 ## EnvironmentCapability
 
 Environment-variable access granted to `os.getenv` and enabled child processes.
 
 ```zig
-pub const EnvironmentCapability = union(enum) {
-    /// Deny environment access.
-    disabled,
-    /// Use the supplied environment map.
-    map: *const std.process.Environ.Map,
-};
+pub const EnvironmentCapability = runtime.EnvironmentCapability;
 ```
+
+References: [`runtime.EnvironmentCapability`](runtime.md#alias-environmentcapability)
+
+<a id="alias-customenvironment"></a>
+
+## CustomEnvironment
+
+Callback-backed environment access for embedders with non-std host services.
+
+```zig
+pub const CustomEnvironment = runtime.CustomEnvironment;
+```
+
+References: [`runtime.CustomEnvironment`](runtime.md#alias-customenvironment)
 
 <a id="alias-clockcapability"></a>
 
@@ -336,6 +363,18 @@ pub const ClockCapability = runtime.ClockCapability;
 
 References: [`runtime.ClockCapability`](runtime.md#alias-clockcapability)
 
+<a id="alias-customclock"></a>
+
+## CustomClock
+
+Callback-backed clock access for embedders with non-std host services.
+
+```zig
+pub const CustomClock = runtime.CustomClock;
+```
+
+References: [`runtime.CustomClock`](runtime.md#alias-customclock)
+
 <a id="alias-processcapability"></a>
 
 ## ProcessCapability
@@ -347,6 +386,40 @@ pub const ProcessCapability = runtime.ProcessCapability;
 ```
 
 References: [`runtime.ProcessCapability`](runtime.md#alias-processcapability)
+
+<a id="alias-customprocess"></a>
+
+## CustomProcess
+
+Callback-backed process execution for embedders with non-std host services.
+
+```zig
+pub const CustomProcess = runtime.CustomProcess;
+```
+
+References: [`runtime.CustomProcess`](runtime.md#alias-customprocess)
+
+<a id="alias-processresult"></a>
+
+## ProcessResult
+
+Result returned by callback-backed process execution.
+
+```zig
+pub const ProcessResult = runtime.ProcessResult;
+```
+
+References: [`runtime.ProcessResult`](runtime.md#alias-processresult)
+
+<a id="alias-processstatus"></a>
+
+## ProcessStatus
+
+```zig
+pub const ProcessStatus = runtime.ProcessStatus;
+```
+
+References: [`runtime.ProcessStatus`](runtime.md#alias-processstatus)
 
 <a id="type-capabilities"></a>
 
@@ -960,7 +1033,7 @@ References: [`State`](#type-state)
 Adds or writes a file in the state's memory-backed filesystem.
 
 Disabled and read-only memory states store an owned copy. Writable memory
-filesystems receive a write. Host filesystem states return
+filesystems receive a write. Host and custom filesystem states return
 `error.UnsupportedOption`.
 
 ```zig

@@ -76,6 +76,7 @@
 - [MemoryFile](#alias-memoryfile)
 - [MemoryFilesystem](#alias-memoryfilesystem)
 - [FilesystemCapability](#alias-filesystemcapability)
+- [EnvironmentCapability](#alias-environmentcapability)
 - [ClockCapability](#alias-clockcapability)
 - [ProcessCapability](#alias-processcapability)
 - [RuntimeError](#alias-runtimeerror)
@@ -294,6 +295,14 @@ pub const MemoryFilesystem = host.MemoryFilesystem;
 
 ```zig
 pub const FilesystemCapability = host.FilesystemCapability;
+```
+
+<a id="alias-environmentcapability"></a>
+
+## EnvironmentCapability
+
+```zig
+pub const EnvironmentCapability = host.EnvironmentCapability;
 ```
 
 <a id="alias-clockcapability"></a>

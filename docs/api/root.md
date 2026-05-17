@@ -90,6 +90,16 @@
 - [AnyUserdata](#alias-anyuserdata)
 - [MemoryFile](#alias-memoryfile)
 - [MemoryFilesystem](#alias-memoryfilesystem)
+- [FilesystemCapability](#alias-filesystemcapability)
+- [CustomFilesystem](#alias-customfilesystem)
+- [EnvironmentCapability](#alias-environmentcapability)
+- [CustomEnvironment](#alias-customenvironment)
+- [ClockCapability](#alias-clockcapability)
+- [CustomClock](#alias-customclock)
+- [ProcessCapability](#alias-processcapability)
+- [CustomProcess](#alias-customprocess)
+- [ProcessResult](#alias-processresult)
+- [ProcessStatus](#alias-processstatus)
 
 ## Imports
 
@@ -106,7 +116,7 @@
 ## version
 
 ```zig
-pub const version = "0.1.0";
+pub const version = "0.3.0";
 ```
 
 <a id="const-lua_target_version"></a>
@@ -332,4 +342,104 @@ pub const MemoryFilesystem = api.MemoryFilesystem;
 ```
 
 References: [`api.MemoryFilesystem`](api.md#alias-memoryfilesystem)
+
+<a id="alias-filesystemcapability"></a>
+
+## FilesystemCapability
+
+```zig
+pub const FilesystemCapability = api.FilesystemCapability;
+```
+
+References: [`api.FilesystemCapability`](api.md#alias-filesystemcapability)
+
+<a id="alias-customfilesystem"></a>
+
+## CustomFilesystem
+
+```zig
+pub const CustomFilesystem = api.CustomFilesystem;
+```
+
+References: [`api.CustomFilesystem`](api.md#alias-customfilesystem)
+
+<a id="alias-environmentcapability"></a>
+
+## EnvironmentCapability
+
+```zig
+pub const EnvironmentCapability = api.EnvironmentCapability;
+```
+
+References: [`api.EnvironmentCapability`](api.md#alias-environmentcapability)
+
+<a id="alias-customenvironment"></a>
+
+## CustomEnvironment
+
+```zig
+pub const CustomEnvironment = api.CustomEnvironment;
+```
+
+References: [`api.CustomEnvironment`](api.md#alias-customenvironment)
+
+<a id="alias-clockcapability"></a>
+
+## ClockCapability
+
+```zig
+pub const ClockCapability = api.ClockCapability;
+```
+
+References: [`api.ClockCapability`](api.md#alias-clockcapability)
+
+<a id="alias-customclock"></a>
+
+## CustomClock
+
+```zig
+pub const CustomClock = api.CustomClock;
+```
+
+References: [`api.CustomClock`](api.md#alias-customclock)
+
+<a id="alias-processcapability"></a>
+
+## ProcessCapability
+
+```zig
+pub const ProcessCapability = api.ProcessCapability;
+```
+
+References: [`api.ProcessCapability`](api.md#alias-processcapability)
+
+<a id="alias-customprocess"></a>
+
+## CustomProcess
+
+```zig
+pub const CustomProcess = api.CustomProcess;
+```
+
+References: [`api.CustomProcess`](api.md#alias-customprocess)
+
+<a id="alias-processresult"></a>
+
+## ProcessResult
+
+```zig
+pub const ProcessResult = api.ProcessResult;
+```
+
+References: [`api.ProcessResult`](api.md#alias-processresult)
+
+<a id="alias-processstatus"></a>
+
+## ProcessStatus
+
+```zig
+pub const ProcessStatus = api.ProcessStatus;
+```
+
+References: [`api.ProcessStatus`](api.md#alias-processstatus)
 

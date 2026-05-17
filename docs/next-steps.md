@@ -60,13 +60,12 @@ larger table layout rewrite
 
 ## C API Compatibility
 
-The Lua 5.5 C API compatibility layer is implemented for the tracked public symbol inventory. Remaining work is coverage depth, edge-case hardening, and user-facing documentation.
+The Lua 5.5 C API compatibility layer is implemented for the tracked public symbol inventory, and [c-api.md](c-api.md) documents supported scope, build/link instructions, and caveats. Remaining work is coverage depth and edge-case hardening.
 
 1. Keep every tracked public symbol at `tested-clua-diff`; add targeted fixtures before adding new symbols or changing C API behavior.
 2. Expand stress coverage around protected-call unwinding, coroutine continuation/yield edges, debug hooks, to-be-closed variables, userdata finalizers, allocator failures, long strings/buffers, warning callbacks, traceback formatting, and stdlib/package opening combinations.
 3. Add negative and recovery fixtures for stack misuse boundaries, panic/error paths, OOM-style failures, registry references, cross-thread `lua_xmove`, and closing/resuming coroutine chains.
-4. Document supported C API scope, known deviations, and build/link instructions in `docs/c-api.md` before advertising `zlua-c` as a stable user-facing library.
-5. Decide whether internal `testC` official mode is worth wiring for deeper compatibility checks.
+4. Decide whether internal `testC` official mode is worth wiring for deeper compatibility checks.
 
 ## Testing Methodology
 
@@ -78,9 +77,8 @@ The Lua 5.5 C API compatibility layer is implemented for the tracked public symb
 ## Release Readiness
 
 1. Keep [commands.md](commands.md) updated when `just` recipes, `zig build` steps, CLI options, or harness flags change.
-2. Add `docs/c-api.md` before advertising `zlua-c` as stable.
-3. Update `src/root.zig` versioning and release notes when cutting a real release.
-4. Decide whether zlua binary chunks need a format/versioning document or should remain explicitly internal.
+2. Update release notes when cutting a real release.
+3. Decide whether zlua binary chunks need a format/versioning document or should remain explicitly internal.
 
 ## Compatibility Non-Goals
 
