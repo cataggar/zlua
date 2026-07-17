@@ -225,6 +225,16 @@ pub fn linesNext(state: *State, iterator: Value) ![]const Value {
     return try values.toOwnedSlice(state.allocator);
 }
 
+pub fn closeAll(state: *State) !void {
+    for (state.table_allocations.items) |file| {
+        const value = Value{ .table = file };
+        if (!runtime.isFileValue(value) or runtime.isClosedFileValue(value)) continue;
+        const standard = file.get(.{ .string = "__zlua_file_standard" });
+        if (standard == .boolean and standard.boolean) continue;
+        try closeFile(state, file, false);
+    }
+}
+
 fn setCurrentFile(state: *State, thread: *Thread, op: bytecode.Call, key: []const u8, mode: []const u8) !void {
     const io_table = try state.expectTable(state.getGlobal("io"));
     if (op.arg_count == 0 or runtime.argValue(state, thread, op, 0) == .nil) {

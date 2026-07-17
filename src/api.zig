@@ -377,6 +377,7 @@ pub const State = struct {
     /// Releases all resources owned by the state and invalidates outstanding API handles.
     pub fn deinit(self: *State) void {
         const state_allocator = self.allocator();
+        stdlib.io.closeAll(&self.raw_state) catch {};
         self.raw_state.deinit();
         self.deinitOwnedMemoryFiles(state_allocator);
         self.memory_files.deinit(state_allocator);
@@ -420,6 +421,27 @@ pub const State = struct {
     /// Runs a full garbage collection cycle.
     pub fn collect(self: *State) !void {
         try self.raw_state.collectGarbage();
+    }
+
+    /// Flushes and closes all non-standard Lua file handles.
+    pub fn closeOpenFiles(self: *State) !void {
+        try stdlib.io.closeAll(&self.raw_state);
+    }
+
+    /// Flushes configured stdout and stderr writers.
+    pub fn flushIo(self: *State) !void {
+        try self.raw_state.flushStdout();
+        try self.raw_state.flushStderr();
+    }
+
+    /// Reads one line from the same stdin cursor used by the Lua I/O library.
+    pub fn readStdinLine(self: *State) !?[]const u8 {
+        const value = self.raw_state.readStdin("*l") catch |err| return self.captureLuaError(err);
+        return switch (value) {
+            .nil => null,
+            .string => |line| line,
+            else => unreachable,
+        };
     }
 
     /// Runs garbage-collection work for `budget` and reports whether collection completed.
