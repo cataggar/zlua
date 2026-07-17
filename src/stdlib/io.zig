@@ -30,7 +30,7 @@ pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const parsed = parseMode(mode) orelse return state.failArgumentMessage("io.open", 2, "invalid mode");
 
     if (isSpecialDevice(path)) {
-        try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, "", parsed)});
+        try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, "")});
         return;
     }
     const reject_absolute_write = switch (state.options.filesystem) {
@@ -50,7 +50,7 @@ pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
         try state.allocator.dupe(u8, "");
     defer state.allocator.free(contents);
     if (parsed.kind != 'r') try state.writeFile(path, contents);
-    try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, contents, parsed)});
+    try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, contents)});
 }
 
 pub fn input(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -85,10 +85,9 @@ pub fn lines(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const file_value = if (op.arg_count >= 1 and runtime.argValue(state, thread, op, 0) != .nil) blk: {
         start = 1;
         const path = try state.expectArgumentString(thread, op, "io.lines", 0);
-        const parsed = parseMode("r").?;
         const contents = state.readFileAlloc(path) catch return state.fail("cannot open file");
         defer state.allocator.free(contents);
-        break :blk try newFile(state, path, "r", contents, parsed);
+        break :blk try newFile(state, path, "r", contents);
     } else blk: {
         if (op.arg_count >= 1) start = 1;
         break :blk Value{ .table = try currentFile(state, "__zlua_input") };
@@ -104,8 +103,7 @@ pub fn lines(state: *State, thread: *Thread, op: bytecode.Call) !void {
 pub fn tmpfile(state: *State, thread: *Thread, op: bytecode.Call) !void {
     const path = try tmpPath(state);
     defer state.allocator.free(path);
-    const parsed = parseMode("w+").?;
-    try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, "w+", "", parsed)});
+    try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, "w+", "")});
 }
 
 pub fn typeValue(state: *State, thread: *Thread, op: bytecode.Call) !void {
@@ -271,7 +269,7 @@ fn setCurrentFile(state: *State, thread: *Thread, op: bytecode.Call, key: []cons
         const parsed = parseMode(mode).?;
         const contents = if (parsed.kind == 'r') state.readFileAlloc(path) catch return state.fail("cannot open file") else try state.allocator.dupe(u8, "");
         defer state.allocator.free(contents);
-        value = try newFile(state, path, mode, contents, parsed);
+        value = try newFile(state, path, mode, contents);
     } else {
         _ = try expectFileArgument(state, value, if (std.mem.eql(u8, key, "__zlua_output")) "io.output" else "io.input", 1);
     }
@@ -508,14 +506,14 @@ fn refreshReadable(state: *State, file: *runtime.Table) !void {
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern(contents) });
 }
 
-fn newFile(state: *State, path: []const u8, mode: []const u8, contents: []const u8, parsed: ParsedMode) !Value {
+fn newFile(state: *State, path: []const u8, mode: []const u8, contents: []const u8) !Value {
     const value = try state.newTableWithHints(0, 18);
     const file = value.table;
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file") }, .{ .boolean = true });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_path") }, .{ .string = try state.intern(path) });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_mode") }, .{ .string = try state.intern(mode) });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_content") }, .{ .string = try state.intern(contents) });
-    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = if (parsed.append) @as(i64, @intCast(contents.len + 1)) else 1 });
+    try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_pos") }, .{ .integer = 1 });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_closed") }, .{ .boolean = false });
     try file.set(state.allocator, .{ .string = try state.intern("__zlua_file_buffer_mode") }, .{ .string = try state.intern("full") });
     try file.set(state.allocator, .{ .string = try state.intern("read") }, .{ .native = .io_file_read });

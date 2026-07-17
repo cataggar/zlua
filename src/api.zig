@@ -3149,8 +3149,12 @@ test "api writable memory filesystem supports Lua writes and mutations" {
         \\log = assert(io.open('log.txt', 'a'))
         \\assert(log:write(' beta'))
         \\assert(log:close())
+        \\log = assert(io.open('log.txt', 'a+'))
+        \\assert(log:read('*a') == 'alpha beta')
+        \\assert(log:write(' gamma'))
+        \\assert(log:close())
         \\local read = assert(io.open('log.txt', 'r'))
-        \\assert(read:read('*a') == 'alpha beta')
+        \\assert(read:read('*a') == 'alpha beta gamma')
         \\assert(read:close())
         \\assert(os.rename('generated.lua', 'renamed.lua'))
         \\assert(dofile('renamed.lua') == 'generated')
@@ -3160,7 +3164,7 @@ test "api writable memory filesystem supports Lua writes and mutations" {
 
     const log = try filesystem.readFileAlloc(std.testing.allocator, "log.txt");
     defer std.testing.allocator.free(log);
-    try std.testing.expectEqualStrings("alpha beta", log);
+    try std.testing.expectEqualStrings("alpha beta gamma", log);
 }
 
 test "api writable memory filesystem rejects sandbox escape writes" {
