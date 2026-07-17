@@ -236,14 +236,27 @@ pub fn closeAll(state: *State) !void {
 }
 
 pub fn readStdinLine(state: *State) !?[]const u8 {
-    const io_table = try state.expectTable(state.getGlobal("io"));
-    const file = try expectFile(state, io_table.get(.{ .string = "stdin" }));
+    const file = try standardStdin(state);
     const value = try readOne(state, file, .{ .string = try state.intern("l") });
     return switch (value) {
         .nil => null,
         .string => |line| line,
         else => unreachable,
     };
+}
+
+pub fn stdinPosition(state: *State) !usize {
+    const pos = fileInteger(try standardStdin(state), "__zlua_file_pos") orelse 1;
+    return @intCast(@max(pos, 1) - 1);
+}
+
+pub fn setStdinPosition(state: *State, pos: usize) !void {
+    try setPos(state, try standardStdin(state), pos + 1);
+}
+
+fn standardStdin(state: *State) !*runtime.Table {
+    const io_table = try state.expectTable(state.getGlobal("io"));
+    return expectFile(state, io_table.get(.{ .string = "stdin" }));
 }
 
 fn setCurrentFile(state: *State, thread: *Thread, op: bytecode.Call, key: []const u8, mode: []const u8) !void {

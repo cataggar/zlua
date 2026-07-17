@@ -439,6 +439,16 @@ pub const State = struct {
         return stdlib.io.readStdinLine(&self.raw_state) catch |err| return self.captureLuaError(err);
     }
 
+    /// Returns the byte offset of the standard input file.
+    pub fn stdinPosition(self: *State) !usize {
+        return stdlib.io.stdinPosition(&self.raw_state) catch |err| return self.captureLuaError(err);
+    }
+
+    /// Sets the byte offset of the standard input file.
+    pub fn setStdinPosition(self: *State, pos: usize) !void {
+        stdlib.io.setStdinPosition(&self.raw_state, pos) catch |err| return self.captureLuaError(err);
+    }
+
     /// Runs garbage-collection work for `budget` and reports whether collection completed.
     ///
     /// This currently performs a full collection regardless of the budget.
