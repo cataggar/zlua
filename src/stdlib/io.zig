@@ -235,6 +235,17 @@ pub fn closeAll(state: *State) !void {
     }
 }
 
+pub fn readStdinLine(state: *State) !?[]const u8 {
+    const io_table = try state.expectTable(state.getGlobal("io"));
+    const file = try expectFile(state, io_table.get(.{ .string = "stdin" }));
+    const value = try readOne(state, file, .{ .string = try state.intern("l") });
+    return switch (value) {
+        .nil => null,
+        .string => |line| line,
+        else => unreachable,
+    };
+}
+
 fn setCurrentFile(state: *State, thread: *Thread, op: bytecode.Call, key: []const u8, mode: []const u8) !void {
     const io_table = try state.expectTable(state.getGlobal("io"));
     if (op.arg_count == 0 or runtime.argValue(state, thread, op, 0) == .nil) {

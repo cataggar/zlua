@@ -436,12 +436,7 @@ pub const State = struct {
 
     /// Reads one line from the same stdin cursor used by the Lua I/O library.
     pub fn readStdinLine(self: *State) !?[]const u8 {
-        const value = self.raw_state.readStdin("*l") catch |err| return self.captureLuaError(err);
-        return switch (value) {
-            .nil => null,
-            .string => |line| line,
-            else => unreachable,
-        };
+        return stdlib.io.readStdinLine(&self.raw_state) catch |err| return self.captureLuaError(err);
     }
 
     /// Runs garbage-collection work for `budget` and reports whether collection completed.
