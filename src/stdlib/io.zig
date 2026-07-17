@@ -33,7 +33,13 @@ pub fn open(state: *State, thread: *Thread, op: bytecode.Call) !void {
         try state.returnValues(thread, op.base, op.return_count, &.{try newFile(state, path, mode, "", parsed)});
         return;
     }
-    if (path.len != 0 and path[0] == '/' and parsed.kind != 'r') return openFailure(state, thread, op, "cannot open file");
+    const reject_absolute_write = switch (state.options.filesystem) {
+        .custom => false,
+        else => true,
+    };
+    if (reject_absolute_write and path.len != 0 and path[0] == '/' and parsed.kind != 'r') {
+        return openFailure(state, thread, op, "cannot open file");
+    }
 
     const contents = if (parsed.reads_existing or parsed.append)
         state.readFileAlloc(path) catch |err| switch (err) {
