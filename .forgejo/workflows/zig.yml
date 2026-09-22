@@ -18,10 +18,27 @@ jobs:
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
 
-      - name: Set up Zig
-        uses: https://codeberg.org/mlugg/setup-zig@v2.2.1
+      # The install composite uses GitHub's $/ self-reference, so bootstrap
+      # with its standalone action on Forgejo.
+      - name: Set up ghr
+        uses: https://github.com/cataggar/ghr/actions/setup@c4be68b52d67d7acd2a7fe6c1e5f126e1754176e # v0.8.1
         with:
-          use-cache: false
+          ghr-version: v0.8.1
+          cache: 'false'
+
+      - name: Install Zig via ghr
+        run: |
+          set -eu
+          install_root="${RUNNER_TEMP:?}/zlua-ghr-install"
+          rm -rf -- "$install_root"
+          export GHR_TOOL_DIR="$install_root/tools"
+          export GHR_BIN_DIR="$install_root/bin"
+          export GHR_CACHE_DIR="$install_root/cache"
+          mkdir -p "$GHR_TOOL_DIR" "$GHR_BIN_DIR" "$GHR_CACHE_DIR"
+          ghr install --no-auth \
+            cataggar/zig@v0.16.0 \
+            RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+          echo "$GHR_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Show Zig version
         run: zig version
