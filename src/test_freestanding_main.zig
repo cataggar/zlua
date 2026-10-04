@@ -4,7 +4,18 @@ const zlua = @import("zlua");
 
 var heap_buffer: [4 * 1024 * 1024]u8 align(16) = undefined;
 
-export fn _start() noreturn {
+export fn _start() callconv(.naked) noreturn {
+    // The ELF entry has no return address; enter the C ABI with an aligned stack.
+    asm volatile (
+        \\ xor %%ebp, %%ebp
+        \\ andq $-16, %%rsp
+        \\ callq %[entry:P]
+        :
+        : [entry] "X" (&freestandingEntry),
+    );
+}
+
+fn freestandingEntry() callconv(.c) noreturn {
     run() catch exit(1);
     exit(0);
 }
@@ -176,6 +187,11 @@ pub const panic = struct {
         panicExit();
     }
 
+    pub fn unexpectedErrorCode(code: anyerror) noreturn {
+        _ = code;
+        panicExit();
+    }
+
     pub fn outOfBounds(index: usize, len: usize) noreturn {
         _ = index;
         _ = len;
@@ -271,6 +287,10 @@ pub const panic = struct {
     }
 
     pub fn noreturnReturned() noreturn {
+        panicExit();
+    }
+
+    pub fn loadUninstantiableType() noreturn {
         panicExit();
     }
 };

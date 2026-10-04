@@ -130,7 +130,7 @@ fn timeParts(timestamp: i64) struct {
     const day_seconds = epoch_seconds.getDaySeconds();
     return .{
         .year = year_day.year,
-        .month = @intFromEnum(month_day.month),
+        .month = @backingInt(month_day.month),
         .day = month_day.day_index + 1,
         .hour = day_seconds.getHoursIntoDay(),
         .min = day_seconds.getMinutesIntoHour(),

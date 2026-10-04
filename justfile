@@ -27,7 +27,7 @@ fetch-lua:
 
 # Build with ReleaseSafe optimization.
 release:
-    {{zig}} build -Doptimize=ReleaseSafe
+    {{zig}} build -Doptimize=safe
 
 # Run all unit tests.
 test:
@@ -75,7 +75,7 @@ c-api *args:
 
 # Run ReleaseFast zlua vs CLua benchmarks, or one benchmark file/directory.
 bench *args:
-    {{zig}} build -Doptimize=ReleaseFast --summary all run-test-bench -- {{args}}
+    {{zig}} build -Doptimize=fast --summary all run-test-bench -- {{args}}
 
 # Remove build outputs and Zig cache directories.
 clean:

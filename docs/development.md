@@ -4,7 +4,9 @@ This document covers day-to-day zlua development conventions: project shape, com
 
 ## Project Shape
 
-zlua is a Zig package targeting Zig `0.16.0`. `build.zig.zon` has no external Zig package dependencies, and CI uses `mlugg/setup-zig@v2` with `version: 0.16.0`.
+zlua targets Zig `0.17.0`. Its immutable `zerde` dependency supplies serialization,
+and GitHub CI verifies debug and safe embedding, freestanding execution, examples,
+and the existing aggregate checks with the signed 0.17 toolchain.
 
 The build downloads Lua 5.5 source and official tests into `.zlua-deps/`, which is ignored by Git. The CLua oracle is built from `.zlua-deps/lua-5.5.0/src`; do not assume a system Lua is required.
 

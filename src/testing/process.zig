@@ -104,8 +104,8 @@ pub fn runProcess(
     var signal: ?u32 = null;
     switch (result.term) {
         .exited => |code| exit_code = code,
-        .signal => |sig| signal = @intFromEnum(sig),
-        .stopped => |sig| signal = @intFromEnum(sig),
+        .signal => |sig| signal = @backingInt(sig),
+        .stopped => |sig| signal = @backingInt(sig),
         .unknown => |code| signal = code,
     }
 

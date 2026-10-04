@@ -86,7 +86,7 @@ fn appendBinaryProto(allocator: std.mem.Allocator, out: *std.ArrayList(u8), prot
 }
 
 fn appendBinaryConstant(allocator: std.mem.Allocator, out: *std.ArrayList(u8), constant: bytecode.Constant) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(constant))));
+    try out.append(allocator, @intCast(@backingInt(std.meta.activeTag(constant))));
     switch (constant) {
         .nil => {},
         .boolean => |value| try appendBinaryBool(allocator, out, value),
@@ -97,7 +97,7 @@ fn appendBinaryConstant(allocator: std.mem.Allocator, out: *std.ArrayList(u8), c
 }
 
 fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8), instruction: bytecode.Instruction) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(instruction))));
+    try out.append(allocator, @intCast(@backingInt(std.meta.activeTag(instruction))));
     switch (instruction) {
         .load_nil => |dest| try appendBinaryU16(allocator, out, dest),
         .load_bool => |op| {
@@ -167,7 +167,7 @@ fn appendBinaryInstruction(allocator: std.mem.Allocator, out: *std.ArrayList(u8)
         .compare_branch => |op| {
             try appendBinaryU16(allocator, out, op.left);
             try appendBinaryU16(allocator, out, op.right);
-            try out.append(allocator, @intCast(@intFromEnum(op.op)));
+            try out.append(allocator, @intCast(@backingInt(op.op)));
             try appendBinaryBool(allocator, out, op.jump_if_truthy);
             try appendBinaryI32(allocator, out, op.offset);
         },
@@ -225,7 +225,7 @@ fn appendBinaryBinary(allocator: std.mem.Allocator, out: *std.ArrayList(u8), op:
 
 fn appendBinaryErrorSite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), site: proto_mod.ErrorSite) !void {
     try appendBinaryU64(allocator, out, site.line);
-    try out.append(allocator, @intCast(@intFromEnum(site.op)));
+    try out.append(allocator, @intCast(@backingInt(site.op)));
     try appendBinaryU32(allocator, out, site.operands.len);
     for (site.operands) |origin| try appendBinaryOrigin(allocator, out, origin);
     try appendBinaryBool(allocator, out, site.call_name != null);
@@ -233,7 +233,7 @@ fn appendBinaryErrorSite(allocator: std.mem.Allocator, out: *std.ArrayList(u8), 
 }
 
 fn appendBinaryOrigin(allocator: std.mem.Allocator, out: *std.ArrayList(u8), origin: proto_mod.OperandOrigin) !void {
-    try out.append(allocator, @intCast(@intFromEnum(std.meta.activeTag(origin))));
+    try out.append(allocator, @intCast(@backingInt(std.meta.activeTag(origin))));
     switch (origin) {
         .temporary => {},
         .local, .upvalue, .global, .field, .method, .metamethod, .constant => |name| try appendBinaryString(allocator, out, name),
@@ -491,8 +491,8 @@ pub fn BinaryChunkReader(comptime State: type) type {
 
         fn readEnum(self: *Self, comptime T: type) !T {
             const tag = try self.readByte();
-            if (tag >= std.meta.fields(T).len) return self.state.fail("bad binary chunk");
-            return @enumFromInt(tag);
+            if (tag >= @typeInfo(T).@"enum".field_names.len) return self.state.fail("bad binary chunk");
+            return @fromBackingInt(@intCast(tag));
         }
 
         fn readCount(self: *Self) !usize {
