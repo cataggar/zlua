@@ -42,7 +42,7 @@ The `justfile` is a convenience layer over `zig build` and direct binaries. It a
 | `just docs-serve` | `zig build docs-serve` | Builds and serves the docs with a local HTTP server. |
 | `just docs-serve-pub` | `zig build docs-serve -- 0.0.0.0` | Builds and serves the docs with a local HTTP server that is accessible by host IP/URL. |
 | `just fetch-lua` | `zig build fetch-lua` | Downloads and extracts Lua 5.5 source and official tests. |
-| `just release` | `zig build -Doptimize=ReleaseSafe` | Builds with ReleaseSafe optimization. |
+| `just release` | `zig build -Doptimize=safe` | Builds with safety-enabled optimization. |
 | `just test` | `zig build --summary all test` | Runs Zig unit tests. |
 | `just ci` | `zig build ci` | Runs the aggregate local CI gate. |
 | `just example [filters...]` | `zig build run-example -- [filters...]` | Runs all embedding examples or selected examples. |
@@ -53,7 +53,7 @@ The `justfile` is a convenience layer over `zig build` and direct binaries. It a
 | `just diff [args...]` | `zig build --summary all run-test-diff -- --debug-errors [args...]` | Runs the differential harness with debug errors enabled. |
 | `just official [args...]` | `zig build --summary all run-test-official -- --debug-errors --memory-limit-mb=256 [args...]` | Runs the official suite harness with debug errors and a 256 MiB child cap. |
 | `just c-api [args...]` | `zig build --summary all test-c-api -- [args...]` | Runs C API fixtures. |
-| `just bench [args...]` | `zig build -Doptimize=ReleaseFast --summary all run-test-bench -- [args...]` | Runs benchmarks with a ReleaseFast zlua build. |
+| `just bench [args...]` | `zig build -Doptimize=fast --summary all run-test-bench -- [args...]` | Runs benchmarks with a fast zlua build. |
 | `just clean` | `rm -rf zig-out .zig-cache` | Removes local build outputs and Zig cache directories. |
 
 `just example` filters can be an example key, binary name, path, basename, or basename without `.zig`. Current keys are `run_script`, `register_function`, `typed_host_function`, `plugin_sandbox`, `bytecode_roundtrip`, `memory_rw_files`, `userdata_counter`, `typed_userdata_initializer`, and `preload_module`.
@@ -65,15 +65,15 @@ The project uses Zig's standard build options plus one project-specific option. 
 | Option | Meaning |
 | --- | --- |
 | `-Dtarget=<target>` | Standard Zig target selection. |
-| `-Doptimize=<mode>` | Standard Zig optimization mode, such as `Debug`, `ReleaseSafe`, `ReleaseFast`, or `ReleaseSmall`. |
+| `-Doptimize=<mode>` | Standard Zig optimization mode: `debug`, `safe`, `fast`, or `small`. |
 | `-Dofficial-memory-limit-mb=<n>` | Memory cap, in MiB, passed to the `test-official` step. The default is `256`; `0` disables the cap for that step. |
 
 Examples:
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=safe
 zig build test-official -Dofficial-memory-limit-mb=0
-zig build run-test-official -Doptimize=ReleaseFast -- --mode=complete strings.lua
+zig build run-test-official -Doptimize=fast -- --mode=complete strings.lua
 ```
 
 ## zig build Steps

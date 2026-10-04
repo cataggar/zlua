@@ -361,7 +361,7 @@ const CContinuation = struct {
 };
 
 const StateBlock = extern struct {
-    extraspace: [LUA_EXTRASPACE]u8 = .{0} ** LUA_EXTRASPACE,
+    extraspace: [LUA_EXTRASPACE]u8 = @splat(0),
     header: LuaStateHeader,
 };
 
@@ -509,7 +509,7 @@ const DebugFrameRef = struct {
 };
 
 fn debugFrameHandle(frame: DebugFrameRef) ?*anyopaque {
-    const kind_part = @as(usize, @intFromEnum(frame.kind)) << (@bitSizeOf(usize) - 8);
+    const kind_part = @as(usize, @backingInt(frame.kind)) << (@bitSizeOf(usize) - 8);
     return @ptrFromInt(kind_part | (frame.index + 1));
 }
 
@@ -616,7 +616,7 @@ fn emptyDebug() lua_Debug {
         .istailcall = 0,
         .ftransfer = 0,
         .ntransfer = 0,
-        .short_src = .{0} ** LUA_IDSIZE,
+        .short_src = @splat(0),
         .i_ci = null,
     };
 }

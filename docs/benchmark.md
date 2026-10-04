@@ -29,7 +29,7 @@ just bench --iterations=20 --csv /tmp/zlua-bench.csv
 The just recipe builds the benchmarked zlua CLI in `ReleaseFast`:
 
 ```sh
-zig build -Doptimize=ReleaseFast --summary all run-test-bench -- <args>
+zig build -Doptimize=fast --summary all run-test-bench -- <args>
 ```
 
 The build also passes a ReleaseFast `zlua-bench-release-fast` executable to the harness and compares it with the vendored `lua5.5` binary.

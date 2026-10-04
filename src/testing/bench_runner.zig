@@ -355,8 +355,8 @@ fn parseMetadata(source: []const u8) !ParsedMetadata {
 }
 
 fn parseExpect(value: []const u8) !Expect {
-    inline for (@typeInfo(Expect).@"enum".fields) |field| {
-        if (std.mem.eql(u8, value, field.name)) return @field(Expect, field.name);
+    inline for (@typeInfo(Expect).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, value, name)) return @field(Expect, name);
     }
     return error.InvalidMetadataValue;
 }

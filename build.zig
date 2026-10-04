@@ -13,7 +13,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const official_memory_limit_mb = b.option(u64, "official-memory-limit-mb", "Memory cap per official-suite child process in MiB (0 disables)") orelse 256;
-    const example_filters = b.args orelse &[_][]const u8{};
 
     const lua_deps_step = addFetchLuaStep(b);
     const zerde_dep = b.dependency("zerde", .{
@@ -22,7 +21,7 @@ pub fn build(b: *std.Build) void {
     });
     const zerde_mod = zerde_dep.module("zerde");
 
-    const clua_optimize: std.builtin.OptimizeMode = .ReleaseSafe;
+    const clua_optimize: std.builtin.OptimizeMode = .safe;
     const clua_exe = addClua(b, target, clua_optimize, lua_deps_step);
     const clua_lib = addCluaLib(b, target, clua_optimize, lua_deps_step);
     b.installArtifact(clua_exe);
@@ -33,7 +32,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "zerde", .module = zerde_mod }},
     });
-    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const bench_optimize: std.builtin.OptimizeMode = .fast;
     const zerde_bench_dep = b.dependency("zerde", .{
         .target = target,
         .optimize = bench_optimize,
@@ -185,15 +184,17 @@ pub fn build(b: *std.Build) void {
         });
         examples_step.dependOn(&example_exe.step);
 
-        if (example_filters.len == 0 or exampleMatchesAny(example, example_filters)) {
-            const run_example = b.addRunArtifact(example_exe);
-            run_example_step.dependOn(&run_example.step);
-        }
+        const run_example = b.addSystemCommand(&.{"sh"});
+        run_example.addFileArg(b.path("tools/run-example.sh"));
+        run_example.addArgs(&.{ example.key, example.name, example.path });
+        run_example.addArtifactArg(example_exe);
+        run_example.addPassthruArgs();
+        run_example_step.dependOn(&run_example.step);
     }
     const run_step = b.step("run", "Run zlua");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     const run_diff_step = b.step("run-test-diff", "Run CLua differential harness");
@@ -201,7 +202,7 @@ pub fn build(b: *std.Build) void {
     run_diff_cmd.step.dependOn(b.getInstallStep());
     run_diff_cmd.addArg("--clua");
     run_diff_cmd.addArtifactArg(clua_exe);
-    if (b.args) |args| run_diff_cmd.addArgs(args);
+    run_diff_cmd.addPassthruArgs();
     run_diff_step.dependOn(&run_diff_cmd.step);
 
     const run_extensions_step = b.step("run-test-extensions", "Run zlua extension fixture harness");
@@ -209,7 +210,7 @@ pub fn build(b: *std.Build) void {
     run_extensions_cmd.step.dependOn(b.getInstallStep());
     run_extensions_cmd.addArg("--zlua");
     run_extensions_cmd.addArtifactArg(exe);
-    if (b.args) |args| run_extensions_cmd.addArgs(args);
+    run_extensions_cmd.addPassthruArgs();
     run_extensions_step.dependOn(&run_extensions_cmd.step);
 
     const run_official_step = b.step("run-test-official", "Run official Lua 5.5 suite harness");
@@ -219,7 +220,7 @@ pub fn build(b: *std.Build) void {
     run_official_cmd.addArtifactArg(clua_exe);
     run_official_cmd.addArg("--zlua");
     run_official_cmd.addArtifactArg(exe);
-    if (b.args) |args| run_official_cmd.addArgs(args);
+    run_official_cmd.addPassthruArgs();
     run_official_step.dependOn(&run_official_cmd.step);
 
     const run_bench_step = b.step("run-test-bench", "Run zlua vs CLua benchmark harness");
@@ -228,7 +229,7 @@ pub fn build(b: *std.Build) void {
     run_bench_cmd.addArtifactArg(clua_exe);
     run_bench_cmd.addArg("--zlua");
     run_bench_cmd.addArtifactArg(bench_zlua_exe);
-    if (b.args) |args| run_bench_cmd.addArgs(args);
+    run_bench_cmd.addPassthruArgs();
     run_bench_step.dependOn(&run_bench_cmd.step);
 
     const c_api_test_step = b.step("test-c-api", "Run C API differential fixture harness");
@@ -243,7 +244,7 @@ pub fn build(b: *std.Build) void {
     c_api_test_cmd.addDirectoryArg(b.path(lua_source_root));
     c_api_test_cmd.addArg("--zlua-lib");
     c_api_test_cmd.addArtifactArg(zlua_c_lib);
-    if (b.args) |args| c_api_test_cmd.addArgs(args);
+    c_api_test_cmd.addPassthruArgs();
     c_api_test_step.dependOn(&c_api_test_cmd.step);
 
     const ci_c_api_step = b.step("ci-c-api", "Build and test the C API compatibility harness");
@@ -293,7 +294,7 @@ pub fn build(b: *std.Build) void {
     extensions_cmd.step.dependOn(b.getInstallStep());
     extensions_cmd.addArg("--zlua");
     extensions_cmd.addArtifactArg(exe);
-    if (b.args) |args| extensions_cmd.addArgs(args);
+    extensions_cmd.addPassthruArgs();
     extensions_step.dependOn(&extensions_cmd.step);
 
     const official_step = b.step("test-official", "Run full official Lua 5.5 suite dashboard under a memory cap");
@@ -359,7 +360,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_doc_server = b.addRunArtifact(doc_server);
     run_doc_server.step.dependOn(&install_docs.step);
-    if (b.args) |args| run_doc_server.addArgs(args);
+    run_doc_server.addPassthruArgs();
 
     const doc_serve_step = b.step("docs-serve", "Generate docs and serve zig-out/docs over HTTP");
     doc_serve_step.dependOn(&run_doc_server.step);
@@ -514,24 +515,4 @@ fn cluaCFlags(target: std.Build.ResolvedTarget) []const []const u8 {
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ "-std=gnu99", "-DLUA_USE_POSIX" },
         else => &.{"-std=gnu99"},
     };
-}
-
-fn exampleMatches(example: EmbeddingExample, filter: []const u8) bool {
-    if (std.mem.eql(u8, filter, example.key)) return true;
-    if (std.mem.eql(u8, filter, example.name)) return true;
-    if (std.mem.eql(u8, filter, example.path)) return true;
-
-    const basename = std.fs.path.basename(example.path);
-    if (std.mem.eql(u8, filter, basename)) return true;
-    if (std.mem.endsWith(u8, basename, ".zig")) {
-        return std.mem.eql(u8, filter, basename[0 .. basename.len - ".zig".len]);
-    }
-    return false;
-}
-
-fn exampleMatchesAny(example: EmbeddingExample, filters: []const []const u8) bool {
-    for (filters) |filter| {
-        if (exampleMatches(example, filter)) return true;
-    }
-    return false;
 }

@@ -22,6 +22,7 @@ jobs:
         uses: https://codeberg.org/mlugg/setup-zig@v2.2.1
         with:
           use-cache: false
+          version: 0.17.0
 
       - name: Show Zig version
         run: zig version
@@ -33,4 +34,4 @@ jobs:
           key: ${{ runner.os }}-lua-5.5.0-${{ hashFiles('tools/fetch-lua.sh') }}
 
       - name: Build and test
-        run: zig build ci
+        run: zig build -j2 ci

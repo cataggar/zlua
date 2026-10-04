@@ -4,7 +4,7 @@ zlua is compatibility-driven. When Lua-visible behavior is in question, use the 
 
 ## Setup
 
-Use Zig `0.16.0`.
+Use Zig `0.17.0`.
 
 ```sh
 zig version

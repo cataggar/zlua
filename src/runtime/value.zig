@@ -138,7 +138,7 @@ fn hashPointer(tag: u8, pointer: anytype) u64 {
 }
 
 fn hashEnum(tag: u8, value: anytype) u64 {
-    const integer = @intFromEnum(value);
+    const integer = @backingInt(value);
     return std.hash.Wyhash.hash(hashTag(tag), std.mem.asBytes(&integer));
 }
 

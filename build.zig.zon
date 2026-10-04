@@ -2,11 +2,11 @@
     .name = .zlua,
     .version = "0.3.1",
     .fingerprint = 0xcf671dd1c69d54b,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zerde = .{
-            .url = "git+https://github.com/cataggar/zerde?ref=v0.3.1#58dd9aa671d093f69bc79500d8d7ccd6ad855ce9",
-            .hash = "zerde-0.3.1-r7zGa2_XDADfC1aXOf3DN-fLExdmoa37OLQF6egw8_FT",
+            .url = "git+https://github.com/cataggar/zerde#48d215aab4d351c199dd4f164c2926f433c7f296",
+            .hash = "zerde-0.3.1-r7zGa1fnDABoOl0E1S4iXOE4C-sBPoqG7kkJYszzvRiB",
         },
     },
     .paths = .{

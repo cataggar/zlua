@@ -2,7 +2,8 @@
 
 zlua is a source-compatible Lua 5.5 implementation written in Zig. It is built for hosts that want an embeddable Lua runtime with explicit capabilities, while still providing the familiar command-line interpreter, standard libraries, and Lua C API compatibility layer.
 
-The project targets Zig `0.16.0`.
+The project targets Zig `0.17.0`. The `zig016-miz-compat` compatibility branch
+preserves the miz-pinned Lua filesystem semantics while migrating the toolchain.
 
 ## Project Status
 
