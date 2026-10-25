@@ -21,9 +21,9 @@ jobs:
       # The install composite uses GitHub's $/ self-reference, so bootstrap
       # with its standalone action on Forgejo.
       - name: Set up ghr
-        uses: https://github.com/cataggar/ghr/actions/setup@c4be68b52d67d7acd2a7fe6c1e5f126e1754176e # v0.8.1
+        uses: https://github.com/cataggar/ghr/actions/setup@a3be8c61b9d5c2bd6d38e6d067c69d70434a6db9 # v0.9.1
         with:
-          ghr-version: v0.8.1
+          ghr-version: v0.9.1
           cache: 'false'
 
       - name: Install Zig via ghr
